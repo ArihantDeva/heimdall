@@ -75,7 +75,7 @@ local-first semantic memory daemon (SQLite + embeddings + graph edges).
   graph edges, keyword dedup, and a local embedding model (bge-m3). All credit
   for the *storage + ranking* engine goes to Graft — we deliberately did **not**
   reimplement a vector store. (Project: [tinygrad/graft](https://github.com/tinygrad/graft),
-  local-first, MIT-adjacent, runs entirely on-device.)
+  local-first, **Apache 2.0**, runs entirely on-device.)
 - **Heimdall** contributes the *orchestration*: watching agent sessions,
   keeping the graph fresh, verifying every hit, guarding against grep-habit,
   and orienting the agent at session start.
