@@ -1,0 +1,16 @@
+# local runtime state
+*.log
+.graft/
+knowledge-base/
+.inventory.tsv
+telemetry.tsv
+
+# node
+node_modules/
+*.tsbuildinfo
+
+# subagent artifacts
+.pi-subagents/
+
+# macOS
+.DS_Store

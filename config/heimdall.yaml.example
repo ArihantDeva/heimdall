@@ -1,0 +1,33 @@
+# heimdall config — example for the semantic-memory backend (Graft).
+# Copy to ~/.graft/config.yaml and adjust paths for your machine.
+daemon:
+  socket_path: "/tmp/graft-default.sock"
+  db_path: "/PATH/TO/graft.db"   # e.g. ~/.graft/profiles/default/graft.db
+embedding:
+  model_path: "/PATH/TO/bge-m3.gguf"   # local embedding model (Graft)
+  threads: 2
+  ctx_size: 8192
+  instances: 1
+  hardware_accel: false
+verification:
+  cross_encoder_enabled: false
+  cross_encoder_model_path: "/PATH/TO/bge-reranker-v2-m3.gguf"
+  nli_enabled: false
+  nli_prompt_template: "Premise: {document}\nHypothesis: {query}"
+  lex_strong_min_vec: 0.7
+  sem_strong_min_vec: 0.75
+  sem_strong_lex_margin: 0.015
+  use_fused_gate: true
+  strong_min_fused: 0.62
+  weak_min_fused: 0.42
+cache:
+  strong_hit_min_ce: 0.6
+  strong_hit_min_lex: 0.15
+  weak_hit_min_vec: 0.75
+  min_lex_overlap: 0.05
+retrieval:
+  top_k: 25
+  rrf_k_const: 60
+  query_fallback_top_k: 5
+rerank:
+  enabled: false
