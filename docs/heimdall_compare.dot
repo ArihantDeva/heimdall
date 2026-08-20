@@ -1,0 +1,39 @@
+digraph heimdall_compare {
+    rankdir=LR;
+    graph [fontname="Helvetica", fontsize=12, label="Agent memory: graphify vs Graft vs Heimdall", labelloc=t, pad=0.4, nodesep=0.6, ranksep=0.9, splines=true];
+    node [fontname="Helvetica", fontsize=10, shape=box, style="rounded,filled", fillcolor="#ffffff", color="#666666", penwidth=1.2];
+
+    subgraph cluster_graphify {
+        label="graphify  —  per-repo code graph";
+        style="rounded,filled"; fillcolor="#eef7ff"; color="#4a90d9"; fontcolor="#4a90d9";
+        g_node [label="AST + semantic\nextraction (repo source)"];
+        g_graph [label="graphify-out/graph.json\n(networkx graph)"];
+        g_query [label="BFS / DFS walk\n(token budget)"];
+        g_node -> g_graph [label="build"];
+        g_graph -> g_query [label="query"];
+    }
+
+    subgraph cluster_graft {
+        label="Graft  —  semantic memory daemon (Apache 2.0)";
+        style="rounded,filled"; fillcolor="#f0fff0"; color="#3d9a3d"; fontcolor="#3d9a3d";
+        gr_store [label="SQLite + local embeddings\n(bge-m3) + graph edges"];
+        gr_rank [label="hybrid lexical + vector\nranked retrieval"];
+        gr_cache [label="verified semantic cache"];
+        gr_store -> gr_rank;
+        gr_store -> gr_cache [dir=none];
+    }
+
+    subgraph cluster_heimdall {
+        label="Heimdall  —  agent memory layer (MIT)";
+        style="rounded,filled"; fillcolor="#fff4e6"; color="#d97706"; fontcolor="#d97706";
+        h_watch [label="kb-autosync\nsession watcher"];
+        h_verify [label="kb_search_verify\ntrust verdicts\nSTRONG / WEAK / STALE / REBUILT"];
+        h_walk [label="graph walk\n(related work)"];
+        h_guard [label="kb-search-guard\ngrep-habit guard"];
+        h_watch -> h_verify;
+        h_verify -> h_walk;
+    }
+
+    gr_rank -> h_verify [label="hybrid ranked hits", style=dashed, color="#3d9a3d", constraint=false];
+    g_query -> h_walk [label="complementary:\ncode map", style=dotted, color="#4a90d9", constraint=false];
+}
