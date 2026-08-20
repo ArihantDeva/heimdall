@@ -35,6 +35,7 @@ lack of storage but from lack of *retrieval with trust*.
 | **Stale pruning** | `bin/kb-stale-scan.py`, `bin/kb-rehome.sh` | dead anchors get rehomed (bounded basename search) or removed |
 | **Rebuild** | `bin/kb-rebuild.sh` | full graph rebuild with backup + parallel restore |
 | **Seed** | `bin/seed-graft.sh` | load inventory TSV into the store |
+| **Code-graph layer** | `vendor/graphify/` | per-repo AST+semantic code graph (vendored, MIT) |
 | **Agent tools** | `extensions/kb-tools.ts` | exposes `kb_search` / `kb_insert` / `kb_sync` as first-class agent tools |
 
 ## The trust verdict (the part nobody builds)
@@ -83,6 +84,18 @@ local-first semantic memory daemon (SQLite + embeddings + graph edges).
   degrades gracefully when it's absent — the scripts error with a clear
   "install the backend" message rather than crashing. Install Graft, point
   `bin/` at it via `$PATH`, done.
+
+### Graphify attribution
+
+- **[Graphify](https://github.com/safishamsi/graphify)** (MIT, © Safi Shamsi)
+  is vendored under `vendor/graphify/` as a default component: it provides the
+  per-repo code-graph layer (AST + semantic extraction → `graph.json` →
+  BFS/DFS query with token budget). All credit for the code-graph extraction
+  goes to graphify — we vendored it rather than reimplementing AST parsing.
+- It complements Graft (storage) and Heimdall (orchestration): graphify
+  answers *codebase* questions, Graft persists *notes/facts*, Heimdall ties
+  them together with trust verdicts. See `vendor/graphify/VENDORED.md` for
+  usage + update instructions.
 
 ## Install
 
