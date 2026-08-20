@@ -35,6 +35,7 @@ lack of storage but from lack of *retrieval with trust*.
 | **Stale pruning** | `bin/kb-stale-scan.py`, `bin/kb-rehome.sh` | dead anchors get rehomed (bounded basename search) or removed |
 | **Rebuild** | `bin/kb-rebuild.sh` | full graph rebuild with backup + parallel restore |
 | **Seed** | `bin/seed-graft.sh` | load inventory TSV into the store |
+| **Semantic-memory backend** | `vendor/graft/` | Graft source (Apache 2.0) — storage + hybrid ranked retrieval |
 | **Code-graph layer** | `vendor/graphify/` | per-repo AST+semantic code graph (vendored, MIT) |
 | **Agent tools** | `extensions/kb-tools.ts` | exposes `kb_search` / `kb_insert` / `kb_sync` as first-class agent tools |
 
@@ -77,6 +78,10 @@ local-first semantic memory daemon (SQLite + embeddings + graph edges).
   for the *storage + ranking* engine goes to Graft — we deliberately did **not**
   reimplement a vector store. (Project: [tinygrad/graft](https://github.com/tinygrad/graft),
   local-first, **Apache 2.0**, runs entirely on-device.)
+- **Graft's source is vendored** under `vendor/graft/` (Apache 2.0, source +
+  headers + CMake, build artifacts and `third_party/` deps excluded — see
+  `vendor/graft/VENDORED.md`). Build it per upstream instructions, put
+  `graft`/`graftd` on `$PATH`.
 - **Heimdall** contributes the *orchestration*: watching agent sessions,
   keeping the graph fresh, verifying every hit, guarding against grep-habit,
   and orienting the agent at session start.
