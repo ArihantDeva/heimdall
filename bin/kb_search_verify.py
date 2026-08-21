@@ -33,7 +33,7 @@ def get_node(id_hex):
             return {"body": "", "title": ""}
     try:
         out = subprocess.run(
-            ["graft", "get", id_hex], capture_output=True, text=True, timeout=15
+            [GRAFT, "get", id_hex], capture_output=True, text=True, timeout=15
         ).stdout
         return (json.loads(out).get("result") or {})
     except Exception:
@@ -42,6 +42,9 @@ def get_node(id_hex):
 
 HOME = os.path.expanduser("~")
 HOME_RE = re.compile(r"~?" + re.escape(HOME + "/") + r"[^\s\"]+")
+# graft via absolute path (env-overridable) — never PATH-resolved: a shadowed
+# graft binary could delete memory nodes from inside a search (supply-chain guard)
+GRAFT = os.environ.get("GRAFT", os.path.join(HOME, ".local", "bin", "graft"))
 
 
 def extract_paths(text):
@@ -124,7 +127,7 @@ def handle_stale(id_hex, title, path, body):
     except Exception:
         pass
     try:
-        subprocess.run(["graft", "delete", id_hex], capture_output=True, text=True, timeout=15)
+        subprocess.run([GRAFT, "delete", id_hex], capture_output=True, text=True, timeout=15)
         return "REMOVED", path
     except Exception:
         return "STALE", path

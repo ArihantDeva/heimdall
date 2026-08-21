@@ -11,6 +11,7 @@
     "extensions/",
     "types/",
     "vendor/",
+    "config/",
     "docs/adapters.md",
     "README.md",
     "LICENSE"

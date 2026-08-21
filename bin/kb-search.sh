@@ -32,17 +32,20 @@ done
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VERIFY="$SCRIPT_DIR/kb_search_verify.py"
 [ -f "$VERIFY" ] || VERIFY="$HOME/knowledge-base/kb_search_verify.py"
+# graft via absolute path (env-overridable) — never PATH-resolved (supply-chain guard)
+GRAFT="${GRAFT:-$HOME/.local/bin/graft}"
 
 print_results() {
+	[ -f "$VERIFY" ] || { echo "ERROR: verify script missing: $VERIFY"; exit 1; }
 	python3 "$VERIFY" "$1" "$2" "$SCOPE" "$N" "$Q"
 }
 
 echo "== retrieve (hybrid ranked): $Q"
-if ! command -v graft >/dev/null 2>&1; then
-	echo "ERROR: graft binary not found — knowledge gate blind. Install or fix PATH."
+if [ ! -x "$GRAFT" ]; then
+	echo "ERROR: graft binary not found at $GRAFT (set GRAFT=/path/to/graft). Install: see README."
 	exit 1
 fi
-R=$(graft retrieve "$Q" --top-k 12 2>/dev/null)
+R=$("$GRAFT" retrieve "$Q" --top-k 12 2>/dev/null)
 if [ -z "$R" ] || ! printf '%s' "$R" | grep -q '"status": 0'; then
 	echo "ERROR: graft daemon unreachable — knowledge gate blind (start graftd)."
 	exit 1
@@ -51,6 +54,6 @@ print_results "$R" "top matches"
 
 if [ "$EXPLORE" = 1 ]; then
 	echo "== explore (graph walk): $Q"
-	E=$(graft explore "$Q" --depth 2 --beam 6 2>/dev/null)
+	E=$("$GRAFT" explore "$Q" --depth 2 --beam 6 2>/dev/null)
 	print_results "$E" "related"
 fi

@@ -20,7 +20,7 @@ agent tools; `kb-autosync.ts` hooks tool results; `kb-orient.ts` injects
 prior work into session start). Copy them into `~/.pi/agent/extensions/`:
 
 ```
-cp <npm-root>/heimdall/extensions/kb-*.ts ~/.pi/agent/extensions/
+cp "$(npm root -g)/heimdall/extensions/"kb-*.ts ~/.pi/agent/extensions/
 ```
 
 The adapter README at `~/.heimdall/adapters/pi/README.md` repeats this.

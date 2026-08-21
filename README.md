@@ -26,10 +26,15 @@ Every search result is verified against reality before your agent sees it:
 An agent acting on a dead path is worse than no answer. Verdicts are what make
 the graph trustworthy enough to act on.
 
-## Quickstart (2 minutes)
+## Quickstart
 
 ```bash
 npm i -g heimdall
+
+# one-time: install the graft backend (local semantic-memory daemon)
+#   see https://github.com/tinygrad/graft — put the `graft` binary on PATH
+#   (e.g. ~/.local/bin/graft) and create ~/.graft/config.yaml:
+#   cp "$(npm root -g)/heimdall/config/heimdall.yaml.example" ~/.graft/config.yaml
 
 # wire it into your harness (pi | claude-code | codex | cursor | windsurf | all)
 heimdall init --harness claude-code
@@ -46,8 +51,8 @@ heimdall insert --title "poker jam_opt optimizer" \
   --keywords poker,optimize
 ```
 
-That's it. Your agent now starts every session knowing what you've already
-built — and knows which memories it can trust.
+`init`, `insert` and the harness wiring work immediately; `search` and
+`doctor` need the graft backend installed (one-time, ~2 minutes).
 
 ## Works with your harness
 

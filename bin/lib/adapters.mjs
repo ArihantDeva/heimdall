@@ -2,10 +2,9 @@
 // Each writer installs the smallest config that makes heimdall usable:
 // a search/insert instruction + (where hooks exist) an edit-log sync hook.
 import { join } from "node:path";
-import { mkdirSync, copyFileSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 
-const ROOT = join(new URL("../..", import.meta.url).pathname);
 const HOME = () => os.homedir();
 
 const SEARCH_SNIPPET = `## Heimdall knowledge search
@@ -39,7 +38,7 @@ function writeClaudeCode(home) {
   }
   settings.hooks = settings.hooks || {};
   settings.hooks.PostToolUse = settings.hooks.PostToolUse || [];
-  const hookCmd = "heimdall-sync-edits || true";
+  const hookCmd = `bash "$(npm root -g 2>/dev/null || echo .)/heimdall/bin/sync-edits.sh" 2>/dev/null || heimdall-sync-edits 2>/dev/null || true`;
   if (!settings.hooks.PostToolUse.some((h) => JSON.stringify(h).includes("heimdall"))) {
     settings.hooks.PostToolUse.push({
       matcher: "Write|Edit",

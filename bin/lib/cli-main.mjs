@@ -17,7 +17,7 @@ const USAGE = `usage: heimdall <command>
 `;
 
 const sh = (script, args) =>
-  spawnSync("bash", [script, ...args], { stdio: "inherit" }).status ?? 1;
+  spawnSync("/bin/bash", [script, ...args], { stdio: "inherit" }).status ?? 1;
 
 function runSearch(args) {
   return sh(BIN("kb-search.sh"), args);
