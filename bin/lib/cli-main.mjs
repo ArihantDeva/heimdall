@@ -58,6 +58,8 @@ function writeConfig(harness) {
   writeFileSync(configPath(), JSON.stringify(cfg, null, 2) + "\n");
 }
 
+import { installAdapter } from "./adapters.mjs";
+
 function runInit(args) {
   const i = args.indexOf("--harness");
   const harness = i >= 0 ? args[i + 1] : "pi";
@@ -68,11 +70,13 @@ function runInit(args) {
   }
   const existed = existsSync(configPath());
   writeConfig(harness);
+  const installed = installAdapter(harness);
   console.log(
     existed
       ? `ok: config already present, harness set to ${harness}`
       : `ok: wrote ${configPath()} (harness: ${harness})`,
   );
+  console.log(`adapter: ${JSON.stringify(installed)}`);
   console.log("backend: graft (vendored in package; daemon starts on first use)");
   return 0;
 }
