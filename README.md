@@ -106,9 +106,17 @@ the vendored reference.
 ## Testing
 
 ```bash
-npm test          # 22 tests: CLI, init idempotency, adapters, trust verdicts, guard
+npm test          # 23 tests: CLI, init idempotency, adapters, trust verdicts, guard
 npx tsc --noEmit  # typecheck
 ```
+
+## Status
+
+v0.1.0 — npm-published-ready. Packaged CLI, five harness adapters,
+content-aware trust verdicts, and a fresh-install-verified quickstart.
+Reviewed by three adversarial passes (GLM-5.2 ×2 + Nemotron-550B) before
+release; 19 fixes landed from review. Backend (Graft) is a separate install
+— see Quickstart.
 
 ## License
 
