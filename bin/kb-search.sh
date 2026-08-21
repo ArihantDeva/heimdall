@@ -28,8 +28,13 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
+# Verify script ships with the heimdall package; KB copy is a legacy fallback.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+VERIFY="$SCRIPT_DIR/kb_search_verify.py"
+[ -f "$VERIFY" ] || VERIFY="$HOME/knowledge-base/kb_search_verify.py"
+
 print_results() {
-	python3 "$HOME/knowledge-base/kb_search_verify.py" "$1" "$2" "$SCOPE" "$N" "$Q"
+	python3 "$VERIFY" "$1" "$2" "$SCOPE" "$N" "$Q"
 }
 
 echo "== retrieve (hybrid ranked): $Q"

@@ -16,14 +16,20 @@ ok() { [ "$VERBOSE" = 1 ] && echo "ok: $1"; }
 #    (shows as an extra "holder"). The storm symptom is always a hung CLI.
 if timeout 10 "$GRAFT" stats >/dev/null 2>&1; then
   ok "graft stats responsive"
+elif [ ! -x "$GRAFT" ]; then
+  echo "SETUP NEEDED: graft binary not found at $GRAFT."
+  echo "  Install: see https://github.com/tinygrad/graft (or set GRAFT=/path/to/graft)."
+  echo "  Then re-run: heimdall init"
+  exit 1
 else
-  echo "WARN: graft stats unresponsive — killing all graftd, letting launchd KeepAlive respawn one"
-  pkill -f "graftd --config"; sleep 10
+  echo "WARN: graft stats unresponsive — restarting daemon"
+  pkill -f "graftd --config" 2>/dev/null; sleep 5
+  nohup "$GRAFT"d --config "${GRAFT_CONFIG:-$HOME/.graft/config.yaml}" > "${HOME}/.graft/graftd.log" 2>&1 &
+  sleep 8
   if ! timeout 10 "$GRAFT" stats >/dev/null 2>&1; then
-    echo "WARN: still down — kickstarting launchd job"
-    launchctl kickstart -k gui/$(id -u)/com.graft.daemon 2>/dev/null || { nohup "$GRAFT"d --config "$HOME/.graft/config.yaml" > "$HOME/.graft/graftd.log" 2>&1 & }
-    sleep 8
-    timeout 10 "$GRAFT" stats >/dev/null 2>&1 || fail "graft stats (daemon unreachable)"
+    echo "FAIL: graft daemon unreachable after restart. Log: $HOME/.graft/graftd.log"
+    echo "  First-time setup: cp <package>/config/heimdall.yaml.example ~/.graft/config.yaml"
+    exit 1
   fi
 fi
 
