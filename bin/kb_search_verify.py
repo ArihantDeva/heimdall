@@ -22,6 +22,15 @@ def toks(s):
 
 
 def get_node(id_hex):
+    # selftest:<path> ids bypass the daemon: body is read straight from disk so
+    # content-aware verdicts are testable without graft running.
+    if id_hex.startswith("selftest:"):
+        path = id_hex[len("selftest:"):].rsplit(":", 1)[0]
+        try:
+            with open(path, "r", errors="replace") as f:
+                return {"body": f.read(262144), "title": os.path.basename(path)}
+        except Exception:
+            return {"body": "", "title": ""}
     try:
         out = subprocess.run(
             ["graft", "get", id_hex], capture_output=True, text=True, timeout=15
@@ -121,6 +130,25 @@ def handle_stale(id_hex, title, path, body):
         return "STALE", path
 
 
+def content_score(path, query_tokens):
+    """Lexical coverage of query tokens against the anchored file's content.
+    None = cannot read (binary/missing/oversized) -> fall back to path+body
+    verdict only. Caps read at 256KB."""
+    if not path or not query_tokens:
+        return None
+    try:
+        if os.path.getsize(path) > 262144:
+            return None
+        with open(path, "rb") as f:
+            raw = f.read(262144)
+        if b"\x00" in raw[:1024]:
+            return None
+        text = raw.decode("utf-8", errors="replace").lower()
+        return sum(1 for t in query_tokens if t in text) / len(query_tokens)
+    except OSError:
+        return None
+
+
 def main():
     try:
         r_ = json.loads(sys.argv[1]).get("result") or {}
@@ -158,10 +186,15 @@ def main():
         hay = (title + " " + body).lower()
         cov = (sum(1 for t in qt if t in hay) / len(qt)) if qt else 0.0
         paths = extract_paths(body or title)
+        # selftest ids anchor the path explicitly — trust it over prose extraction
+        if (r.get("id_hex") or "").startswith("selftest:"):
+            paths = [r["id_hex"][len("selftest:"):].rsplit(":", 1)[0]]
         alive = [p for p in paths if os.path.exists(p)]
         path = alive[0] if alive else (paths[0] if paths else "")
         if alive:
-            verdict = "STRONG" if cov >= 0.5 else "WEAK"
+            cs = content_score(path, qt)
+            eff = cs if cs is not None else cov
+            verdict = "STRONG" if eff >= 0.5 else "WEAK"
         elif paths:
             verdict = "STALE"
         else:
@@ -174,7 +207,7 @@ def main():
         # similarity; cov/verdict is a trust label, not a relevance ranking). Verdict
         # only breaks ties. This keeps the true STRONG hit on top instead of burying
         # it under a junk node whose tokens happen to lexically overlap.
-        rows.append((-(r.get("score") or 0), vrank, verdict, cov, path, title))
+        rows.append((-(r.get("score") or 0), vrank, verdict, cov, path, title, cs if alive else None))
 
     # dedupe by path — prefer the non-auto-sync ("edited") node for the same path
     seen = {}
@@ -187,9 +220,10 @@ def main():
     rows = sorted(seen.values(), key=lambda x: (x[0], x[1]))[:N]
 
     print("  [%s — verified: STRONG=lex+path, REBUILT=path moved+node rebuilt, WEAK=semantic-only, STALE=path gone (auto-removed), REMOVED=deleted just now]" % label)
-    for i, (vrank, nsc, verdict, cov, path, title) in enumerate(rows):
+    for i, (vrank, nsc, verdict, cov, path, title, cs) in enumerate(rows):
         p = ("  " + path) if path else ""
-        print("  %2d. [%-6s] cov%02d%%  %s — %s" % (i + 1, verdict, int(cov * 100), p, title))
+        cs_s = " content:%d%%" % int(cs * 100) if cs is not None else ""
+        print("  %2d. [%-6s] cov%02d%%%s  %s — %s" % (i + 1, verdict, int(cov * 100), cs_s, p, title))
 
 
 if __name__ == "__main__":
