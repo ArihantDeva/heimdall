@@ -4,8 +4,19 @@
  * Backends: ~/knowledge-base/kb-search.sh, graft CLI, sync-edits.sh.
  */
 import { execFile } from "node:child_process";
+import { dirname, join } from "node:path";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+
+// Scripts ship inside this package; legacy ~/knowledge-base copies are fallback.
+const PKG_BIN = join(dirname(fileURLToPath(import.meta.url)), "..", "bin");
+const kbScript = (name: string): string => {
+	const pkg = join(PKG_BIN, name);
+	if (existsSync(pkg)) return pkg;
+	return join(process.env.HOME ?? "", "knowledge-base", name);
+};
 
 const run = (cmd: string, args: string[], signal?: AbortSignal): Promise<{ ok: boolean; text: string }> =>
 	new Promise((resolve) => {
@@ -40,7 +51,7 @@ export default function kbToolsExtension(pi: ExtensionAPI): void {
 			const args = [params.query, "-n", String(params.n ?? 6)];
 			if (params.scope) args.push("--scope", params.scope);
 			if (params.explore) args.push("--explore");
-			const { ok, text } = await run("bash", [process.env.HOME + "/knowledge-base/kb-search.sh", ...args], signal);
+			const { ok, text } = await run("bash", [kbScript("kb-search.sh"), ...args], signal);
 			return { content: [{ type: "text", text }], details: { ok } };
 		},
 	});
@@ -74,7 +85,7 @@ export default function kbToolsExtension(pi: ExtensionAPI): void {
 		promptSnippet: "Refresh knowledge index from session edit logs",
 		parameters: Type.Object({}),
 		async execute() {
-			const { ok, text } = await run("bash", [process.env.HOME + "/knowledge-base/sync-edits.sh"]);
+			const { ok, text } = await run("bash", [kbScript("sync-edits.sh")]);
 			return { content: [{ type: "text", text }], details: { ok } };
 		},
 	});

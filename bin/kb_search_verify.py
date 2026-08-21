@@ -198,6 +198,8 @@ def main():
         if alive:
             cs = content_score(path, qt)
             eff = cs if cs is not None else cov
+            # 0.5 threshold: heuristic, uncalibrated — half the query tokens must
+            # appear in file content. Tune only with a labeled hit set.
             verdict = "STRONG" if eff >= 0.5 else "WEAK"
         elif paths:
             verdict = "STALE"

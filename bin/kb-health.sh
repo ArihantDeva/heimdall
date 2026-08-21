@@ -24,11 +24,17 @@ elif [ ! -x "$GRAFT" ]; then
 else
   echo "WARN: graft stats unresponsive — restarting daemon"
   pkill -f "graftd --config" 2>/dev/null; sleep 5
-  nohup "$GRAFT"d --config "${GRAFT_CONFIG:-$HOME/.graft/config.yaml}" > "${HOME}/.graft/graftd.log" 2>&1 &
+  # Prefer the launchd-managed job (avoids orphaned daemons fighting KeepAlive);
+  # nohup only as Linux/no-launchd fallback.
+  if launchctl print "gui/$(id -u)/com.graft.daemon" >/dev/null 2>&1; then
+    launchctl kickstart -k "gui/$(id -u)/com.graft.daemon" 2>/dev/null || true
+  else
+    nohup "$GRAFT"d --config "${GRAFT_CONFIG:-$HOME/.graft/config.yaml}" > "${HOME}/.graft/graftd.log" 2>&1 &
+  fi
   sleep 8
   if ! timeout 10 "$GRAFT" stats >/dev/null 2>&1; then
     echo "FAIL: graft daemon unreachable after restart. Log: $HOME/.graft/graftd.log"
-    echo "  First-time setup: cp <package>/config/heimdall.yaml.example ~/.graft/config.yaml"
+    echo "  First-time setup: cp \"\$(npm root -g)/heimdall/config/heimdall.yaml.example\" ~/.graft/config.yaml"
     exit 1
   fi
 fi

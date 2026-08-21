@@ -29,12 +29,14 @@ while [ $# -gt 0 ]; do
 done
 
 # Verify script ships with the heimdall package; KB copy is a legacy fallback.
-# readlink -P resolves symlinked global-npm bins; -P gives the physical dir.
-SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+# Resolve symlinks portably: readlink -f is GNU-only; macOS falls back to
+# python3 os.path.realpath (python3 is a hard dep of this package anyway).
+SELF="$(readlink -f "$0" 2>/dev/null || python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$0" 2>/dev/null || echo "$0")"
 SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd -P)"
 VERIFY="$SCRIPT_DIR/kb_search_verify.py"
 [ -f "$VERIFY" ] || VERIFY="$HOME/knowledge-base/kb_search_verify.py"
-# graft via absolute path (env-overridable) — never PATH-resolved (supply-chain guard)
+# graft via absolute path (env-overridable) — never PATH-resolved (supply-chain guard).
+# GRAFT must be absolute; relative values resolve against the caller's cwd.
 GRAFT="${GRAFT:-$HOME/.local/bin/graft}"
 
 print_results() {

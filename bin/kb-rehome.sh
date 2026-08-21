@@ -10,7 +10,8 @@
 #   to avoid re-running the expensive Desktop scan per node.
 # Prints: REBUILT <newpath> | NOTFOUND | AMBIGUOUS
 set -u
-# graft via absolute path (env-overridable) — never PATH-resolved (supply-chain guard)
+# graft via absolute path (env-overridable) — never PATH-resolved (supply-chain guard).
+# Callers use "$GRAFT" directly; the wrapper is kept for the existing call sites.
 GRAFT="${GRAFT:-$HOME/.local/bin/graft}"
 graft() { "$GRAFT" "$@"; }
 ID="${1:?kb-rehome.sh <id> <dead_path> <title> <body_file> [hits_cache]}"

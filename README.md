@@ -52,7 +52,9 @@ heimdall insert --title "poker jam_opt optimizer" \
 ```
 
 `init`, `insert` and the harness wiring work immediately; `search` and
-`doctor` need the graft backend installed (one-time, ~2 minutes).
+`doctor` need the graft backend installed separately (build from source —
+embedding model download included, so not instant). The vendored `vendor/graft/`
+is source + attribution, not a prebuilt binary.
 
 ## Works with your harness
 

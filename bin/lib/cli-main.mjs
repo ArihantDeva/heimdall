@@ -85,7 +85,9 @@ function runInit(args) {
       : `ok: wrote ${configPath()} (harness: ${harness})`,
   );
   console.log(`adapter: ${JSON.stringify(installed)}`);
-  console.log("backend: graft (vendored in package; daemon starts on first use)");
+  console.log(
+    "backend: graft — binary NOT auto-installed. See https://github.com/tinygrad/graft, then: heimdall doctor",
+  );
   return 0;
 }
 
