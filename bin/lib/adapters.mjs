@@ -39,17 +39,20 @@ function writeClaudeCode(home) {
   }
   settings.hooks = settings.hooks || {};
   settings.hooks.PostToolUse = settings.hooks.PostToolUse || [];
-  // Resolve the sync script ONCE at init (npm root -g is slow and can differ
-  // inside hook shells); fall back to a PATH shim if the package moves.
-  let syncScript = "";
+  // The hook is a hint emitter, nothing more: it appends one line and exits.
+  // It must never write the graph — only the reconciler holds the lock — and it
+  // must never be slow enough to be felt, since it runs after every edit.
+  // Resolve the CLI ONCE at init (npm root -g is slow and can differ inside
+  // hook shells); fall back to a PATH shim if the package moves.
+  let cli = "";
   try {
     const root = execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim();
-    const candidate = join(root, "heimdall", "bin", "sync-edits.sh");
-    if (existsSync(candidate)) syncScript = candidate;
+    const candidate = join(root, "heimdall", "bin", "heimdall.js");
+    if (existsSync(candidate)) cli = candidate;
   } catch { /* npm missing -> leave empty, fall through to shim */ }
-  const hookCmd = syncScript
-    ? `bash '${syncScript}' 2>/dev/null || true`
-    : "heimdall-sync-edits 2>/dev/null || true";
+  const hookCmd = cli
+    ? `node '${cli}' hint --stdin 2>/dev/null || true`
+    : "heimdall hint --stdin 2>/dev/null || true";
   if (!settings.hooks.PostToolUse.some((h) => JSON.stringify(h).includes("heimdall"))) {
     settings.hooks.PostToolUse.push({
       matcher: "Write|Edit",

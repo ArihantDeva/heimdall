@@ -1,8 +1,8 @@
 {
   "name": "heimdall",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Verified, self-healing knowledge layer for AI coding agents (orchestration over Graft-style semantic memory backends)",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "bin": {
     "heimdall": "bin/heimdall.js"
   },
@@ -17,7 +17,7 @@
     "LICENSE"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22.5"
   },
   "type": "module",
   "scripts": {

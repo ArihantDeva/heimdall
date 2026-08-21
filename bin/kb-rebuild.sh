@@ -10,6 +10,10 @@
 set -u
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 KB="$HOME/knowledge-base"
+# Sibling scripts live next to THIS file, wherever the package was installed.
+# Resolving them through $KB only worked on the author's machine, and silently
+# ran a different copy anywhere else.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DB="$HOME/.graft/profiles/default/graft.db"
 TS=$(date +%Y%m%d-%H%M%S)
 BK="$KB/backups"
@@ -125,11 +129,11 @@ print(f"   restored {ok} nodes ({fail} failed) in parallel")
 EOF
 
 echo "== 4/6 re-seed inventory + full-history edit sync"
-bash "$KB/seed-graft.sh" 2>&1 | tail -1
-bash "$KB/sync-edits.sh" --full 2>&1 | tail -1
+bash "$HERE/seed-graft.sh" 2>&1 | tail -1
+bash "$HERE/sync-edits.sh" --full 2>&1 | tail -1
 
 echo "== 5/6 stale prune"
-python3 "$KB/kb-stale-scan.py" 2>&1 | tail -1
+python3 "$HERE/kb-stale-scan.py" 2>&1 | tail -1
 
 echo "== 6/6 verify"
 ~/.local/bin/graft stats 2>/dev/null | python3 -c "import json,sys; r=json.load(sys.stdin)['result']; print('   nodes:', r['n_nodes'], '| edges:', r['n_edges'], '| keywords:', r['n_keywords'])"

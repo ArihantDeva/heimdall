@@ -69,7 +69,7 @@ export default function kbToolsExtension(pi: ExtensionAPI): void {
 			body: Type.String({ description: "Path + what/why, tested-on details" }),
 			keywords: Type.Array(Type.String({ description: "Search keywords" })),
 		}),
-		async execute(_id, params, signal) {
+		async execute(_id, params, _signal) {
 			const args = ["insert", "--title", params.title, "--body", params.body];
 			for (const k of params.keywords ?? []) args.push("--keyword", k);
 			const { ok, text } = await run("graft", args);
@@ -81,7 +81,7 @@ export default function kbToolsExtension(pi: ExtensionAPI): void {
 		name: "kb_sync",
 		label: "Knowledge Sync",
 		description:
-			"Refresh the knowledge index from agent session edit logs (incremental, cheap): reads write/edit tool-call paths since the last sync, updates .inventory.tsv, and replaces graft nodes for edited files. Run after working sessions or before significant new work.",
+			"Converge the knowledge graph with the filesystem (incremental, cheap): replays write/edit tool-call paths since the last sync into the reconciler queue, then reconciles. The reconciler re-reads each file from disk, so a duplicate or wrong path costs a stat and cannot corrupt the graph.",
 		promptSnippet: "Refresh knowledge index from session edit logs",
 		parameters: Type.Object({}),
 		async execute() {

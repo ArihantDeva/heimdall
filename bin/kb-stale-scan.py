@@ -12,7 +12,10 @@ kb_search_verify.py so scan and search agree on what counts as stale.
 """
 import os, sqlite3, subprocess, sys, tempfile, time
 
-sys.path.insert(0, os.path.expanduser("~/knowledge-base"))
+# kb_search_verify lives beside this script. It used to be imported from
+# ~/knowledge-base, which only worked on the author's machine and silently
+# imported a DIFFERENT copy when one happened to be there.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from kb_search_verify import extract_paths  # noqa: E402 — same path logic as search
 
 KB = os.path.expanduser("~/knowledge-base")

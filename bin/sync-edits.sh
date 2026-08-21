@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
-# sync-edits.sh — refresh graft index + inventory from agent session edit logs.
-# Scans pi session .jsonl newer than last sync, extracts write/edit/hashline_edit
-# paths, filters to indexed project roots, then per path: ensure tsv row,
-# delete stale graft node (same path), insert fresh "edited <date>" node.
-# Usage: bash ~/knowledge-base/sync-edits.sh [--dry-run]
+# sync-edits.sh — one-shot bootstrap: replay agent session edit logs into the
+# reconciler queue.
+#
+# This script used to write graft directly (delete node, insert node) for every
+# path it found. That made it a SECOND concurrent writer alongside the daemon,
+# and its delete+insert pair was not atomic: a reader between the two saw the
+# file missing from the graph entirely, and two copies of this script running
+# at once could interleave into duplicate or lost nodes.
+#
+# It now emits hints and asks the reconciler to converge. The reconciler holds
+# the single-writer lock, reads each file from disk, and makes the graph match.
+# Whatever this script gets wrong — a path that was never edited, a path listed
+# twice, a stale log entry — costs one stat and nothing more.
+#
+# Usage: bash sync-edits.sh [--dry-run] [--full]
 set -u
-KB="$HOME/knowledge-base"
-TSV="$KB/.inventory.tsv"
 STATE="$HOME/.graft/.last-sync"
 DRY=0; FULL=0
 for a in "$@"; do
@@ -14,19 +22,27 @@ for a in "$@"; do
   [ "$a" = "--full" ] && FULL=1
 done
 
-now_s() { date +%s; }
-fmt() { date -r "$1" +%Y-%m-%d 2>/dev/null || date -d "@$1" +%Y-%m-%d; }
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HEIMDALL="$HERE/heimdall.js"
+if [ ! -f "$HEIMDALL" ]; then
+  echo "ERROR: heimdall.js not found next to sync-edits.sh ($HERE)" >&2
+  exit 1
+fi
+heimdall() { node "$HEIMDALL" "$@"; }
 
-SINCE=0; [ -f "$STATE" ] && SINCE=$(cat "$STATE")
-[ "$SINCE" = 0 ] && SINCE=$(( $(now_s) - 7*86400 ))
+SESSIONS="$HOME/.pi/agent/sessions"
+if [ ! -d "$SESSIONS" ]; then
+  echo "sync: no session logs at $SESSIONS — nothing to replay"
+  exit 0
+fi
+
+SINCE=0; [ -f "$STATE" ] && SINCE=$(cat "$STATE" 2>/dev/null || echo 0)
+[ "$SINCE" = 0 ] && SINCE=$(( $(date +%s) - 7*86400 ))
 REF=$(mktemp); touch -t "$(date -r "$SINCE" +%Y%m%d%H%M.%S)" "$REF" 2>/dev/null
 
-NEWER="-newer $REF"
-[ "$FULL" = 1 ] && NEWER=""
-
-extract_paths() {
-  if [ "$FULL" = 1 ]; then
-    find "$HOME/.pi/agent/sessions" -name '*.jsonl' -print0 2>/dev/null | xargs -0 python3 -c '
+# One parser, used for both modes — the two copies that used to differ only in
+# the find predicate had already drifted apart once.
+read -r -d '' PARSE <<'PY' || true
 import json, os, sys
 for f in sys.argv[1:]:
     try: fh = open(f, errors="ignore")
@@ -43,101 +59,34 @@ for f in sys.argv[1:]:
                 if not p: continue
                 p = p if os.path.isabs(p) else os.path.join(cwd or "", p)
                 print(os.path.expanduser(p))
-' 2>/dev/null | sort -u
-  else
-    find "$HOME/.pi/agent/sessions" -name '*.jsonl' -newer "$REF" -print0 2>/dev/null | xargs -0 python3 -c '
-import json, os, sys
-for f in sys.argv[1:]:
-    try: fh = open(f, errors="ignore")
-    except OSError: continue
-    cwd = None
-    for line in fh:
-        try: e = json.loads(line)
-        except Exception: continue
-        if e.get("type") == "session" and e.get("cwd"): cwd = e["cwd"]
-        for c in (e.get("message") or {}).get("content") or []:
-            if not isinstance(c, dict): continue
-            if c.get("type") == "toolCall" and c.get("name") in ("write","edit","hashline_edit"):
-                p = (c.get("arguments") or {}).get("path")
-                if not p: continue
-                p = p if os.path.isabs(p) else os.path.join(cwd or "", p)
-                print(os.path.expanduser(p))
-' 2>/dev/null | sort -u
-  fi
-}
+PY
 
-in_skip() {
-  case "$1" in
-    /tmp/*|/private/tmp/*) return 0 ;;
-    "$HOME"/.*) return 0 ;;
-    "$HOME"/.pi/*|"$HOME"/.local/*|"$HOME"/.graft/*|"$HOME"/Library/*) return 0 ;;
-    "$HOME"/knowledge-base/*|"$HOME"/Desktop/Archives/*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
+LIST=$(mktemp)
+if [ "$FULL" = 1 ]; then
+  find "$SESSIONS" -name '*.jsonl' -print0 2>/dev/null
+else
+  find "$SESSIONS" -name '*.jsonl' -newer "$REF" -print0 2>/dev/null
+fi | xargs -0 python3 -c "$PARSE" 2>/dev/null | sort -u > "$LIST"
 
-# graft CLI auto-spawns a daemon when a connect times out under embedding load;
-# a spawned daemon can steal the socket (unlink+rebind) and orphan the launchd
-# one. Before each graft call, converge to exactly one socket holder.
-guard_daemon() {
-  if [ "$(lsof /tmp/graft-default.sock 2>/dev/null | awk 'NR>1{print $2}' | sort -u | wc -l | tr -d ' ')" -gt 1 ]; then
-    pkill -f "graftd --config" 2>/dev/null; sleep 10
-  fi
-}
-
-graft() {
-  guard_daemon
-  command graft "$@"
-}
-
-sync_path() {
-  local p="$1" rel id
-  [ -f "$p" ] || return 0
-  rel="${p#"$HOME"/}"
-  if ! grep -qF "$rel	" "$TSV"; then
-    if [ "$DRY" = 1 ]; then echo "tsv+ $rel"; else
-      echo -e "$rel	edited $(fmt $(now_s)) (auto-sync from agent edit log)	auto,edited" >> "$TSV"; fi
-  fi
-  # Deterministic lookup by exact title prefix — graft query top-1 is ambiguous
-  # when multiple nodes share a path (case variants, stale dupes). Escape LIKE
-  # wildcards (% _) in the rel path so a filename with _ doesn't match siblings.
-  escaped=$(python3 -c "import sys; print(sys.argv[1].replace('\\\\',r'\\\\').replace('%',r'\\%').replace('_',r'\\_').replace(\"'\",\"''\") + ' — edited %', end='')" "$rel")
-  id=$(sqlite3 "$HOME/.graft/profiles/default/graft.db" "SELECT hex(id) FROM nodes WHERE title LIKE '$escaped' ESCAPE '\\' LIMIT 1;" 2>/dev/null)
-  if [ -n "$id" ] && [ "$DRY" = 1 ]; then echo "node- $id ($rel)"; return 0; fi
-  if [ -n "$id" ]; then
-    # delete ALL auto nodes for this path (not just the first) — no dups survive
-    for x in $(sqlite3 "$HOME/.graft/profiles/default/graft.db" "SELECT hex(id) FROM nodes WHERE title LIKE '$escaped' ESCAPE '\\';" 2>/dev/null); do
-      graft delete "$x" >/dev/null 2>&1
-    done
-  fi
-  if [ "$DRY" = 1 ]; then echo "node+ $rel (edited $(fmt $(now_s)))"; else
-    if graft insert --title "$rel — edited $(fmt $(now_s))" \
-      --body "$p — auto-refreshed from agent edit log $(fmt $(now_s))" \
-      --keyword auto --keyword edited >/dev/null 2>&1; then
-      : # ok
-    else
-      echo "FAIL insert: $rel" >&2
-      return 1
-    fi
-  fi
-}
-
-if ! command -v graft >/dev/null 2>&1 || ! graft stats >/dev/null 2>&1; then
-	echo "ERROR: graft daemon unreachable — knowledge gate blind."
-	exit 1
+n=$(wc -l < "$LIST" | tr -d ' ')
+if [ "$DRY" = 1 ]; then
+  echo "sync: would hint $n path(s) (dry-run)"
+  sed -n '1,20p' "$LIST"
+  rm -f "$REF" "$LIST"
+  exit 0
 fi
-LIST=$(mktemp); extract_paths > "$LIST"
-n=0; fails=0
-while read -r p; do
-  in_skip "$p" && continue
-  case "$p" in *node_modules/*|*/.git/*|*/__pycache__/*|*/dist/*|*/build/*|*/.venv/*) continue ;; esac
-  if sync_path "$p"; then n=$((n+1)); else fails=$((fails+1)); fi
-done < "$LIST"
-[ "$DRY" = 1 ] || [ "$fails" -eq 0 ] || { rm -f "$REF" "$LIST"; exit 1; }
-[ "$DRY" = 1 ] || date -u +%s > "$STATE"
-# graft CLI auto-spawns a daemon when a connect times out under embedding load;
-# reconcile to exactly one socket holder (kb-health counts lsof, not pgrep).
-bash "$KB/kb-health.sh" >/dev/null 2>&1 || true
+
+if [ "$n" -gt 0 ]; then
+  # The reconciler applies its own skip rules and dedups by path, so passing a
+  # path it will ignore is free. xargs chunks so a huge --full run still works.
+  xargs -a "$LIST" -n 200 node "$HEIMDALL" hint || {
+    echo "ERROR: heimdall hint failed" >&2; rm -f "$REF" "$LIST"; exit 1; }
+fi
+
+# Converge now if no daemon holds the lock; if one does, it will pick the hints
+# up on its next pass and there is nothing to wait for.
+heimdall reconcile || true
+
+date -u +%s > "$STATE"
 rm -f "$REF" "$LIST"
-if [ "$DRY" = 1 ]; then echo "sync: $n edited paths processed (dry-run)"; else
-  echo "sync: $n edited paths processed, $fails failed"; fi
+echo "sync: $n edited path(s) hinted"

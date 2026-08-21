@@ -1,6 +1,6 @@
 // cli-main.mjs — heimdall CLI dispatch. Thin wrappers over existing scripts.
 import { execFileSync, spawnSync } from "node:child_process";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import os from "node:os";
@@ -14,6 +14,12 @@ const USAGE = `usage: heimdall <command>
   search "<query>" [-n N] [--scope S] [--no-explore]          ranked + verified knowledge search
   insert --title T --body B [--keywords k1,k2]                record reusable knowledge
   doctor                                                      daemon + index health check
+
+  daemon [--once] [--scan] [--dry-run]                        run the single-writer reconciler
+  reconcile [PATH ...] [--all]                                converge the graph now (holds the lock)
+  verify [--deep] [--json]                                    report drift; exit 1 if any. read-only
+  depth [PATH]                                                show requested/effective depth
+  hint PATH ... | hint --stdin                                mark paths dirty (no lock needed)
 `;
 
 const sh = (script, args) =>
@@ -91,10 +97,145 @@ function runInit(args) {
   return 0;
 }
 
+// ── self-healing surface ───────────────────────────────────────────────────
+// Every one of these goes through the same reconcile path the daemon uses.
+// There is deliberately no "update node X" command: the only way to change the
+// graph is to change a file and let the reconciler observe it.
+
+async function runDaemon(args) {
+  const { runDaemon: run } = await import("../heimdall-reconciler.mjs");
+  return run(args, { log: console.error });
+}
+
+async function runReconcile(args) {
+  const [{ Journal }, { Lock }, { drain, audit, skipPath }, { GraftSink, MemorySink },
+    { capability, journalPath, loadConfig, lockPath, queueHintPath }, { ingestHints }] =
+    await Promise.all([
+      import("./journal.mjs"), import("./lock.mjs"), import("./reconcile.mjs"),
+      import("./sink.mjs"), import("./depth.mjs"), import("./hints.mjs"),
+    ]);
+  const all = args.includes("--all");
+  const dry = args.includes("--dry-run");
+  const paths = args.filter((a) => !a.startsWith("--")).map((p) => resolve(process.cwd(), p));
+
+  const code = await Lock.withLock(lockPath(), () => {
+    const journal = new Journal(journalPath());
+    const ctx = {
+      journal, config: loadConfig(), cap: capability(),
+      sink: dry ? new MemorySink() : new GraftSink(),
+    };
+    try {
+      // Drain whatever hooks and scripts have hinted since the last pass. A
+      // one-shot run is the whole self-healing story on a machine with no
+      // daemon, so it must consume the same inbox the daemon does.
+      ingestHints(queueHintPath(), journal, { skip: (p) => skipPath(p, os.homedir()) });
+      if (all) audit(ctx, { deep: true });
+      for (const p of paths) {
+        if (skipPath(p, os.homedir())) { console.error(`skip ${p}`); continue; }
+        journal.enqueue(p, "cli");
+      }
+      let total = 0;
+      for (;;) {
+        const { processed } = drain(ctx);
+        if (!processed) break;
+        total += processed;
+      }
+      console.log(`reconciled ${total} path(s); ${JSON.stringify(journal.stats())}`);
+      return 0;
+    } finally {
+      journal.close();
+    }
+  });
+  if (code === null) {
+    console.error("another writer holds the reconciler lock (is the daemon running?)");
+    return 1;
+  }
+  return code;
+}
+
+async function runVerify(args) {
+  const [{ Journal }, { audit }, { MemorySink }, { capability, journalPath, loadConfig }] =
+    await Promise.all([
+      import("./journal.mjs"), import("./reconcile.mjs"),
+      import("./sink.mjs"), import("./depth.mjs"),
+    ]);
+  const journal = new Journal(journalPath());
+  try {
+    // Read-only: never enqueues, never writes the sink. Safe to run alongside
+    // the daemon, and safe to put in CI.
+    const drift = audit(
+      { journal, sink: new MemorySink(), config: loadConfig(), cap: capability() },
+      { deep: args.includes("--deep"), enqueue: false },
+    );
+    const stats = journal.stats();
+    if (args.includes("--json")) {
+      console.log(JSON.stringify({ ok: drift.length === 0, drift, stats }, null, 2));
+    } else if (drift.length) {
+      for (const d of drift) console.log(`DRIFT ${d.why}\t${d.path}`);
+      console.log(`\n${drift.length} drifted path(s) of ${stats.paths}. Run: heimdall reconcile --all`);
+    } else {
+      console.log(`ok: ${stats.paths} paths, ${stats.nodes} nodes, ${stats.edges} edges, ` +
+        `${stats.pending} pending, ${stats.queued} queued — no drift`);
+    }
+    return drift.length ? 1 : 0;
+  } finally {
+    journal.close();
+  }
+}
+
+async function runDepth(args) {
+  const { capability, depthFor, loadConfig } = await import("./depth.mjs");
+  const cap = capability();
+  console.log(`capability: ${cap.max} (${cap.reason})`);
+  const target = args.find((a) => !a.startsWith("--"));
+  if (!target) return 0;
+  const p = resolve(process.cwd(), target);
+  const d = depthFor(p, loadConfig(), cap);
+  console.log(`${p}\n  requested: ${d.requested}\n  effective: ${d.effective}${d.clamped ? "  (clamped by capability)" : ""}`);
+  return 0;
+}
+
+async function runHint(args) {
+  const [{ emitHint }, { queueHintPath }] = await Promise.all([
+    import("./hints.mjs"), import("./depth.mjs"),
+  ]);
+  const paths = args.filter((a) => !a.startsWith("--"));
+  // --stdin: harness hooks (Claude Code PostToolUse) hand us the tool call as
+  // JSON on stdin. We pull every string that looks like a path out of it rather
+  // than depending on one schema — a false positive costs one stat, a missed
+  // path costs accuracy until the next audit.
+  if (args.includes("--stdin")) {
+    let raw = "";
+    try { raw = readFileSync(0, "utf8"); } catch { /* no stdin */ }
+    for (const m of raw.matchAll(/"((?:\/|~\/)[^"\\]{1,4096})"/g)) {
+      paths.push(m[1].startsWith("~/") ? join(os.homedir(), m[1].slice(2)) : m[1]);
+    }
+  }
+  if (!paths.length) {
+    if (args.includes("--stdin")) return 0; // nothing path-like; not an error
+    console.error("usage: heimdall hint PATH ... | heimdall hint --stdin");
+    return 1;
+  }
+  const hintFile = queueHintPath();
+  const seen = new Set();
+  for (const p of paths) {
+    const abs = resolve(process.cwd(), p);
+    if (seen.has(abs)) continue;
+    seen.add(abs);
+    emitHint(hintFile, abs, "cli");
+  }
+  return 0;
+}
+
 export async function main(argv) {
   const [cmd, ...rest] = argv;
   switch (cmd) {
     case "init": return runInit(rest);
+    case "daemon": return runDaemon(rest);
+    case "reconcile": return runReconcile(rest);
+    case "verify": return runVerify(rest);
+    case "depth": return runDepth(rest);
+    case "hint": return runHint(rest);
     case "search": return runSearch(rest);
     case "insert": return runInsert(rest);
     case "doctor": return runDoctor();
