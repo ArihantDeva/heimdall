@@ -105,7 +105,8 @@ def handle_stale(id_hex, title, path, body):
             f.write(body or "")
             bodyf = f.name
         r = subprocess.run(
-            [os.path.expanduser("~/knowledge-base/kb-rehome.sh"), id_hex, path, title or "", bodyf],
+            [os.path.join(os.path.dirname(os.path.realpath(__file__)), "kb-rehome.sh"),
+             id_hex, path, title or "", bodyf],
             capture_output=True, text=True, timeout=25,
         )
         out = r.stdout.strip()

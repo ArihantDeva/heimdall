@@ -22,7 +22,6 @@ const sh = (script, args) =>
 function runSearch(args) {
   return sh(BIN("kb-search.sh"), args);
 }
-
 function runInsert(args) {
   const get = (f) => {
     const i = args.indexOf(f);
@@ -36,8 +35,17 @@ function runInsert(args) {
     return 1;
   }
   const graft = process.env.GRAFT || join(os.homedir(), ".local", "bin", "graft");
+  if (!existsSync(graft)) {
+    console.error(`ERROR: graft binary not found at ${graft} (set GRAFT=/path/to/graft). Install: see README.`);
+    return 1;
+  }
   const kwArgs = kws.flatMap((k) => ["--keyword", k]);
-  execFileSync(graft, ["insert", "--title", title, "--body", body, ...kwArgs], { stdio: "inherit" });
+  try {
+    execFileSync(graft, ["insert", "--title", title, "--body", body, ...kwArgs], { stdio: "inherit" });
+  } catch (e) {
+    console.error(`ERROR: graft insert failed: ${e.message?.split("\n")[0] ?? e}`);
+    return 1;
+  }
   return 0;
 }
 

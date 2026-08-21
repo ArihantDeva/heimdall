@@ -10,7 +10,9 @@
 #   to avoid re-running the expensive Desktop scan per node.
 # Prints: REBUILT <newpath> | NOTFOUND | AMBIGUOUS
 set -u
-export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+# graft via absolute path (env-overridable) — never PATH-resolved (supply-chain guard)
+GRAFT="${GRAFT:-$HOME/.local/bin/graft}"
+graft() { "$GRAFT" "$@"; }
 ID="${1:?kb-rehome.sh <id> <dead_path> <title> <body_file> [hits_cache]}"
 DEAD="${2:?}"
 TITLE="${3:-}"
@@ -53,7 +55,7 @@ NEW=$(printf '%s' "$HITS" | sed '/^$/d')
 # Use graft delete (daemon-aware) — raw SQL would desync FTS/vec indexes.
 NEWREL=$(printf '%s' "$NEW" | sed "s|$HOME/||")
 ESCAPED=$(python3 -c "import sys; print(sys.argv[1].replace('\\\\',r'\\\\').replace('%',r'\\%').replace('_',r'\\_').replace(\"\'\",\"\'\'\") + ' — edited %', end='')" "$NEWREL")
-for OLDID in $(sqlite3 "$HOME/.graft/profiles/default/graft.db" "SELECT hex(id) FROM nodes WHERE title LIKE '$ESCAPED' ESCAPE '\\'" 2>/dev/null); do
+for OLDID in $(sqlite3 "${GRAFT_DB:-$HOME/.graft/profiles/default/graft.db}" "SELECT hex(id) FROM nodes WHERE title LIKE '$ESCAPED' ESCAPE '\\'" 2>/dev/null); do
 	graft delete "$OLDID" >/dev/null 2>&1
 done
 

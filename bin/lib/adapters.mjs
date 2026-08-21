@@ -1,6 +1,7 @@
 // adapters.mjs — per-harness config writers for `heimdall init --harness X`.
 // Each writer installs the smallest config that makes heimdall usable:
 // a search/insert instruction + (where hooks exist) an edit-log sync hook.
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import os from "node:os";
@@ -38,7 +39,17 @@ function writeClaudeCode(home) {
   }
   settings.hooks = settings.hooks || {};
   settings.hooks.PostToolUse = settings.hooks.PostToolUse || [];
-  const hookCmd = `bash "$(npm root -g 2>/dev/null || echo .)/heimdall/bin/sync-edits.sh" 2>/dev/null || heimdall-sync-edits 2>/dev/null || true`;
+  // Resolve the sync script ONCE at init (npm root -g is slow and can differ
+  // inside hook shells); fall back to a PATH shim if the package moves.
+  let syncScript = "";
+  try {
+    const root = execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim();
+    const candidate = join(root, "heimdall", "bin", "sync-edits.sh");
+    if (existsSync(candidate)) syncScript = candidate;
+  } catch { /* npm missing -> leave empty, fall through to shim */ }
+  const hookCmd = syncScript
+    ? `bash '${syncScript}' 2>/dev/null || true`
+    : "heimdall-sync-edits 2>/dev/null || true";
   if (!settings.hooks.PostToolUse.some((h) => JSON.stringify(h).includes("heimdall"))) {
     settings.hooks.PostToolUse.push({
       matcher: "Write|Edit",

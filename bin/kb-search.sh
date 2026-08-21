@@ -29,7 +29,9 @@ while [ $# -gt 0 ]; do
 done
 
 # Verify script ships with the heimdall package; KB copy is a legacy fallback.
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# readlink -P resolves symlinked global-npm bins; -P gives the physical dir.
+SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd -P)"
 VERIFY="$SCRIPT_DIR/kb_search_verify.py"
 [ -f "$VERIFY" ] || VERIFY="$HOME/knowledge-base/kb_search_verify.py"
 # graft via absolute path (env-overridable) — never PATH-resolved (supply-chain guard)

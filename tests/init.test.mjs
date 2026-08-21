@@ -38,6 +38,14 @@ test("contract: doctor exits 0 and reports health", () => {
   assert.ok(out.length > 0);
 });
 
+test("contract: doctor without backend reports SETUP NEEDED, exit 1", () => {
+  const home = mkdtempSync(join(tmpdir(), "heimdall-doctor-"));
+  assert.throws(
+    () => run(["doctor"], { env: { ...process.env, HOME: home, GRAFT: "/nonexistent/graft" } }),
+    (e) => e.status === 1 && /SETUP NEEDED/.test(e.stdout + e.stderr),
+  );
+});
+
 test("contract: init is idempotent — twice into temp HOME, no error", () => {
   const home = mkdtempSync(join(tmpdir(), "heimdall-init-"));
   const env = { ...process.env, HOME: home };
