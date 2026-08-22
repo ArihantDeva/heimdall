@@ -1,7 +1,8 @@
 # Heimdall adapters
 
 `heimdall init --harness <name>` wires Heimdall into your coding agent. Run it
-after `npm i -g heimdall-memory`. One command per harness; all idempotent.
+after installing (from a clone: `npm install -g .` — not on npm yet). One
+command per harness; all idempotent.
 
 | Harness | Command | What gets installed |
 |---|---|---|

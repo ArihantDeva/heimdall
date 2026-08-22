@@ -135,8 +135,12 @@ On this machine the Pi extensions are live as `~/.pi/agent/extensions/kb-*.ts` (
 
 ## Quickstart
 
+Not on npm yet — install from source (this puts the `heimdall` command on your
+PATH as a symlink to the clone, so keep the clone where it is):
+
 ```bash
-npm i -g heimdall-memory
+git clone https://github.com/ArihantDeva/heimdall.git
+cd heimdall && npm install -g .
 
 # one-time: install the graft backend (local semantic-memory daemon)
 #   see https://github.com/tinygrad/graft — build vendor/graft, put the `graft`
