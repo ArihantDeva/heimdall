@@ -34,7 +34,7 @@ else
   sleep 8
   if ! timeout 10 "$GRAFT" stats >/dev/null 2>&1; then
     echo "FAIL: graft daemon unreachable after restart. Log: $HOME/.graft/graftd.log"
-    echo "  First-time setup: cp \"\$(npm root -g)/heimdall/config/heimdall.yaml.example\" ~/.graft/config.yaml"
+    echo "  First-time setup: cp \"\$(npm root -g)/heimdall-memory/config/heimdall.yaml.example\" ~/.graft/config.yaml"
     exit 1
   fi
 fi

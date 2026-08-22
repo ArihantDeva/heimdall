@@ -1,8 +1,8 @@
 // adapters.mjs — per-harness config writers for `heimdall init --harness X`.
 // Each writer installs the smallest config that makes heimdall usable:
 // a search/insert instruction + (where hooks exist) an edit-log sync hook.
-import { execFileSync } from "node:child_process";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 
@@ -24,7 +24,7 @@ function writePi(home) {
   const cfgDir = ensure(join(home, ".heimdall", "adapters", "pi"));
   writeFileSync(
     join(cfgDir, "README.md"),
-    "# Pi adapter\n\nCopy extensions/kb-*.ts from the heimdall package into your pi extensions dir:\n  cp <npm-root>/heimdall/extensions/kb-*.ts ~/.pi/agent/extensions/\nThen add kb_search/kb_insert/kb_sync tools (kb-tools.ts) — they call the vendored bin/ scripts.\n",
+    "# Pi adapter\n\nCopy extensions/kb-*.ts from the heimdall package into your pi extensions dir:\n  cp <npm-root>/heimdall-memory/extensions/kb-*.ts ~/.pi/agent/extensions/\nThen add kb_search/kb_insert/kb_sync tools (kb-tools.ts) — they call the vendored bin/ scripts.\n",
   );
   writeFileSync(join(cfgDir, "snippet.md"), SEARCH_SNIPPET);
   return "pi";
@@ -42,14 +42,15 @@ function writeClaudeCode(home) {
   // The hook is a hint emitter, nothing more: it appends one line and exits.
   // It must never write the graph — only the reconciler holds the lock — and it
   // must never be slow enough to be felt, since it runs after every edit.
-  // Resolve the CLI ONCE at init (npm root -g is slow and can differ inside
-  // hook shells); fall back to a PATH shim if the package moves.
+  // Resolve the CLI ONCE at init. This file ships inside the package, so the
+  // CLI is a fixed hop away: no `npm root -g` subprocess (slow, and resolves
+  // differently inside hook shells) and no hardcoded package name to rot on a
+  // rename. Falls back to a PATH shim if the layout ever moves.
   let cli = "";
   try {
-    const root = execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim();
-    const candidate = join(root, "heimdall", "bin", "heimdall.js");
+    const candidate = fileURLToPath(new URL("../heimdall.js", import.meta.url));
     if (existsSync(candidate)) cli = candidate;
-  } catch { /* npm missing -> leave empty, fall through to shim */ }
+  } catch { /* unresolvable -> leave empty, fall through to shim */ }
   const hookCmd = cli
     ? `node '${cli}' hint --stdin 2>/dev/null || true`
     : "heimdall hint --stdin 2>/dev/null || true";

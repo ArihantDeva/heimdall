@@ -1,8 +1,28 @@
 {
-  "name": "heimdall",
+  "name": "heimdall-memory",
   "version": "0.2.0",
   "description": "Verified, self-healing knowledge layer for AI coding agents (orchestration over Graft-style semantic memory backends)",
+  "keywords": [
+    "agent-memory",
+    "ai-agents",
+    "coding-agent",
+    "semantic-memory",
+    "knowledge-graph",
+    "code-search",
+    "retrieval",
+    "claude-code",
+    "mcp",
+    "rag"
+  ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ArihantDeva/heimdall.git"
+  },
+  "homepage": "https://github.com/ArihantDeva/heimdall#readme",
+  "bugs": {
+    "url": "https://github.com/ArihantDeva/heimdall/issues"
+  },
   "bin": {
     "heimdall": "bin/heimdall.js"
   },

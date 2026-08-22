@@ -136,12 +136,12 @@ On this machine the Pi extensions are live as `~/.pi/agent/extensions/kb-*.ts` (
 ## Quickstart
 
 ```bash
-npm i -g heimdall
+npm i -g heimdall-memory
 
 # one-time: install the graft backend (local semantic-memory daemon)
 #   see https://github.com/tinygrad/graft — build vendor/graft, put the `graft`
 #   binary on PATH (e.g. ~/.local/bin/graft) and create ~/.graft/config.yaml:
-#   cp "$(npm root -g)/heimdall/config/heimdall.yaml.example" ~/.graft/config.yaml
+#   cp "$(npm root -g)/heimdall-memory/config/heimdall.yaml.example" ~/.graft/config.yaml
 
 # wire it into your harness (pi | claude-code | codex | cursor | windsurf | all)
 heimdall init --harness claude-code
