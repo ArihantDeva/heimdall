@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // heimdall.js — npm CLI entrypoint. Wraps the repo's bin/ scripts; wraps, does
-// not rewrite. Subcommands: init, search, insert, doctor.
+// not rewrite. Subcommands: init, daemon, reconcile, verify, depth, hint, search, insert, doctor.
 import { main } from "./lib/cli-main.mjs";
 
 main(process.argv.slice(2)).then(

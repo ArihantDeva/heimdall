@@ -25,6 +25,16 @@ const USAGE = `usage: heimdall <command>
 const sh = (script, args) =>
   spawnSync("/bin/bash", [script, ...args], { stdio: "inherit" }).status ?? 1;
 
+// Reject flags a subcommand does not know. Silent acceptance turned
+// `verify --deeph` into a plain `verify` — the user thinks deep audit ran.
+function checkFlags(cmd, args, allowed) {
+  const bad = args.filter((a) => a.startsWith("--") && !allowed.includes(a));
+  if (!bad.length) return 0;
+  for (const b of bad) console.error(`unknown option for ${cmd}: ${b}`);
+  console.error(USAGE);
+  return 2;
+}
+
 function runSearch(args) {
   return sh(BIN("kb-search.sh"), args);
 }
@@ -108,6 +118,10 @@ async function runDaemon(args) {
 }
 
 async function runReconcile(args) {
+  // Paths and --all/--dry-run only. A typo'd --alll must not silently become a
+  // full deep audit + repair.
+  const bad = checkFlags("reconcile", args, ["--all", "--dry-run"]);
+  if (bad) return bad;
   const [{ Journal }, { Lock }, { drain, audit, skipPath }, { GraftSink, MemorySink },
     { capability, journalPath, loadConfig, lockPath, queueHintPath }, { ingestHints }] =
     await Promise.all([
@@ -154,6 +168,8 @@ async function runReconcile(args) {
 }
 
 async function runVerify(args) {
+  const bad = checkFlags("verify", args, ["--deep", "--json"]);
+  if (bad) return bad;
   const [{ Journal }, { audit }, { MemorySink }, { capability, journalPath, loadConfig }] =
     await Promise.all([
       import("./journal.mjs"), import("./reconcile.mjs"),
@@ -184,6 +200,8 @@ async function runVerify(args) {
 }
 
 async function runDepth(args) {
+  const bad = checkFlags("depth", args, []);
+  if (bad) return bad;
   const { capability, depthFor, loadConfig } = await import("./depth.mjs");
   const cap = capability();
   console.log(`capability: ${cap.max} (${cap.reason})`);
@@ -222,6 +240,11 @@ async function runHint(args) {
     const abs = resolve(process.cwd(), p);
     if (seen.has(abs)) continue;
     seen.add(abs);
+    if (!existsSync(abs)) {
+      // Advisory by design — the reconciler will record it absent. But silence
+      // reads like success on a typo'd path, so say what will happen.
+      console.error(`hinted: ${abs} (path does not exist — will reconcile as absent)`);
+    }
     emitHint(hintFile, abs, "cli");
   }
   return 0;

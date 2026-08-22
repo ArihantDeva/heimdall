@@ -49,3 +49,32 @@ test("binary/oversized file degrades gracefully, no crash", () => {
   const r = verify(retrieveJson("selftest:" + file + ":anything"));
   assert.ok(r.verdict, "still returns a verdict");
 });
+
+// extract_paths home-anchor contract: only ~/... and /Users/<name>/... count.
+// These are regression tests for the tilde-form bug (the old HOME_RE pattern
+// `~?/Users/...` could never match `~/...` prose at all, which silently hid
+// every ~-anchored node from both search verdicts and the stale scan).
+import { spawnSync } from "node:child_process";
+
+function extractPaths(text) {
+  const r = spawnSync("python3", ["-c", `
+import sys; sys.path.insert(0, "bin")
+from kb_search_verify import extract_paths
+print("\\n".join(extract_paths(sys.argv[1])))
+`, text], { cwd: ROOT, encoding: "utf8" });
+  return r.stdout.trim().split("\n").filter(Boolean);
+}
+
+test("extract_paths: ~-anchored path resolves (tilde form bug regression)", () => {
+  const paths = extractPaths("note: ~/Repos/poker-bot/tools — heads-up jam/fold EV optimizer");
+  assert.deepEqual(paths, ["/Users/arihantdeva/Repos/poker-bot/tools"]);
+});
+
+test("extract_paths: /Users/... absolute form still resolves", () => {
+  const paths = extractPaths("see /Users/arihantdeva/Repos/heimdall/README.md — markdown");
+  assert.deepEqual(paths, ["/Users/arihantdeva/Repos/heimdall/README.md"]);
+});
+
+test("extract_paths: no path token yields nothing", () => {
+  assert.deepEqual(extractPaths("no path here at all"), []);
+});

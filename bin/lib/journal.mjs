@@ -21,6 +21,9 @@ CREATE TABLE IF NOT EXISTS paths (
   size          INTEGER,
   mtime_ms      INTEGER,
   depth         TEXT,
+  -- machine capability (depth.mjs LEVELS max) at the last reconcile; audit
+  -- uses it to tell "seen this capability" from "capability is new"
+  cap_max       TEXT,
   generation    INTEGER NOT NULL DEFAULT 0,
   state         TEXT NOT NULL DEFAULT 'present',
   reconciled_at INTEGER
@@ -77,6 +80,16 @@ export class Journal {
     // Durability over speed: this file is the source of truth.
     this.db.exec("PRAGMA synchronous = FULL;");
     this.db.exec(SCHEMA);
+    // Migration: rows written before cap_max existed. Nullable column, so the
+    // fix is one ALTER; NULL means "capability unknown" — audit flags such a
+    // row ONCE so the next reconcile stamps it, then it converges.
+    try {
+      this.db.exec("ALTER TABLE paths ADD COLUMN cap_max TEXT");
+    } catch (err) {
+      // Only "already there" is fine to swallow; anything else (disk, schema
+      // corruption) must surface — audit would crash later with a worse error.
+      if (!/duplicate column/i.test(String(err?.message))) throw err;
+    }
   }
 
   close() {
@@ -193,6 +206,7 @@ export class Journal {
    * @param {number|null} o.size
    * @param {number|null} o.mtimeMs
    * @param {string} o.depth            depth actually achieved
+   * @param {string} [o.capMax]         machine capability at reconcile time
    * @param {'present'|'absent'} o.state
    * @param {{node_id:string,kind:string,symbol?:string,line?:number}[]} o.nodes
    * @param {{src:string,dst:string,relation:string,line?:number}[]} o.edges
@@ -242,14 +256,14 @@ export class Journal {
       }
 
       db.prepare(
-        `INSERT INTO paths (path, hash, size, mtime_ms, depth, generation, state, reconciled_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO paths (path, hash, size, mtime_ms, depth, cap_max, generation, state, reconciled_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(path) DO UPDATE SET
            hash = excluded.hash, size = excluded.size, mtime_ms = excluded.mtime_ms,
-           depth = excluded.depth, state = excluded.state,
+           depth = excluded.depth, cap_max = excluded.cap_max, state = excluded.state,
            reconciled_at = excluded.reconciled_at`,
       ).run(
-        o.path, o.hash, o.size, o.mtimeMs, o.depth,
+        o.path, o.hash, o.size, o.mtimeMs, o.depth, o.capMax ?? null,
         o.startGeneration, o.state, Date.now(),
       );
 

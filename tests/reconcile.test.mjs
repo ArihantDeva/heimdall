@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, statSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -367,6 +367,78 @@ test("a git checkout is picked up (the old command-regex path could not see it)"
   } finally { s.cleanup(); }
 });
 
+// 7b ── drift-loop regression. A file that cannot reach L3 — no tree-sitter
+// extractor for its language (.md) or a parse error in one that has one —
+// settles below cap.max forever. Audit demanding L3 of it made `heimdall
+// verify` permanently red on README.md/package.json: drift that
+// `reconcile --all` could never clear.
+test("audit does not demand a depth the file can never reach", { skip: CAP_REAL.max !== "graph" && `no tree-sitter: ${CAP_REAL.reason}` }, () => {
+  const s = sandbox();
+  s.ctx.cap = CAP_REAL;
+  try {
+    // Unsupported language: the bridge has no extractor for .md at all.
+    const md = s.file("README.md", "# hello\n");
+    // Supported language, garbage content: tree-sitter is error-tolerant, but
+    // a binary file can still produce an unusable result — exercise the same
+    // degrade path via an extension the DISPATCH map lacks.
+    const bad = s.file("data.yaml", "key: [unclosed\n");
+    s.journal.enqueue(md, "t");
+    s.journal.enqueue(bad, "t");
+    drain(s.ctx);
+    assert.equal(s.journal.getPath(md).depth, "file", "no markdown extractor: stays at L1");
+    assert.equal(s.journal.getPath(bad).depth, "file", "no yaml extractor: degrades to L1");
+    assert.deepEqual(audit(s.ctx, { enqueue: false }), [], "below-cap rows on an L3 box are not drift");
+    audit(s.ctx); // enqueue whatever audit claims is drifted
+    drain(s.ctx);
+    assert.deepEqual(audit(s.ctx, { enqueue: false }), [], "converged for good — no loop");
+    // A genuinely new capability is still drift for a code file.
+    const py = s.file("good.py", "def f(): pass\n");
+    s.journal.enqueue(py, "t");
+    drain(s.ctx);
+    const capped = { ...s.ctx, cap: { max: "file", python: null, reason: "downgraded" } };
+    assert.deepEqual(audit(capped, { enqueue: false }), [], "cap downgrade is not drift either");
+    const richer = { ...s.ctx, cap: CAP_REAL };
+    assert.deepEqual(audit(richer, { enqueue: false }), []);
+    writeFileSync(py, "def f(): return 1\n");
+    assert.ok(audit(richer, { enqueue: false }).some((d) => d.path === py), "content change still detected");
+  } finally { s.cleanup(); }
+});
+
+test("legacy rows without cap_max are flagged once, stamped by reconcile, then converge", { skip: CAP_REAL.max !== "graph" && `no tree-sitter: ${CAP_REAL.reason}` }, () => {
+  const s = sandbox();
+  s.ctx.cap = CAP_REAL;
+  try {
+    const p = s.file("README.md", "# hello\n");
+    s.journal.enqueue(p, "t");
+    drain(s.ctx);
+    const nodesBefore = s.journal.ownedNodes(p).length;
+    assert.ok(nodesBefore > 0, "file node exists before re-stamp");
+    // Simulate a pre-migration row: cap_max never recorded.
+    s.journal.db.prepare(`UPDATE paths SET cap_max = NULL WHERE path = ?`).run(p);
+    const first = audit(s.ctx, { enqueue: false });
+    assert.equal(first.length, 1, "legacy row flagged exactly once");
+    audit(s.ctx); // enqueue the stamping repair
+    drain(s.ctx);
+    assert.equal(s.journal.getPath(p).cap_max, "graph", "stamped by reconcile");
+    assert.equal(s.journal.ownedNodes(p).length, nodesBefore, "re-stamp must NOT wipe owned nodes");
+    assert.deepEqual(audit(s.ctx, { enqueue: false }), [], "converged after one cycle");
+  } finally { s.cleanup(); }
+});
+
+test("absent rows record the capability that retracted them", () => {
+  const s = sandbox();
+  try {
+    const p = s.file("gone.txt", "x");
+    s.journal.enqueue(p, "t");
+    drain(s.ctx);
+    rmSync(p);
+    s.journal.enqueue(p, "t");
+    drain(s.ctx);
+    assert.equal(s.journal.getPath(p).state, "absent");
+    assert.equal(s.journal.getPath(p).cap_max, s.ctx.cap?.max ?? null, "cap stamped on retraction");
+  } finally { s.cleanup(); }
+});
+
 // ── supporting guarantees ─────────────────────────────────────────────────
 
 test("the lock admits exactly one writer", () => {
@@ -431,4 +503,45 @@ test("skipPath excludes the directories the graph must never index", () => {
   assert.equal(skipPath("/Users/x/.heimdall/journal.db", home), true);
   assert.equal(skipPath("/Users/x/proj/node_modules/p/i.js", home), true);
   assert.equal(skipPath("/Users/x/proj/.git/HEAD", home), true);
+});
+
+// F1 (audit): an unreadable file made reconcilePath return {action:"error"}
+// without dequeuing, so the CLI/daemon drain loop re-drained it forever.
+test("a permanently-erroring path is dequeued, not re-drained forever", () => {
+  const s = sandbox();
+  try {
+    const p = join(s.dir, "noperm", "secret.py");
+    mkdirSync(dirname(p));
+    writeFileSync(p, "def g(): pass\n");
+    chmodSync(p, 0o000);
+    s.journal.enqueue(p, "t");
+    // The CLI runs `for (;;) { if (!drain(ctx).processed) break; }` — this must
+    // terminate even though every round errors.
+    let rounds = 0;
+    for (;;) {
+      const { processed } = drain({ ...s.ctx, cap: capability() });
+      if (!processed) break;
+      if (++rounds > 5) assert.fail(`drain loop did not terminate (round ${rounds}) — error rows stay queued`);
+    }
+    assert.ok(rounds >= 1, "path was attempted at least once");
+    assert.equal(s.journal.queueDepth(), 0, "error row must not poison the queue");
+  } finally { chmodSync(join(s.dir, "noperm", "secret.py"), 0o644); s.cleanup(); }
+});
+
+// R1 review: same hang class via a failing SINK — deferred rows also stayed
+// queued and the drain loop spun forever.
+test("a failing sink defers once, dequeues, does not spin", () => {
+  const s = sandbox();
+  try {
+    const p = s.file("ok.py", "def f(): pass\n");
+    s.journal.enqueue(p, "t");
+    const boomSink = { available: true, delete() {}, insert() { throw new Error("sink down"); } };
+    let rounds = 0;
+    for (;;) {
+      const { processed } = drain({ ...s.ctx, sink: boomSink });
+      if (!processed) break;
+      if (++rounds > 5) assert.fail(`drain loop spun on deferred row (round ${rounds})`);
+    }
+    assert.equal(s.journal.queueDepth(), 0, "deferred row must not poison the queue");
+  } finally { s.cleanup(); }
 });

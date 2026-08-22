@@ -46,7 +46,7 @@ export function reconcilePath(ctx, path) {
     const ok = journal.commit({
       path, startGeneration,
       hash: null, size: null, mtimeMs: null,
-      depth: "path", state: "absent",
+      depth: "path", capMax: ctx.cap?.max ?? null, state: "absent",
       nodes: [], edges: [], pending: [],
     });
     return ok
@@ -56,6 +56,7 @@ export function reconcilePath(ctx, path) {
 
   const { effective } = depthFor(path, ctx.config, ctx.cap);
   const prior = journal.getPath(path);
+  const priorNodes = journal.ownedNodes(path);
 
   // ── unchanged: the hot path ────────────────────────────────────────────
   // Forty agents editing one file collapse to one hash comparison.
@@ -63,13 +64,34 @@ export function reconcilePath(ctx, path) {
   try {
     desired = desiredState(path, effective, { bridged: ctx.bridged, cap: ctx.cap });
   } catch (err) {
+    // Unreadable/ vanished mid-drain: dequeue so the caller's drain loop
+    // terminates instead of spinning on this row forever, but leave any prior
+    // journal row untouched (the file may just be temporarily locked). The
+    // next hint or audit re-queues it.
+    journal.dequeue(path);
     return { action: "error", path, reason: err.message };
   }
   if (
     prior && prior.state === "present" &&
     prior.hash === desired.hash && prior.depth === desired.depth
   ) {
-    journal.dequeue(path);
+    // Hot path still re-stamps cap_max when the capability changed since the
+    // last reconcile — without this, a capability bounce (tree-sitter
+    // removed/reinstalled) leaves a stale record on a file whose content
+    // never changes again. The commit is ownership-exact, so it must be
+    // handed back everything the path currently owns; passing empty arrays
+    // here would wipe the file's nodes while claiming present/depth.
+    if (prior.cap_max !== (ctx.cap?.max ?? null)) {
+      journal.commit({
+        path, startGeneration,
+        hash: desired.hash, size: desired.size, mtimeMs: desired.mtimeMs,
+        depth: desired.depth, capMax: ctx.cap?.max ?? null, state: "present",
+        nodes: priorNodes.map((n) => ({ ...n })),
+        edges: journal.ownedEdges(path), pending: journal.pendingFrom(path),
+      });
+    } else {
+      journal.dequeue(path);
+    }
     return { action: "unchanged", path, depth: desired.depth };
   }
 
@@ -78,7 +100,6 @@ export function reconcilePath(ctx, path) {
   // path dirty, so it is redone — safe precisely because reconcile is
   // idempotent. The reverse order could mark a path clean that was never
   // projected, which is the one failure we cannot detect later.
-  const priorNodes = journal.ownedNodes(path);
   const priorBySymbol = new Map(priorNodes.map((n) => [n.node_id, n]));
 
   const nodes = [];
@@ -92,6 +113,9 @@ export function reconcilePath(ctx, path) {
       try {
         sink_id = sink.insert(renderNode({ ...n, language: n.language }, path));
       } catch (err) {
+        // Dequeue like the error path: the CLI/daemon drain loop would
+        // otherwise spin on this row forever while the sink is down.
+        journal.dequeue(path);
         return { action: "deferred", path, reason: `sink: ${err.message?.split("\n")[0]}` };
       }
     }
@@ -106,7 +130,7 @@ export function reconcilePath(ctx, path) {
   const ok = journal.commit({
     path, startGeneration,
     hash: desired.hash, size: desired.size, mtimeMs: desired.mtimeMs,
-    depth: desired.depth, state: "present",
+    depth: desired.depth, capMax: ctx.cap?.max ?? null, state: "present",
     nodes, edges: desired.edges, pending: desired.pending,
   });
   if (!ok) return { action: "stale", path };
@@ -184,9 +208,16 @@ export function audit(ctx, { deep = false, enqueue = true } = {}) {
     } else if (st.size !== row.size || Math.floor(st.mtimeMs) !== row.mtime_ms) {
       drift.push({ path: row.path, why: "mtime/size" });
     }
-    // A depth upgrade (tree-sitter newly installed) is also drift.
+    // A depth upgrade (tree-sitter newly installed) is also drift — but a
+    // capability the row has ALREADY SEEN is not. A file whose language has no
+    // tree-sitter extractor (.md) or that failed to parse settles below
+    // cap.max forever; re-flagging it every audit made `heimdall verify`
+    // permanently red and reconcile --all could never clear it.
+    // Legacy rows (cap_max NULL, pre-migration) are flagged ONCE so the next
+    // reconcile stamps them; after that they converge like any other row.
     const { effective } = depthFor(row.path, ctx.config, ctx.cap);
-    if (rank(effective) > rank(row.depth ?? "path")) {
+    const seen = row.cap_max != null && row.cap_max === ctx.cap?.max;
+    if (rank(effective) > rank(row.depth ?? "path") && !seen) {
       drift.push({ path: row.path, why: `depth ${row.depth} -> ${effective}` });
     }
   }
