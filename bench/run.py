@@ -1,0 +1,92 @@
+# bench/run.py
+"""LongMemEval runner: ingest -> retrieve -> (optionally) read -> judge."""
+from __future__ import annotations
+
+import argparse
+import json
+import pathlib
+import time
+
+from ingest import delete_nodes, ingest_question
+from reader import build_prompt, complete
+from recall import recall_report
+
+HERE = pathlib.Path(__file__).resolve().parent
+DATA = HERE / "data"
+RUNS = HERE / "runs"
+
+
+def answer(question: dict, context: list[dict]) -> str:
+    prompt = build_prompt(question["question"], context,
+                          question["question_date"])
+    return complete(prompt)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dataset", choices=["oracle", "s", "m"], required=True)
+    ap.add_argument("--limit", type=int, default=500)
+    ap.add_argument("--top-k", type=int, default=25)
+    ap.add_argument("--recall-only", action="store_true",
+                    help="token-free retrieval diagnostic; skips reader+judge")
+    args = ap.parse_args()
+
+    from retrieve import search  # imported late so --recall-only still needs it
+
+    rows = json.loads((DATA / f"longmemeval_{args.dataset}.json").read_text())
+    rows = rows[: args.limit]
+
+    run_dir = RUNS / time.strftime("%Y%m%d-%H%M%S")
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    pairs, records = [], []
+    for i, question in enumerate(rows, 1):
+        # Each question owns its haystack. Leaving the previous question's
+        # sessions in the profile would let retrieval pull evidence that this
+        # question's memory never saw, which inflates the score meaninglessly.
+        ids = ingest_question(question, run_dir / "sessions")
+        try:
+            cands = search(question["question"], top_k=args.top_k,
+                           with_bodies=not args.recall_only)
+            titles = [c.title for c in cands]
+            pairs.append((question, titles))
+
+            record = {"question_id": question["question_id"],
+                      "question_type": question["question_type"],
+                      "retrieved": titles}
+
+            if not args.recall_only:
+                from judge import grade
+
+                ctx = [{"title": c.title, "body": c.body} for c in cands]
+                resp = answer(question, ctx)
+                correct = grade(question["question"], question["answer"],
+                                resp, question["question_type"],
+                                question_id=question["question_id"])
+                record |= {"response": resp, "correct": correct}
+        finally:
+            delete_nodes(ids)
+
+        records.append(record)
+        print(f"[{i}/{len(rows)}] {question['question_id']}", flush=True)
+
+    (run_dir / "results.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in records)
+    )
+
+    summary = {"dataset": args.dataset,
+               "recall": recall_report(pairs)}
+    if not args.recall_only:
+        graded = [r for r in records if "correct" in r]
+        summary["overall"] = sum(r["correct"] for r in graded) / len(graded)
+        by_type: dict[str, list[bool]] = {}
+        for r in graded:
+            by_type.setdefault(r["question_type"], []).append(r["correct"])
+        summary["by_type"] = {k: sum(v) / len(v) for k, v in by_type.items()}
+
+    (run_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+    print(json.dumps(summary, indent=2))
+
+
+if __name__ == "__main__":
+    main()
