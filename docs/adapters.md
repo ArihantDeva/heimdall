@@ -1,7 +1,7 @@
 # Heimdall adapters
 
 `heimdall init --harness <name>` wires Heimdall into your coding agent. Run it
-after `npm i -g heimdall`. One command per harness; all idempotent.
+after `npm i -g @arihantdeva/heimdall`. One command per harness; all idempotent.
 
 | Harness | Command | What gets installed |
 |---|---|---|
@@ -20,7 +20,7 @@ agent tools; `kb-autosync.ts` hooks tool results; `kb-orient.ts` injects
 prior work into session start). Copy them into `~/.pi/agent/extensions/`:
 
 ```
-cp "$(npm root -g)/heimdall/extensions/"kb-*.ts ~/.pi/agent/extensions/
+cp "$(npm root -g)/@arihantdeva/heimdall/extensions/"kb-*.ts ~/.pi/agent/extensions/
 ```
 
 The adapter README at `~/.heimdall/adapters/pi/README.md` repeats this.

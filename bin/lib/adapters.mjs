@@ -24,7 +24,7 @@ function writePi(home) {
   const cfgDir = ensure(join(home, ".heimdall", "adapters", "pi"));
   writeFileSync(
     join(cfgDir, "README.md"),
-    "# Pi adapter\n\nCopy extensions/kb-*.ts from the heimdall package into your pi extensions dir:\n  cp <npm-root>/heimdall/extensions/kb-*.ts ~/.pi/agent/extensions/\nThen add kb_search/kb_insert/kb_sync tools (kb-tools.ts) — they call the vendored bin/ scripts.\n",
+    "# Pi adapter\n\nCopy extensions/kb-*.ts from the heimdall package into your pi extensions dir:\n  cp <npm-root>/@arihantdeva/heimdall/extensions/kb-*.ts ~/.pi/agent/extensions/\nThen add kb_search/kb_insert/kb_sync tools (kb-tools.ts) — they call the vendored bin/ scripts.\n",
   );
   writeFileSync(join(cfgDir, "snippet.md"), SEARCH_SNIPPET);
   return "pi";
@@ -47,8 +47,10 @@ function writeClaudeCode(home) {
   let cli = "";
   try {
     const root = execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim();
-    const candidate = join(root, "heimdall", "bin", "heimdall.js");
-    if (existsSync(candidate)) cli = candidate;
+    // Scoped install (@arihantdeva/heimdall) nests one level deeper than unscoped.
+    for (const candidate of [join(root, "@arihantdeva", "heimdall", "bin", "heimdall.js"), join(root, "heimdall", "bin", "heimdall.js")]) {
+      if (existsSync(candidate)) { cli = candidate; break; }
+    }
   } catch { /* npm missing -> leave empty, fall through to shim */ }
   const hookCmd = cli
     ? `node '${cli}' hint --stdin 2>/dev/null || true`

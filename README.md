@@ -136,29 +136,22 @@ On this machine the Pi extensions are live as `~/.pi/agent/extensions/kb-*.ts` (
 ## Quickstart
 
 ```bash
-npm i -g heimdall
-
-# one-time: install the graft backend (local semantic-memory daemon)
-#   see https://github.com/tinygrad/graft — build vendor/graft, put the `graft`
-#   binary on PATH (e.g. ~/.local/bin/graft) and create ~/.graft/config.yaml:
-#   cp "$(npm root -g)/heimdall/config/heimdall.yaml.example" ~/.graft/config.yaml
-
-# wire it into your harness (pi | claude-code | codex | cursor | windsurf | all)
-heimdall init --harness claude-code
-
-# verify the backend is healthy
-heimdall doctor
-
-# search across every project you've worked in
-heimdall search "excel tracker portfolio optimization"
-
-# record reusable work when your agent finishes something
-heimdall insert --title "poker jam_opt optimizer" \
-  --body "~/Repos/poker-bot/tools — heads-up jam/fold EV optimizer" \
-  --keywords poker,optimize
+npm i -g @arihantdeva/heimdall
+heimdall init --harness claude-code   # or pi | codex | cursor | windsurf | all
 ```
 
-`init`, `insert` and the harness wiring work immediately; `search` and `doctor` need the graft backend installed separately (build from source — embedding model download included, so not instant). The vendored `vendor/graft/` is source + attribution, not a prebuilt binary. On macOS the backend runs as the launchd job `com.graft.daemon` (template: `launchd/com.heimdall.backend.plist.example`).
+That's it for install + harness wiring (`init`, `insert` work immediately).
+
+Ranked search and `doctor` need the [graft backend](https://github.com/tinygrad/graft) — one extra step:
+
+```bash
+# build graft from source, put the binary on PATH, then:
+cp "$(npm root -g)/@arihantdeva/heimdall/config/heimdall.yaml.example" ~/.graft/config.yaml
+heimdall doctor                        # should print HEALTHY
+heimdall search "excel tracker portfolio optimization"
+```
+
+On macOS the backend runs as the launchd job `com.graft.daemon` (template: `launchd/com.heimdall.backend.plist.example`).
 
 ### Self-healing surface (daemon-era commands)
 
