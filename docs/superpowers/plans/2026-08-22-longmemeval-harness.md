@@ -29,10 +29,10 @@ These were established by direct inspection, not assumption. They are the reason
 | F1 | `graft retrieve` scores are pure RRF rank, `1/(60+rank)` | Observed 0.0163934, 0.016129, 0.015873 … = 1/61, 1/62, 1/63; `rrf_k_const: 60` in config | No relevance magnitude ⇒ **no abstention threshold, no rerank signal.** Directly costs points on every `_abs` question. |
 | F2 | `graft query` *does* expose calibrated signals | Returns `s_vec: 0.742844`, `s_lex: 0.129032`, `s_jaccard`, `s_ce` | The magnitudes exist and are recoverable — but `query` returns **top-1 only**. Task 4 exists to recover them per-candidate. |
 | F3 | Cross-encoder reranker is configured but inactive | `verification.cross_encoder_enabled: false`, `rerank.enabled: false`, `s_ce: null` | An unused, CPU-only precision lever that the no-LLM constraint fully permits. |
-| F4 | The reranker model was never downloaded | `~/knowledge-base/models/` contains only `bge-m3.gguf` (605 MB); `bge-reranker-v2-m3.gguf` absent | F3 cannot be switched on until the model is fetched. One-time ~600 MB, zero tokens. |
+| F4 | The reranker model was never downloaded — **now fetched** | `bge-reranker-v2-m3.gguf` (1.1 GB, FP16, from `gpustack/bge-reranker-v2-m3-GGUF`) now sits beside `bge-m3.gguf` in `~/knowledge-base/models/` | F3's blocker is cleared. `cross_encoder_enabled` / `rerank.enabled` are still `false` in `~/.graft/config.yaml`; flipping them is a Plan 2 lever, CPU-only, zero tokens. |
 | F5 | `graft insert` has no timestamp field | CLI accepts only `--title/--body/--keyword/--tag/--author/--expires-at` | Session timestamps must be encoded into title/body/keywords. **Temporal-reasoning and knowledge-update categories depend on this.** |
 | F6 | Embedding backend is throttled | `threads: 2`, `hardware_accel: false` on an 8-core M1 Pro | Ingesting ~25k sessions will be needlessly slow. Tuning is config-only. |
-| F7 | Two `graftd` processes are running | PIDs 7266 and 72197 | README: *"two daemons fight over the socket."* Must be resolved before any measurement is trustworthy. |
+| F7 | Duplicate `graftd` processes keep appearing | Repeatedly observed, most recently 3 at once, two holding `/tmp/graft-default.sock` on different inodes | graft's daemon autostart takes no lock, so concurrent CLI calls each spawn one. `bin/kb-health.sh` does **not** fix this (see Task 0). Recurs under parallel subagents; recheck before every measurement. |
 | F8 | No LongMemEval harness exists anywhere | `grep -ril longmemeval` empty across repo, `~/.heimdall`, `~/knowledge-base`, `~/.claude`, `~/.pi`, shell history | The reported baseline is **unreproduced locally**. Task 6 may legitimately fail to match it. |
 
 ---
@@ -61,23 +61,45 @@ Expected: two `graftd --config ~/.graft/config.yaml` lines with different start 
 lsof /tmp/graft-default.sock 2>/dev/null
 ```
 
-- [ ] **Step 3: Stop the duplicate via launchd, not `kill`**
+Compare the `DEVICE` column. Two daemons holding the *same path* on *different*
+inodes means the later one rebound the socket and stranded the earlier one on an
+unlinked inode — the earlier daemon is receiving zero traffic.
 
-`graftd` is launchd-managed with `KeepAlive` — a bare `kill` will be restarted, and per the user's standing rules `kill -9` of a process Claude did not launch requires `bio-confirm`. Use the supported path:
-
-```bash
-bash bin/kb-health.sh
-```
-
-Per the README this "reconciles to exactly one" daemon.
-
-- [ ] **Step 4: Verify exactly one remains**
+- [ ] **Step 3: Identify which daemon launchd actually owns**
 
 ```bash
-pgrep -fl graftd | wc -l
+launchctl print gui/$(id -u)/com.graft.daemon | grep -E '^\s+pid '
 ```
 
-Expected: `1`
+Every other `graftd` is an orphan (`PPID 1`, not launchd's child).
+
+**Do NOT use `bash bin/kb-health.sh` here.** It does not reconcile to one daemon,
+despite the README's claim. Its only health signal is whether `graft stats`
+responds (`bin/kb-health.sh:14-17`), and it deliberately ignores socket-holder
+count because a forked embedding worker legitimately inherits the fd. It prints
+`HEALTHY` and leaves every duplicate running.
+
+Root cause, verified: graft's daemon autostart takes no lock, so concurrent CLI
+invocations each spawn a daemon. Parallel subagents reproduce this every time.
+Expect it to recur; re-check before each measurement run.
+
+- [ ] **Step 4: Kill the orphans, then restart the managed one**
+
+`kill` of a process Claude did not launch requires `bio-confirm` per the user's
+standing rules. If `bio-confirm` exits non-zero, abort and report — do not fall
+back to an ungated path.
+
+```bash
+bio-confirm "kill orphan graftd <PID>" && kill <PID>
+launchctl kickstart -k gui/$(id -u)/com.graft.daemon
+```
+
+- [ ] **Step 5: Verify exactly one remains and it still has the data**
+
+```bash
+pgrep -fl graftd | wc -l          # expect 1
+graft stats                        # expect a response, node count unchanged
+```
 
 - [ ] **Step 5: Commit (no code change — record the finding)**
 
