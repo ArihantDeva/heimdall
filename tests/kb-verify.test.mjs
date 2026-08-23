@@ -4,9 +4,9 @@
 // in --selftest mode (no graft daemon needed).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -54,7 +54,6 @@ test("binary/oversized file degrades gracefully, no crash", () => {
 // These are regression tests for the tilde-form bug (the old HOME_RE pattern
 // `~?/Users/...` could never match `~/...` prose at all, which silently hid
 // every ~-anchored node from both search verdicts and the stale scan).
-import { spawnSync } from "node:child_process";
 
 function extractPaths(text) {
   const r = spawnSync("python3", ["-c", `
@@ -65,14 +64,17 @@ print("\\n".join(extract_paths(sys.argv[1])))
   return r.stdout.trim().split("\n").filter(Boolean);
 }
 
+const HOME = homedir();
+
 test("extract_paths: ~-anchored path resolves (tilde form bug regression)", () => {
   const paths = extractPaths("note: ~/Repos/poker-bot/tools — heads-up jam/fold EV optimizer");
-  assert.deepEqual(paths, ["/Users/arihantdeva/Repos/poker-bot/tools"]);
+  assert.deepEqual(paths, [join(HOME, "Repos/poker-bot/tools")]);
 });
 
 test("extract_paths: /Users/... absolute form still resolves", () => {
-  const paths = extractPaths("see /Users/arihantdeva/Repos/heimdall/README.md — markdown");
-  assert.deepEqual(paths, ["/Users/arihantdeva/Repos/heimdall/README.md"]);
+  const abs = join(HOME, "Repos/heimdall/README.md");
+  const paths = extractPaths(`see ${abs} — markdown`);
+  assert.deepEqual(paths, [abs]);
 });
 
 test("extract_paths: no path token yields nothing", () => {
