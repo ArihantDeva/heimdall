@@ -16,11 +16,46 @@ import subprocess
 import time
 
 GRAFT = pathlib.Path.home() / ".local/bin/graft"
+HERE = pathlib.Path(__file__).resolve().parent
+FACTS_CLI = HERE.parent / "bin" / "lib" / "facts-cli.mjs"
+NODE = os.environ.get("NODE", "node")
 
 # Stamped on every inserted node so a leak into the live `default` profile is
 # detectable directly, rather than inferred from a node count that also drifts
 # whenever real work is recorded.
 BENCH_MARKER = "longmemeval-bench"
+
+
+def shim_facts(path: pathlib.Path) -> list[dict]:
+    """Run the ONE extractor over a materialized window (spec D3: consumed as
+    a subprocess — never re-implemented here). Returns the JSON fact array."""
+    out = subprocess.run([NODE, str(FACTS_CLI), "--file", str(path)],
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        raise RuntimeError(f"facts-cli failed on {path}: {out.stderr.strip()}")
+    return json.loads(out.stdout)
+
+
+def fact_insert_cmd(fact: dict, parent_title: str,
+                    question_id: str) -> list[str]:
+    """Deterministic insert command for one fact node.
+
+    The cycle-1 ablation failed because fact fragments displaced their parent
+    session with no retrievable link back. The fix lives entirely in keywords:
+    `sid:<exact parent title>` rides on every graft result row (retrieve emits
+    keywords), so retrieval can rewrite a fact hit into its parent session
+    with zero extra graft calls — token-free and available in --recall-only.
+    BENCH_MARKER stays on every node so purge removes facts like sessions."""
+    keywords = list(fact.get("keywords") or [])
+    return [
+        str(GRAFT), "insert",
+        "--title", f"fact: {fact['title']}",
+        "--body", fact["body"],
+        *sum([["--keyword", k] for k in keywords], []),
+        "--keyword", question_id,
+        "--keyword", BENCH_MARKER,
+        "--keyword", f"sid:{parent_title}",
+    ]
 
 
 def _iso(date_str: str) -> str:
@@ -147,12 +182,15 @@ def delete_nodes(id_hexes: list[str], profile: str = "longmemeval") -> None:
 
 def ingest_question(question: dict, root: pathlib.Path,
                     profile: str = "longmemeval",
-                    chunk_size: int = 0, chunk_stride: int = 2) -> list[str]:
+                    chunk_size: int = 0, chunk_stride: int = 2,
+                    facts: bool = False) -> list[str]:
     """Insert every materialized session into the ISOLATED profile.
 
     Returns the inserted id_hex list. Each LongMemEval question carries its own
     haystack, so the caller must delete these before the next question or
     retrieval leaks evidence across questions and the score is meaningless.
+    With facts=True each window additionally emits its CPU-extracted fact
+    nodes (same profile, same marker, parent-linked by sid keyword).
     """
     if profile == "default":
         raise RuntimeError(
@@ -161,7 +199,7 @@ def ingest_question(question: dict, root: pathlib.Path,
     inserted: list[str] = []
     try:
         return _insert_all(question, root, profile, inserted,
-                           chunk_size, chunk_stride)
+                           chunk_size, chunk_stride, facts)
     except BaseException:
         # A partial haystack must not survive: it would leak into the next
         # question's retrieval, and the `finally` in the caller never sees
@@ -172,20 +210,26 @@ def ingest_question(question: dict, root: pathlib.Path,
 
 def _insert_all(question: dict, root: pathlib.Path, profile: str,
                 inserted: list[str], chunk_size: int = 0,
-                chunk_stride: int = 2) -> list[str]:
+                chunk_stride: int = 2, facts: bool = False) -> list[str]:
     dates = question.get("haystack_dates") or []
+    env = dict(os.environ, GRAFT_PROFILE=profile)
     for path, idx in materialize(question, root, chunk_size, chunk_stride):
         date = dates[idx] if idx < len(dates) else ""
+        title = session_title(session_id_at(question, idx), date)
         cmd = [
             str(GRAFT), "insert",
-            "--title", session_title(session_id_at(question, idx), date),
+            "--title", title,
             "--body", path.read_text(encoding="utf-8"),
             "--keyword", _iso(date),
             "--keyword", question["question_id"],
             "--keyword", BENCH_MARKER,
         ]
-        env = dict(os.environ, GRAFT_PROFILE=profile)
         inserted.append(_insert_one(cmd, env))
+        if facts:
+            for fact in shim_facts(path):
+                inserted.append(_insert_one(
+                    fact_insert_cmd(fact, title, question["question_id"]),
+                    env))
     return inserted
 
 

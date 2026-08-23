@@ -1,6 +1,7 @@
-import pathlib, sys
+import json, pathlib, sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from ingest import materialize, session_title
+from ingest import (BENCH_MARKER, fact_insert_cmd, materialize,
+                    session_title, shim_facts)
 
 QUESTION = {
     "question_id": "q1",
@@ -41,3 +42,35 @@ def test_no_llm_call_at_ingest(tmp_path, monkeypatch):
     for banned in ("anthropic", "openai"):
         monkeypatch.setitem(sys.modules, banned, None)
     materialize(QUESTION, tmp_path)  # must not raise
+
+
+def test_shim_facts_runs_the_one_extractor(tmp_path):
+    """Spec D3: the bench consumes bin/lib/facts-cli.mjs as a subprocess —
+    never a re-implemented extractor."""
+    f = tmp_path / "window.md"
+    f.write_text("user: I prefer dark mode terminals.\n")
+    facts = shim_facts(f)
+    assert isinstance(facts, list) and facts, "preference line must yield one fact"
+    assert {"id", "title", "body"} <= set(facts[0])
+
+
+def test_fact_insert_cmd_carries_marker_and_parent_sid():
+    """Cycle-2 lever: a fact hit must be traceable to its parent session at
+    retrieval time. The sid keyword carries the EXACT parent title (the string
+    recall.py parses session ids out of), and BENCH_MARKER keeps purge able to
+    remove fact nodes like every other bench node."""
+    fact = {"id": "fact-abc", "title": "I prefer vim",
+            "body": "I prefer vim [x.md:1]", "keywords": ["heimdall"]}
+    parent = "session sharegpt_X — 2023-04-01 (2023/04/01 (Sat) 04:24)"
+    cmd = fact_insert_cmd(fact, parent_title=parent, question_id="q1")
+    assert "insert" in cmd
+    kws = [cmd[i + 1] for i, c in enumerate(cmd) if c == "--keyword"]
+    assert BENCH_MARKER in kws, "purge relies on the marker"
+    assert f"sid:{parent}" in kws, "expansion reads the parent title back"
+
+
+def test_fact_insert_cmd_is_deterministic_per_fact():
+    fact = {"id": "fact-abc", "title": "t", "body": "b", "keywords": []}
+    a = fact_insert_cmd(fact, "session s — d (d)", "q1")
+    b = fact_insert_cmd(fact, "session s — d (d)", "q1")
+    assert a == b

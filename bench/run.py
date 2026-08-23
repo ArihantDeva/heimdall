@@ -10,6 +10,7 @@ import time
 from ingest import delete_nodes, ingest_question, require_empty_profile
 from reader import build_prompt, complete
 from recall import recall_report
+from retrieve import expand_facts_to_sessions
 
 HERE = pathlib.Path(__file__).resolve().parent
 DATA = HERE / "data"
@@ -32,7 +33,15 @@ def main() -> None:
     ap.add_argument("--chunk-stride", type=int, default=2)
     ap.add_argument("--recall-only", action="store_true",
                     help="token-free retrieval diagnostic; skips reader+judge")
+    ap.add_argument("--facts", action="store_true",
+                    help="also ingest CPU-extracted fact nodes (agent tier)")
+    ap.add_argument("--tier", choices=["cpu", "agent"], default="cpu",
+                    help="stamped into summary.json for regression gating")
     args = ap.parse_args()
+    if args.tier == "agent" and not args.facts:
+        ap.error("--tier agent requires --facts")
+    if args.facts and args.tier == "cpu":
+        ap.error("--facts requires --tier agent")
 
     from retrieve import search  # imported late so --recall-only still needs it
 
@@ -61,7 +70,8 @@ def main() -> None:
         try:
             ids = ingest_question(question, run_dir / "sessions",
                                   chunk_size=args.chunk_size,
-                                  chunk_stride=args.chunk_stride)
+                                  chunk_stride=args.chunk_stride,
+                                  facts=args.facts)
         except Exception as exc:
             failures.append({"question_id": question["question_id"],
                              "stage": "ingest", "error": str(exc)})
@@ -71,7 +81,13 @@ def main() -> None:
         try:
             cands = search(question["question"], top_k=args.top_k,
                            with_bodies=not args.recall_only)
-            titles = [c.title for c in cands]
+            # Agent tier retrieves THROUGH the fact→session link: fact hits
+            # are rewritten to their parent session title before scoring, so
+            # fact precision converts into session recall (cycle-2 lever).
+            # Scored mode reads candidate bodies directly; expansion there is
+            # a known gap (parent bodies would need refetch) — record-only.
+            titles = (expand_facts_to_sessions(cands) if args.facts
+                      else [c.title for c in cands])
             pairs.append((question, titles))
 
             record = {"question_id": question["question_id"],
@@ -97,6 +113,8 @@ def main() -> None:
     sink.close()
 
     summary = {"dataset": args.dataset,
+               "tier": args.tier,
+               "facts": args.facts,
                "chunk_size": args.chunk_size,
                "chunk_stride": args.chunk_stride,
                "top_k": args.top_k,

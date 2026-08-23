@@ -27,10 +27,29 @@ class Candidate:
     s_lex: float | None = None
     s_ce: float | None = None
     body: str | None = None
+    keywords: list[str] | None = None  # fact nodes carry sid:<parent title>
 
     @property
     def rank(self) -> int:
         return rrf_rank_of(self.rrf)
+
+
+def expand_facts_to_sessions(candidates: list[Candidate]) -> list[str]:
+    """Cycle-2 lever (cycle-1 eval, finding 2): fact hits used to displace
+    their parent session at deep k with no retrievable link back. Fact nodes
+    now carry the exact parent title in a `sid:` keyword, so a fact hit is
+    rewritten into that title — converting fact precision into session recall
+    without crowding top-k. Non-fact rows and sid-less nodes pass through;
+    duplicates collapse to the first position. Token-free: keyword arithmetic
+    only."""
+    out: list[str] = []
+    for cand in candidates:
+        parent = next((k[4:] for k in (cand.keywords or [])
+                       if k.startswith("sid:")), None)
+        out.append(parent if parent is not None else cand.title)
+    seen: set[str] = set()
+    deduped = [t for t in out if not (t in seen or seen.add(t))]
+    return deduped
 
 
 def rrf_rank_of(score: float, k: int = RRF_K) -> int:
@@ -56,12 +75,21 @@ def search(query: str, top_k: int = 25, profile: str = "longmemeval",
     payload = _graft(["retrieve", query, "--top-k", str(top_k)], profile)
     results = payload["result"]["results"]
 
+    # Session-level dedup: keep the best-ranked window per session title.
+    # Overlapping chunk windows share a title and near-identical vectors, so
+    # without this one session floods top-k and crowds out other evidence.
+    seen: set[str] = set()
+
     candidates: list[Candidate] = []
     for row in results:
+        if row["title"] in seen:
+            continue
+        seen.add(row["title"])
         cand = Candidate(
             id_hex=row["id_hex"],
             title=row["title"],
             rrf=row["score"],
+            keywords=row.get("keywords") or [],
         )
         if with_bodies:
             # NOT `--markdown`: that emits raw markdown text, not JSON.
