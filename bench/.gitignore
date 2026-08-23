@@ -1,3 +1,6 @@
 data/
-runs/
+runs/*
+!runs/20260823-134319-cycle1-cpu-tier/
+!runs/20260823-134319-cycle1-agent-tier/
+!runs/20260823-134319-cycle1-eval.md
 *.log

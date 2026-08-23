@@ -1,0 +1,26 @@
+{
+  "tier": "cpu",
+  "variant": "session-markdown only",
+  "dataset": "longmemeval_s subset",
+  "subset": "first 20 single-session-user + first 10 multi-session",
+  "top_k": 25,
+  "chunk_size": 0,
+  "chunk_stride": 2,
+  "n_questions": 30,
+  "n_failed": 0,
+  "recall": {
+    "single-session-user": {
+      "1": 0.2,
+      "5": 0.25,
+      "10": 0.3,
+      "25": 0.8
+    },
+    "multi-session": {
+      "1": 0.3,
+      "5": 0.5,
+      "10": 0.6,
+      "25": 0.9
+    }
+  },
+  "note": "recall-only diagnostic (token-free); reader/judge not run this cycle"
+}

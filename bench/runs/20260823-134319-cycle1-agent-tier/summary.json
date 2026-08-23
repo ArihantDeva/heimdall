@@ -1,0 +1,26 @@
+{
+  "tier": "agent",
+  "variant": "sessions + fact nodes via facts-cli shim (spec D3)",
+  "dataset": "longmemeval_s subset",
+  "subset": "identical 30 questions to cpu run",
+  "top_k": 25,
+  "chunk_size": 0,
+  "chunk_stride": 2,
+  "n_questions": 30,
+  "n_failed": 0,
+  "recall": {
+    "single-session-user": {
+      "1": 0.25,
+      "5": 0.3,
+      "10": 0.3,
+      "25": 0.8
+    },
+    "multi-session": {
+      "1": 0.2,
+      "5": 0.5,
+      "10": 0.6,
+      "25": 0.7
+    }
+  },
+  "note": "fact nodes = CPU heuristics extractor output; agent-tier LLM extraction tested offline in tests/tier.test.mjs"
+}
