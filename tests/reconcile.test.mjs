@@ -166,6 +166,110 @@ test("deleting a file retracts exactly its own nodes", () => {
   } finally { s.cleanup(); }
 });
 
+// 4b ── the fact layer rides the same reconciler. A prompt log is just another
+// watched file (spec D1): its facts must insert, survive an update that only
+// swaps some of them, and retract with the file — exactly its own nodes.
+test("a prompt log's facts insert, update, and retract with the file", () => {
+  const s = sandbox();
+  s.ctx.config.facts = true;
+  try {
+    const p = s.file("prompts.jsonl", [
+      JSON.stringify({ text: "I use SQLite for storage." }),
+      JSON.stringify({ text: "I always commit after review." }),
+    ].join("\n") + "\n");
+    s.journal.enqueue(p, "t");
+    drain(s.ctx);
+
+    const nodes1 = s.journal.ownedNodes(p);
+    const facts1 = nodes1.filter((n) => n.kind === "fact");
+    assert.equal(facts1.length, 2, "file node + two facts");
+    assert.equal(nodes1.length, 3);
+    const edges1 = s.journal.ownedEdges(p);
+    assert.equal(edges1.length, 2);
+    for (const e of edges1) {
+      assert.equal(e.relation, "stated_in");
+      assert.ok(facts1.some((f) => f.node_id === e.src), "edge src is an owned fact");
+      assert.ok(nodes1.some((n) => n.node_id === e.dst && n.kind === "file"),
+        "stated_in points at this path's file node");
+    }
+    // The sink ranks the utterance, not the file it came from.
+    const titles = [...s.sink.nodes.values()].map((n) => n.title);
+    assert.ok(titles.includes("I use SQLite for storage"));
+    assert.ok(titles.includes("I always commit after review"));
+
+    // Update: one fact swapped out. Exactly the swapped fact changes identity.
+    // Journal rows don't carry the title, so identify rows via the sink
+    // projection (title -> sink_id -> owned row).
+    const rowByTitle = (title) => {
+      const sinkId = [...s.sink.nodes].find(([, n]) => n.title === title)?.[0];
+      return facts1.find((f) => f.sink_id === sinkId);
+    };
+    const dropped = rowByTitle("I always commit after review");
+    const kept = rowByTitle("I use SQLite for storage");
+    writeFileSync(p, [
+      JSON.stringify({ text: "I use SQLite for storage." }),
+      JSON.stringify({ text: "I prefer tabs over spaces." }),
+    ].join("\n") + "\n");
+    s.journal.enqueue(p, "t");
+    drain(s.ctx);
+
+    const facts2 = s.journal.ownedNodes(p).filter((n) => n.kind === "fact");
+    assert.equal(facts2.length, 2);
+    assert.ok(facts2.some((f) => f.node_id === kept.node_id), "unchanged utterance keeps its node");
+    assert.ok(!facts2.some((f) => f.node_id === dropped.node_id), "swapped-out fact retracted");
+    assert.equal(s.journal.ownedEdges(p).length, 2);
+
+    // Retract: deleting the file takes every owned fact with it.
+    rmSync(p);
+    s.journal.enqueue(p, "t");
+    drain(s.ctx);
+    assert.equal(s.journal.ownedNodes(p).length, 0);
+    assert.equal(s.journal.ownedEdges(p).length, 0);
+    assert.equal(s.sink.nodes.size, 0, "nothing else was indexed, so the sink is empty");
+  } finally { s.cleanup(); }
+});
+
+test("second identical reconcile of a fact source produces zero sink ops", () => {
+  const s = sandbox();
+  s.ctx.config.facts = true;
+  try {
+    const p = s.file("log.jsonl", JSON.stringify({ text: "I run Heimdall." }) + "\n");
+    s.journal.enqueue(p, "t");
+    drain(s.ctx);
+    assert.equal(s.journal.ownedNodes(p).filter((n) => n.kind === "fact").length, 1);
+
+    s.sink.ops.length = 0;
+    s.journal.enqueue(p, "t"); // same bytes, forced re-hint
+    drain(s.ctx);
+    assert.deepEqual(s.sink.ops, [], `idempotent reconcile must not touch the sink, got ${JSON.stringify(s.sink.ops)}`);
+    assert.equal(s.sink.nodes.size, 2, "file + fact still projected");
+    assert.equal(s.journal.getPath(p).hash, sha256(readFileSync(p)));
+  } finally { s.cleanup(); }
+});
+
+// The production trigger is structural, not configured: extensions/prompt-capture
+// writes under ~/.heimdall/prompts/ and hints the path. Runs in a child with an
+// isolated $HOME so the real capture directory is never touched.
+test("anything under ~/.heimdall/prompts/ gets facts without a config flag", () => {
+  const home = mkdtempSync(join(tmpdir(), "heimdall-home-"));
+  try {
+    const p = join(home, ".heimdall", "prompts", "abc123def456.jsonl");
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, JSON.stringify({ text: "I use SQLite for storage." }) + "\n");
+    const script = `
+      import { desiredState } from ${JSON.stringify(join(REPO, "bin/lib/extract.mjs"))};
+      const st = desiredState(${JSON.stringify(p)}, "file");
+      console.log(JSON.stringify(st.nodes.filter((n) => n.kind === "fact").map((n) => n.title)));
+    `;
+    const kid = spawnSync(process.execPath, ["-e", script], {
+      encoding: "utf8",
+      env: { ...process.env, HOME: home },
+    });
+    assert.equal(kid.status, 0, kid.stderr);
+    assert.deepEqual(JSON.parse(kid.stdout), ["I use SQLite for storage"]);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
 // 5 ── order independence
 test("cross-file edges converge regardless of reconcile order", () => {
   // Driven at the journal layer so the property is tested even on machines

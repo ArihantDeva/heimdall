@@ -6,8 +6,10 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, extname, join } from "node:path";
 import { capability, rank, REPO_ROOT } from "./depth.mjs";
+import { extractFacts } from "./facts.mjs";
 
 const BRIDGE = join(REPO_ROOT, "bin", "lib", "heimdall_extract.py");
 
@@ -40,6 +42,30 @@ export const languageOf = (path) => LANG_BY_EXT[extname(path).toLowerCase()] ?? 
  */
 const nsFor = (path) => sha256(path).slice(0, 12);
 export const nodeIdFor = (path, rawId) => `${nsFor(path)}:${rawId}`;
+
+/** The capture directory (extensions/prompt-capture.ts writes here). */
+const promptsDir = () => join(homedir(), ".heimdall", "prompts") + "/";
+
+/**
+ * Append fact nodes + stated_in edges for opted-in paths: config facts:true,
+ * or anything living under the capture directory. The flag form lets tests
+ * opt a tmpdir log in without touching real ~/.heimdall state.
+ */
+function appendFactState(nodes, edges, buf, path, fileNodeId, enabled) {
+  if (!enabled) return;
+  for (const f of extractFacts(buf, { path })) {
+    const factNodeId = `${f.id}@${nsFor(path)}`;
+    nodes.push({
+      node_id: factNodeId,
+      kind: "fact",
+      title: f.title,
+      body: f.body,
+      keywords: f.keywords,
+      line: f.line,
+    });
+    edges.push({ src: factNodeId, dst: fileNodeId, relation: "stated_in", line: f.line });
+  }
+}
 
 const lineOf = (loc) => {
   const m = /^L(\d+)$/.exec(String(loc ?? ""));
@@ -98,6 +124,12 @@ export function desiredState(path, depth, opts = {}) {
     nodes[0].size = st.size;
     achieved = "file";
   }
+
+  // Facts ride along at any depth >= file for opted-in paths (spec D1: the
+  // prompt log is just another watched file).
+  appendFactState(nodes, edges, buf, path, fileNodeId,
+    rank(depth) >= rank("file") &&
+    (opts.facts === true || path.startsWith(promptsDir())));
 
   if (rank(depth) >= rank("symbol")) {
     const bridged = opts.bridged?.get(path) ?? runBridge([path], opts.cap).get(path);

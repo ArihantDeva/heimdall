@@ -73,6 +73,16 @@ export function renderNode(n, path) {
       keywords: ["heimdall", "file", n.language].filter(Boolean),
     };
   }
+  // Fact nodes arrive fully rendered by the extractor (facts.mjs contract:
+  // title/body/keywords) — pass straight through so graft ranks the utterance,
+  // not the file it came from.
+  if (n.kind === "fact") {
+    return {
+      title: n.title ?? "fact",
+      body: n.body ?? n.title ?? "",
+      keywords: n.keywords?.length ? n.keywords : ["heimdall", "fact"],
+    };
+  }
   const where = n.line ? `${path}:${n.line}` : path;
   return {
     title: `${n.label ?? n.symbol} — ${where}`,

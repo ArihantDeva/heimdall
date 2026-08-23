@@ -116,14 +116,33 @@ def require_empty_profile(profile: str = "longmemeval") -> None:
         )
 
 
+def _delete_one(id_hex: str, env: dict, attempts: int = 3) -> None:
+    """One delete, retried. Under sustained load the daemon intermittently
+    fails (rc=3 after 'schema apply failed'), same as insert does."""
+    for attempt in range(1, attempts + 1):
+        out = subprocess.run([str(GRAFT), "delete", id_hex],
+                             capture_output=True, text=True, env=env)
+        if out.returncode == 0:
+            return
+        # rc=3 'not found' = already gone (daemon restart can roll back the
+        # WAL). Cleanup is idempotent by contract.
+        if out.returncode == 3 and '"not found"' in (out.stdout + out.stderr):
+            return
+        if attempt == attempts:
+            raise RuntimeError(
+                f"graft delete {id_hex} failed after {attempts} attempts "
+                f"(rc={out.returncode}): {out.stderr.strip() or out.stdout.strip()}"
+            )
+        time.sleep(2 * attempt)
+
+
 def delete_nodes(id_hexes: list[str], profile: str = "longmemeval") -> None:
     """Remove nodes again so the next question starts from an empty haystack."""
     if profile == "default":
         raise RuntimeError("refusing to delete from the default profile")
     env = dict(os.environ, GRAFT_PROFILE=profile)
     for id_hex in id_hexes:
-        subprocess.run([str(GRAFT), "delete", id_hex],
-                       check=True, capture_output=True, env=env)
+        _delete_one(id_hex, env)
 
 
 def ingest_question(question: dict, root: pathlib.Path,

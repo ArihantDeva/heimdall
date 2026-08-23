@@ -62,7 +62,7 @@ export function reconcilePath(ctx, path) {
   // Forty agents editing one file collapse to one hash comparison.
   let desired;
   try {
-    desired = desiredState(path, effective, { bridged: ctx.bridged, cap: ctx.cap });
+    desired = desiredState(path, effective, { bridged: ctx.bridged, cap: ctx.cap, facts: ctx.config?.facts === true });
   } catch (err) {
     // Unreadable/ vanished mid-drain: dequeue so the caller's drain loop
     // terminates instead of spinning on this row forever, but leave any prior
