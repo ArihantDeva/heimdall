@@ -6,4 +6,7 @@ runs/*
 !runs/20260823-171209-cycle2-cpu-control/
 !runs/20260823-171743-cycle2-agent-expansion/
 !runs/20260823-134319-cycle2-eval.md
+# Even inside whitelisted run dirs, raw materialized haystacks are generated
+# bulk: summaries + per-question records carry all measurement evidence.
+sessions/
 *.log
