@@ -16,6 +16,11 @@ import subprocess
 
 GRAFT = pathlib.Path.home() / ".local/bin/graft"
 
+# Stamped on every inserted node so a leak into the live `default` profile is
+# detectable directly, rather than inferred from a node count that also drifts
+# whenever real work is recorded.
+BENCH_MARKER = "longmemeval-bench"
+
 
 def _iso(date_str: str) -> str:
     """'2023/03/03 (Fri) 14:12' -> '2023-03-03'."""
@@ -95,6 +100,7 @@ def ingest_question(question: dict, root: pathlib.Path,
             "--body", path.read_text(encoding="utf-8"),
             "--keyword", _iso(date),
             "--keyword", question["question_id"],
+            "--keyword", BENCH_MARKER,
         ]
         env = dict(os.environ, GRAFT_PROFILE=profile)
         out = subprocess.run(cmd, check=True, capture_output=True,

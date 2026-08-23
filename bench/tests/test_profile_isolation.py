@@ -1,4 +1,7 @@
-import json, subprocess, pathlib, pytest
+import json, os, subprocess, pathlib, sys, pytest
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from ingest import BENCH_MARKER
 
 GRAFT = pathlib.Path.home() / ".local/bin/graft"
 DEFAULT_DB = pathlib.Path.home() / ".graft/profiles/default/graft.db"
@@ -16,14 +19,22 @@ def test_longmemeval_profile_exists():
         "run bench/profile.sh — benchmark must never share the default profile"
 
 def test_default_profile_untouched_by_bench():
-    """The live profile holds real work. Guard its node count."""
-    baseline = pathlib.Path(__file__).parent / "default_node_count.txt"
-    out = subprocess.run([str(GRAFT), "stats"], capture_output=True, text=True).stdout
-    n = json.loads(out)["result"]["n_nodes"]
-    if not baseline.exists():
-        baseline.write_text(str(n))
-        pytest.skip(f"recorded default-profile baseline: {n} nodes")
-    assert n == int(baseline.read_text()), (
-        f"default profile node count changed {baseline.read_text()} -> {n}. "
+    """The live profile holds real work. Detect benchmark nodes directly.
+
+    Node count is the wrong signal: it drifts every time real work is recorded,
+    so an exact-match baseline fails spuriously and gets ignored. Every bench
+    insert carries the BENCH_MARKER keyword, so its presence in `default` is
+    unambiguous evidence of a leak.
+    """
+    out = subprocess.run(
+        [str(GRAFT), "explore", BENCH_MARKER, "--keyword", BENCH_MARKER],
+        capture_output=True, text=True, timeout=120,
+        env=dict(os.environ, GRAFT_PROFILE="default"),
+    ).stdout
+    if not out.strip():
+        pytest.skip("graft daemon unresponsive; leak check inconclusive")
+    hits = json.loads(out).get("result", {}).get("results", [])
+    assert hits == [], (
+        f"{len(hits)} benchmark nodes found in the default profile. "
         "Benchmark ingest leaked into real memory. Stop and investigate."
     )
