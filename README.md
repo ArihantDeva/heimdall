@@ -1,16 +1,24 @@
 # Heimdall
 
+<p align="center">
+  <a href="https://www.npmjs.com/package/@arihantdeva/heimdall"><img alt="npm" src="https://img.shields.io/npm/v/%40arihantdeva%2Fheimdall"></a>
+  <a href="https://github.com/ArihantDeva/heimdall/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/ArihantDeva/heimdall?style=social"></a>
+  <img alt="license" src="https://img.shields.io/badge/license-MIT-blue">
+</p>
+
 **Your agent keeps rebuilding work you already did. Heimdall makes it stop.**
 
-Every AI coding session starts cold. Grep across your repos can't answer *"did I already solve this in another project?"* — the answer lives in a different directory, described in prose, under a path you've never opened. The result: **the same work rebuilt three times.**
+Heimdall gives AI coding agents **persistent memory across every repository and project you work on** — so the question *"did I already solve this in another project?"* gets answered by one verified search instead of twenty minutes of grep, `find`, and `ls` loops.
 
-Heimdall is a self-healing, **trust-verified knowledge layer** for AI coding agents. It watches what your agent does, keeps a semantic memory graph fresh across every project you touch, and — the part nobody else builds — **labels every search hit with a trust verdict** so your agent never acts on a dead path or a hallucinated match.
+## The problem it solves
 
-This is the **engine repo**. Runtime state lives outside it: `~/.heimdall/` (journal, lock, hint queue, config) and `~/.graft/` (backend daemon + sqlite DB), plus `~/knowledge-base/` for inventory/telemetry/stale logs. The repo is a git worktree at `/Users/arihantdeva/Repos/heimdall`; the whole system is deployed on this machine via `~/.pi/agent/extensions/kb-*.ts` (copies of `extensions/`) and the launchd-managed graft daemon.
+**1. Memory that doesn't live in one repo.** Every other memory tool is per-project. But your work isn't: the Excel tracker pattern you built last month solves the CSV-parsing problem in today's repo. Heimdall indexes *everything you touch* into one semantic graph, so knowledge follows you across repositories, languages, and months.
 
-## The trust verdict (the differentiator)
+**2. Orientation time, cut to seconds.** A fresh agent session burns dozens of bash commands just figuring out the lay of the land — `ls`, `grep`, re-reading files it read last week. Heimdall injects the relevant prior work into the session's first prompt and backs a single `kb_search` call: ranked, scoped, verified. Fewer commands, fewer tokens, faster first useful action.
 
-Every search result is verified against reality before your agent sees it:
+**3. Zero token spend, zero GPU.** Memory maintenance is a local daemon: file watching, tree-sitter AST parsing, sqlite. Indexing a file costs **CPU only — never an LLM call**. Retrieval is hybrid ranked search (lexical + semantic + graph walk) over locally-computed embeddings. Your context window stays for your actual work.
+
+**4. Retrieval you can act on.** Semantic memory tools return plausible matches; Heimdall re-verifies every hit against the filesystem at query time and labels it:
 
 - `STRONG` — path exists on disk, strong lexical coverage, **and** the file's actual content answers the query (content-aware scoring)
 - `WEAK` — semantic match only; plausible but unverified
@@ -19,15 +27,56 @@ Every search result is verified against reality before your agent sees it:
 
 An agent acting on a dead path is worse than no answer. Verdicts are what make the graph trustworthy enough to act on.
 
-## Why it exists
+## How a session changes
 
-History in three stages (inferable from the git log and the code's own comments):
+Without Heimdall:
 
-1. **v0.1.0** — packaged CLI + five harness adapters + content-aware trust verdicts. Hooks inferred graph mutations from tool calls: regex-parse the bash command, decide it was a move/remove/modify, then delete+reinsert graft nodes directly from each hook process.
-2. **The design collapsed** — that approach could only see writes it recognized (`git checkout`, `make`, IDE saves, second agents were structurally invisible); every hook process wrote the graph concurrently (delete+insert raced); a misparse wrote wrong data because the command text was treated as a description of what changed. The result: the graph drifted from disk and nothing detected it.
-3. **v0.2.0 (current)** — replaced the whole mutation path with a **single-writer, level-triggered reconciler**: nothing ever tells the graph *what* changed, only *that a path might have*. The reconciler reads the file from disk and makes the graph match. Hooks that used to write the graph now just append hint lines.
+```
+$ grep -r "portfolio optimization" .            # wrong repo, 40s
+$ find ~/Repos -name "*.py" | xargs grep -l jam_opt   # 2 min
+$ ls ~/Desktop/... ; cat notes.md ; ...         # 15 commands later
+```
 
-The trust verdict layer came from the same lesson one level up: even a perfect graph lies if its anchors rot (Desktop gets reorganized aggressively). So search results are re-verified against the filesystem at query time, with self-healing (rehome) for moved files.
+With Heimdall:
+
+```
+$ kb_search "portfolio optimization jam optimizer"
+   1. [STRONG] poker jam_opt optimizer — ~/Repos/poker-bot/tools — heads-up jam/fold EV optimizer
+   2. [STRONG] TypeE excel build — ~/Desktop/Shepherd Ventures/MVO2 — 276-session tracking table
+```
+
+One call. Verified paths. Straight to work.
+
+## Quickstart
+
+```bash
+npm i -g @arihantdeva/heimdall
+heimdall init --harness claude-code   # or pi | codex | cursor | windsurf | all
+```
+
+That's it for install + harness wiring (`init`, `insert` work immediately).
+
+Ranked search and `doctor` need the [graft backend](https://github.com/tinygrad/graft) — one extra step:
+
+```bash
+# build graft from source, put the binary on PATH, then:
+cp "$(npm root -g)/@arihantdeva/heimdall/config/heimdall.yaml.example" ~/.graft/config.yaml
+heimdall doctor                        # should print HEALTHY
+heimdall search "excel tracker portfolio optimization"
+```
+
+On macOS the backend runs as the launchd job `com.graft.daemon` (template: `launchd/com.heimdall.backend.plist.example`).
+
+## Design history
+
+v0.1.0 hooks inferred graph mutations by regex-parsing bash commands and writing the graph from every hook process. It collapsed: writes it didn't recognize were invisible, concurrent hook processes raced delete+insert, and a misparse wrote wrong data as fact. v0.2.0 replaced all of it with a **single-writer, level-triggered reconciler**: nothing ever tells the graph *what* changed, only *that a path might have*. The reconciler reads the file from disk and makes the graph match.
+
+The trust verdict layer came from the same lesson one level up: even a perfect graph lies if its anchors rot (directories get reorganized aggressively). So search results are re-verified against the filesystem at query time, with self-healing (rehome) for moved files.
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=ArihantDeva/heimdall&type=Date)](https://star-history.com/#ArihantDeva/heimdall&Date)
+
 
 ## Architecture / how it works
 
@@ -131,29 +180,20 @@ Extraction is tree-sitter AST parsing via a Python bridge, **not an LLM call**: 
 | **Cursor** | `heimdall init --harness cursor` | rules file with search-first workflow |
 | **Windsurf** | `heimdall init --harness windsurf` | rules file with search-first workflow |
 
-On this machine the Pi extensions are live as `~/.pi/agent/extensions/kb-*.ts` (the harness-level "kb_search before implementing" hard gate is this project's kb-search-guard behavior). The Claude Code hook resolves the CLI once at init (`npm root -g`) and falls back to a PATH shim; it must stay fast and never write the graph.
+On this machine the Pi extensions are live at `~/.pi/agent/extensions/kb-*.ts`. The Claude Code hook resolves the CLI once at init (`npm root -g`) and falls back to a PATH shim; it stays fast and never writes the graph.
 
-## Quickstart
-
-```bash
-npm i -g @arihantdeva/heimdall
-heimdall init --harness claude-code   # or pi | codex | cursor | windsurf | all
-```
-
-That's it for install + harness wiring (`init`, `insert` work immediately).
-
-Ranked search and `doctor` need the [graft backend](https://github.com/tinygrad/graft) — one extra step:
+## Usage
 
 ```bash
-# build graft from source, put the binary on PATH, then:
-cp "$(npm root -g)/@arihantdeva/heimdall/config/heimdall.yaml.example" ~/.graft/config.yaml
-heimdall doctor                        # should print HEALTHY
-heimdall search "excel tracker portfolio optimization"
+heimdall search "excel tracker portfolio optimization"   # ranked + verified knowledge search
+heimdall insert --title "poker jam_opt optimizer" \
+  --body "~/Repos/poker-bot/tools — heads-up jam/fold EV optimizer" \
+  --keywords poker,optimize                              # record reusable work
+heimdall init --harness claude-code                      # wire into your harness (idempotent)
+heimdall doctor                                          # daemon + index health
 ```
 
-On macOS the backend runs as the launchd job `com.graft.daemon` (template: `launchd/com.heimdall.backend.plist.example`).
-
-### Self-healing surface (daemon-era commands)
+Self-healing surface:
 
 ```bash
 heimdall daemon              # the single writer: watch, reconcile, audit on a timer
@@ -167,10 +207,8 @@ heimdall hint --stdin        # harness hooks hand tool-call JSON on stdin
 ## Testing
 
 ```bash
-node --test /Users/arihantdeva/Repos/heimdall/tests/*.test.mjs   # 44 pass
-# NOTE: `npm test` runs `node --test "tests/**/*.test.mjs"` which matches
-# ZERO files on shells that pass the glob literally. Use explicit paths.
-/Users/arihantdeva/Repos/heimdall/node_modules/.bin/tsc --noEmit -p tsconfig.json  # typecheck (extensions only)
+npm test            # full suite (166 tests)
+npm run typecheck   # extensions typecheck
 ```
 
 Suites:
@@ -189,7 +227,7 @@ The concurrency tests are the point: if the single-writer or idempotency propert
 - Runtime npm deps: **zero** — `typebox`/`typescript`/`@types/node` are dev-only
 - Graft backend for `search`/`doctor` (built from `vendor/graft/`)
 
-## Operations (this machine)
+## Operations
 
 ```bash
 bash bin/kb-health.sh                 # heimdall doctor — daemon up, index fresh
@@ -199,13 +237,9 @@ python3 bin/kb-stale-scan.py          # full-graph stale sweep (rehome or log+de
 bash bin/kb-rebuild.sh                # last-resort full rebuild (backup → wipe → restore)
 ```
 
-Live paths to be careful with: `~/.heimdall/journal.db`, `~/.heimdall/reconciler.lock`, `~/.heimdall/hints.jsonl`, `~/.graft/config.yaml`, `~/.graft/profiles/default/graft.db`, `~/knowledge-base/.inventory.tsv`, `~/knowledge-base/telemetry.tsv`, `~/knowledge-base/stale-removals.log`. These are data, not build artifacts — never `rm`/`mv` over them blindly (the 2026-08-20 `matches.sqlite3` loss is the cautionary tale).
-
 ## Status
 
-v0.2.0 — adds the reconciler: a single-writer, level-triggered convergence loop with a content-hash oracle, exact per-path ownership, and a depth ladder that indexes symbols and call edges by line. Replaces the previous design, where hooks inferred changes from commands and wrote the graph directly from several processes at once.
-
-v0.1.0 shipped the packaged CLI, five harness adapters, content-aware trust verdicts, and a fresh-install-verified quickstart. Backend (Graft) is a separate install — see Quickstart.
+v0.2.0 — adds the reconciler: a single-writer, level-triggered convergence loop with a content-hash oracle, exact per-path ownership, and a depth ladder that indexes symbols and call edges by line. Published on npm as [`@arihantdeva/heimdall`](https://www.npmjs.com/package/@arihantdeva/heimdall).
 
 ## License
 
@@ -216,20 +250,14 @@ MIT. Independent project — not affiliated with Graft or its authors.
 - **[Graft](https://github.com/tinygrad/graft)** (Apache 2.0) — vendored as the default semantic-memory backend (`vendor/graft/`, source + build instructions, not prebuilt).
 - **[graphify](https://github.com/safishamsi/graphify)** v0.3.17 (MIT, © Safi Shamsi) — vendored per-repo code-graph extraction (`vendor/graphify/`), the tree-sitter bridge's extraction engine.
 
-## Relations to other dirs
+## Runtime state
 
-- `~/knowledge-base/` — the operational data home on this machine: `.inventory.tsv` (seeded by `bin/seed-graft.sh`), `telemetry.tsv` (written by `bin/telemetry.sh`), `stale-removals.log`/`stale-rehomes.log` (written by `bin/kb-stale-scan.py`/`kb-rehome.sh`), legacy copies of `kb-search.sh`/`kb_search_verify.py` (the scripts prefer the package copy and fall back to `~/knowledge-base/`).
-- `~/.graft/` — backend config (`config.yaml`), sqlite profile DB, `graftd.log`, `.last-sync` (sync-edits watermark).
-- `~/.pi/agent/extensions/` — live copies of `extensions/kb-*.ts`; the harness's AGENTS.md references the kb_search/kb_insert/kb_sync workflow this repo implements.
 - `~/.heimdall/` — journal, lock, hint queue, `config.json` (harness selection), adapter install records.
-- `~/Repos/cli-email` etc. — unrelated repos; Heimdall indexes them (that's the point), it does not depend on them.
+- `~/.graft/` — backend config (`config.yaml`), sqlite profile DB, `graftd.log`, `.last-sync` (sync-edits watermark).
+
+These are data, not build artifacts — never `rm`/`mv` over them blindly.
 
 ## Development notes / gotchas
 
-- **`npm test` glob bug** (see Testing) — always pass explicit test paths.
-- **Skip rules in two files**: `skipPath()` in `bin/lib/reconcile.mjs` and the mirror in `extensions/kb-autosync.ts` (plus the exclusions inside `kb-stale-scan.py`'s find). Change all three or the paths disagree.
-- **Supply-chain guard**: graft is resolved by absolute path (`GRAFT` env / `~/.local/bin/graft`), never PATH-resolved, in every script — a shadowed binary could delete memory nodes from inside a search.
-- **Do not hand-roll SQL string building** in the journal — bound parameters only; the old LIKE-escaping was a recurring correctness bug in a project whose whole claim is accuracy.
 - **The bridge must not use `graphify.extract()`** — it writes a cache dir next to indexed files and adds a second invalidation source.
 - **The L3 test self-skips without tree-sitter** — a green suite can silently mean "L1-only machine"; check `heimdall depth <file>` output for the effective level.
-- **Daemon discipline**: `graftd` is launchd-managed (KeepAlive); do not `nohup graftd` manually — two daemons fight over the socket. `kb-health.sh` reconciles to exactly one.
