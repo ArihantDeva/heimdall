@@ -1,16 +1,28 @@
-// CLI contract tests for the UX audit findings (F2, F3).
-// F2: unknown flags must be rejected, not silently ignored.
+// CLI contract tests for the UX audit findings (F2, F3) and the facts shim
+// (spec D3). F2: unknown flags must be rejected, not silently ignored.
 // F3: hint on a nonexistent path must tell the user what will happen.
+// facts-cli: stdout carries ONE parseable JSON array and nothing else;
+// any failure goes to stderr with a nonzero exit.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CLI = join(ROOT, "bin", "heimdall.js");
+const FACTS_CLI = join(ROOT, "bin", "lib", "facts-cli.mjs");
+
+function runFactsCli(args) {
+  // No sandboxed HOME needed: facts-cli reads exactly the path it is given
+  // and writes nothing anywhere — pure bytes → stdout.
+  return spawnSync(process.execPath, [FACTS_CLI, ...args], {
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+}
 
 function run(args) {
   // Sandboxed HOME: hint writes must never touch the user's real ~/.heimdall.
@@ -46,4 +58,54 @@ test("F3: hint on nonexistent path warns but still exits 0 (hint is advisory)", 
   assert.equal(r.status, 0, "hint stays advisory — absent is reconciled later");
   assert.match((r.stderr ?? "") + (r.stdout ?? ""), /does not exist|not found/i,
     "user must be told the path is missing");
+});
+
+// ── facts-cli.mjs: bench ingest contract (spec D3/D6) ────────────────────────
+test("facts-cli: happy path prints ONE parseable JSON fact array on stdout", () => {
+  const dir = mkdtempSync(join(tmpdir(), "heimdall-facts-cli-"));
+  try {
+    const log = join(dir, "prompts.jsonl");
+    const recs = [
+      JSON.stringify({ at: "2026-08-23T00:00:01Z", cwd: dir, text: "I prefer SQLite over Postgres." }),
+      JSON.stringify({ at: "2026-08-23T00:00:02Z", cwd: dir, text: "Heimdall is a local-first memory layer." }),
+    ];
+    writeFileSync(log, recs.join("\n") + "\n");
+    const r = runFactsCli(["--file", log]);
+    assert.equal(r.status, 0, `exit ${r.status}, stderr: ${r.stderr}`);
+    const facts = JSON.parse(r.stdout); // throws unless the WHOLE stdout parses
+    assert.ok(Array.isArray(facts), "stdout must decode to an array");
+    assert.ok(facts.length >= 2, `want >=2 facts, got ${facts.length}`);
+    for (const f of facts) {
+      assert.deepEqual(Object.keys(f).sort(), ["body", "id", "keywords", "line", "title"]);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("facts-cli: empty file exits 0 with an empty array on stdout", () => {
+  const dir = mkdtempSync(join(tmpdir(), "heimdall-facts-cli-"));
+  try {
+    const log = join(dir, "empty.jsonl");
+    writeFileSync(log, "");
+    const r = runFactsCli(["--file", log]);
+    assert.equal(r.status, 0);
+    assert.deepEqual(JSON.parse(r.stdout), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("facts-cli: missing file errors on stderr with nonzero exit, stdout clean", () => {
+  const r = runFactsCli(["--file", "/nonexistent/facts-input-xyz.jsonl"]);
+  assert.notEqual(r.status, 0, "unreadable input must fail, not print []");
+  assert.equal((r.stdout ?? "").trim(), "", "no partial output may reach stdout");
+  assert.match(r.stderr, /cannot read/i, "stderr must say what went wrong");
+});
+
+test("facts-cli: rejects unknown flags (F2 doctrine applies to this shim too)", () => {
+  const r = runFactsCli(["--bogus"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /unknown argument.*--bogus/);
+  assert.equal((r.stdout ?? "").trim(), "");
 });
