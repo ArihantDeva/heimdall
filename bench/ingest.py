@@ -13,6 +13,7 @@ import os
 import pathlib
 import re
 import subprocess
+import time
 
 GRAFT = pathlib.Path.home() / ".local/bin/graft"
 
@@ -91,6 +92,18 @@ def ingest_question(question: dict, root: pathlib.Path,
             "refusing to ingest benchmark data into the default profile"
         )
     inserted: list[str] = []
+    try:
+        return _insert_all(question, root, profile, inserted)
+    except BaseException:
+        # A partial haystack must not survive: it would leak into the next
+        # question's retrieval, and the `finally` in the caller never sees
+        # these ids because the exception escaped before they were returned.
+        delete_nodes(inserted, profile)
+        raise
+
+
+def _insert_all(question: dict, root: pathlib.Path, profile: str,
+                inserted: list[str]) -> list[str]:
     for idx, path in enumerate(materialize(question, root)):
         date = (question.get("haystack_dates") or [""])[idx] \
             if idx < len(question.get("haystack_dates") or []) else ""
@@ -103,7 +116,21 @@ def ingest_question(question: dict, root: pathlib.Path,
             "--keyword", BENCH_MARKER,
         ]
         env = dict(os.environ, GRAFT_PROFILE=profile)
-        out = subprocess.run(cmd, check=True, capture_output=True,
-                             text=True, env=env)
-        inserted.append(json.loads(out.stdout)["result"]["id_hex"])
+        inserted.append(_insert_one(cmd, env))
     return inserted
+
+
+def _insert_one(cmd: list[str], env: dict, attempts: int = 3) -> str:
+    """One insert, retried. The daemon fails intermittently under sustained
+    load, and a bare CalledProcessError hides graft's stderr entirely."""
+    for attempt in range(1, attempts + 1):
+        out = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        if out.returncode == 0 and out.stdout.strip():
+            return json.loads(out.stdout)["result"]["id_hex"]
+        if attempt == attempts:
+            raise RuntimeError(
+                f"graft insert failed after {attempts} attempts "
+                f"(rc={out.returncode}): {out.stderr.strip() or out.stdout.strip()!r}"
+            )
+        time.sleep(2 * attempt)
+    raise AssertionError("unreachable")

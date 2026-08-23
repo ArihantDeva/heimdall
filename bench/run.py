@@ -39,12 +39,24 @@ def main() -> None:
     run_dir = RUNS / time.strftime("%Y%m%d-%H%M%S")
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    pairs, records = [], []
+    # Appended per question: a failure 400 questions in must not discard the
+    # 399 that already succeeded.
+    results_path = run_dir / "results.jsonl"
+    sink = results_path.open("w", buffering=1)
+
+    pairs, records, failures = [], [], []
     for i, question in enumerate(rows, 1):
         # Each question owns its haystack. Leaving the previous question's
         # sessions in the profile would let retrieval pull evidence that this
         # question's memory never saw, which inflates the score meaninglessly.
-        ids = ingest_question(question, run_dir / "sessions")
+        try:
+            ids = ingest_question(question, run_dir / "sessions")
+        except Exception as exc:
+            failures.append({"question_id": question["question_id"],
+                             "stage": "ingest", "error": str(exc)})
+            print(f"[{i}/{len(rows)}] SKIP {question['question_id']}: {exc}",
+                  flush=True)
+            continue
         try:
             cands = search(question["question"], top_k=args.top_k,
                            with_bodies=not args.recall_only)
@@ -68,13 +80,15 @@ def main() -> None:
             delete_nodes(ids)
 
         records.append(record)
+        sink.write(json.dumps(record) + "\n")
         print(f"[{i}/{len(rows)}] {question['question_id']}", flush=True)
 
-    (run_dir / "results.jsonl").write_text(
-        "\n".join(json.dumps(r) for r in records)
-    )
+    sink.close()
 
     summary = {"dataset": args.dataset,
+               "n_questions": len(records),
+               "n_failed": len(failures),
+               "failures": failures,
                "recall": recall_report(pairs)}
     if not args.recall_only:
         graded = [r for r in records if "correct" in r]
