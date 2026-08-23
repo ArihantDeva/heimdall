@@ -92,6 +92,30 @@ def materialize(question: dict, root: pathlib.Path,
     return out
 
 
+def profile_node_count(profile: str = "longmemeval") -> int:
+    out = subprocess.run([str(GRAFT), "stats"], capture_output=True, text=True,
+                         env=dict(os.environ, GRAFT_PROFILE=profile))
+    if not out.stdout.strip():
+        raise RuntimeError(f"graft stats returned nothing: {out.stderr.strip()}")
+    return json.loads(out.stdout)["result"]["n_nodes"]
+
+
+def require_empty_profile(profile: str = "longmemeval") -> None:
+    """Refuse to measure against a dirty haystack.
+
+    Every stray node left by an interrupted run is a distractor competing with
+    the gold session, so a dirty profile reads as a retrieval regression that
+    no code change caused. Fail loudly instead of quietly scoring noise.
+    """
+    n = profile_node_count(profile)
+    if n:
+        raise RuntimeError(
+            f"profile '{profile}' holds {n} nodes before the run started. "
+            "An earlier run was interrupted before its cleanup. "
+            "Purge with bench/purge.py, then re-run."
+        )
+
+
 def delete_nodes(id_hexes: list[str], profile: str = "longmemeval") -> None:
     """Remove nodes again so the next question starts from an empty haystack."""
     if profile == "default":

@@ -7,7 +7,7 @@ import json
 import pathlib
 import time
 
-from ingest import delete_nodes, ingest_question
+from ingest import delete_nodes, ingest_question, require_empty_profile
 from reader import build_prompt, complete
 from recall import recall_report
 
@@ -35,6 +35,12 @@ def main() -> None:
     args = ap.parse_args()
 
     from retrieve import search  # imported late so --recall-only still needs it
+
+    # A run that starts with nodes already in the profile is measuring a
+    # haystack it did not build. Stray nodes survive any interrupted run,
+    # because SIGTERM skips the per-question cleanup, and they act as
+    # distractors that silently depress recall for every later run.
+    require_empty_profile()
 
     rows = json.loads((DATA / f"longmemeval_{args.dataset}.json").read_text())
     rows = rows[: args.limit]
