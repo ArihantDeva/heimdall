@@ -25,6 +25,11 @@ const USAGE = `usage: heimdall <command>
 const sh = (script, args) =>
   spawnSync("/bin/bash", [script, ...args], { stdio: "inherit" }).status ?? 1;
 
+// Expand a leading ~/ — resolve() alone yields a literal "$HOME/~" path, which
+// reconcile then records absent even though the real file exists.
+const expandPath = (p) =>
+  p.startsWith("~/") ? join(os.homedir(), p.slice(2)) : p;
+
 // Reject flags a subcommand does not know. Silent acceptance turned
 // `verify --deeph` into a plain `verify` — the user thinks deep audit ran.
 function checkFlags(cmd, args, allowed) {
@@ -130,7 +135,7 @@ async function runReconcile(args) {
     ]);
   const all = args.includes("--all");
   const dry = args.includes("--dry-run");
-  const paths = args.filter((a) => !a.startsWith("--")).map((p) => resolve(process.cwd(), p));
+  const paths = args.filter((a) => !a.startsWith("--")).map((p) => resolve(process.cwd(), expandPath(p)));
 
   const code = await Lock.withLock(lockPath(), () => {
     const journal = new Journal(journalPath());
@@ -202,12 +207,12 @@ async function runVerify(args) {
 async function runDepth(args) {
   const bad = checkFlags("depth", args, []);
   if (bad) return bad;
+  const target = args.find((a) => !a.startsWith("--"));
+  if (!target) return 0;
+  const p = resolve(process.cwd(), expandPath(target));
   const { capability, depthFor, loadConfig } = await import("./depth.mjs");
   const cap = capability();
   console.log(`capability: ${cap.max} (${cap.reason})`);
-  const target = args.find((a) => !a.startsWith("--"));
-  if (!target) return 0;
-  const p = resolve(process.cwd(), target);
   const d = depthFor(p, loadConfig(), cap);
   console.log(`${p}\n  requested: ${d.requested}\n  effective: ${d.effective}${d.clamped ? "  (clamped by capability)" : ""}`);
   return 0;
@@ -237,7 +242,7 @@ async function runHint(args) {
   const hintFile = queueHintPath();
   const seen = new Set();
   for (const p of paths) {
-    const abs = resolve(process.cwd(), p);
+    const abs = resolve(process.cwd(), expandPath(p));
     if (seen.has(abs)) continue;
     seen.add(abs);
     if (!existsSync(abs)) {

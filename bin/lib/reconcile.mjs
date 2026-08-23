@@ -75,13 +75,16 @@ export function reconcilePath(ctx, path) {
     prior && prior.state === "present" &&
     prior.hash === desired.hash && prior.depth === desired.depth
   ) {
-    // Hot path still re-stamps cap_max when the capability changed since the
-    // last reconcile — without this, a capability bounce (tree-sitter
-    // removed/reinstalled) leaves a stale record on a file whose content
-    // never changes again. The commit is ownership-exact, so it must be
-    // handed back everything the path currently owns; passing empty arrays
-    // here would wipe the file's nodes while claiming present/depth.
-    if (prior.cap_max !== (ctx.cap?.max ?? null)) {
+    // Hot path still re-stamps when the RECORD is stale even though the
+    // CONTENT is unchanged: cap_max on a capability bounce, or mtime/size
+    // after a touch (utimes). Without the stat refresh, audit's cheap screen
+    // re-flags the same file every cycle — verify stays permanently red.
+    // The commit is ownership-exact, so it must be handed back everything the
+    // path currently owns; passing empty arrays here would wipe the file's
+    // nodes while claiming present/depth.
+    const statStale =
+      prior.size !== desired.size || prior.mtime_ms !== desired.mtimeMs;
+    if (prior.cap_max !== (ctx.cap?.max ?? null) || statStale) {
       journal.commit({
         path, startGeneration,
         hash: desired.hash, size: desired.size, mtimeMs: desired.mtimeMs,

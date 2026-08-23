@@ -43,30 +43,53 @@ def session_id_at(question: dict, idx: int) -> str:
     return str(ids[idx]) if idx < len(ids) else str(idx)
 
 
-def materialize(question: dict, root: pathlib.Path) -> list[pathlib.Path]:
-    """Write one markdown file per haystack session. Returns written paths."""
+def windows(n_turns: int, size: int, stride: int) -> list[tuple[int, int]]:
+    """Sliding [start, end) turn windows covering every turn at least once.
+
+    Overlap matters: a fact stated at the boundary of two adjacent windows
+    would otherwise be split across both and be well represented by neither.
+    size <= 0 means "no chunking" — one window over the whole session.
+    """
+    if size <= 0 or n_turns <= size:
+        return [(0, n_turns)]
+    step = max(1, stride)
+    spans = [(s, min(s + size, n_turns)) for s in range(0, n_turns, step)
+             if s < n_turns]
+    # Drop trailing windows already fully covered by their predecessor.
+    return [w for i, w in enumerate(spans)
+            if i == 0 or w[1] > spans[i - 1][1]]
+
+
+def materialize(question: dict, root: pathlib.Path,
+                chunk_size: int = 0, chunk_stride: int = 2
+                ) -> list[tuple[pathlib.Path, int]]:
+    """Write markdown files for the haystack. Returns (path, session_idx).
+
+    With chunk_size > 0 each session is split into overlapping turn windows,
+    so retrieval scores a focused passage instead of one averaged vector over
+    an entire multi-turn conversation. The session id stays in every title,
+    which is what recall scoring reads back out.
+    """
     root = pathlib.Path(root)
     qdir = root / question["question_id"]
     qdir.mkdir(parents=True, exist_ok=True)
 
-    paths: list[pathlib.Path] = []
+    out: list[tuple[pathlib.Path, int]] = []
     dates = question.get("haystack_dates") or []
     for idx, turns in enumerate(question["haystack_sessions"]):
         date = dates[idx] if idx < len(dates) else ""
-        lines = [
-            f"# {session_title(session_id_at(question, idx), date)}",
-            "",
-            f"date: {date}",
-            f"iso_date: {_iso(date)}",
-            "",
-        ]
-        for turn in turns:
-            lines.append(f"{turn['role']}: {turn['content']}")
-            lines.append("")
-        path = qdir / f"session_{idx}.md"
-        path.write_text("\n".join(lines), encoding="utf-8")
-        paths.append(path)
-    return paths
+        title = session_title(session_id_at(question, idx), date)
+        for w, (lo, hi) in enumerate(windows(len(turns), chunk_size,
+                                             chunk_stride)):
+            lines = [f"# {title}", "", f"date: {date}",
+                     f"iso_date: {_iso(date)}", ""]
+            for turn in turns[lo:hi]:
+                lines.append(f"{turn['role']}: {turn['content']}")
+                lines.append("")
+            path = qdir / f"session_{idx}_{w}.md"
+            path.write_text("\n".join(lines), encoding="utf-8")
+            out.append((path, idx))
+    return out
 
 
 def delete_nodes(id_hexes: list[str], profile: str = "longmemeval") -> None:
@@ -80,7 +103,8 @@ def delete_nodes(id_hexes: list[str], profile: str = "longmemeval") -> None:
 
 
 def ingest_question(question: dict, root: pathlib.Path,
-                    profile: str = "longmemeval") -> list[str]:
+                    profile: str = "longmemeval",
+                    chunk_size: int = 0, chunk_stride: int = 2) -> list[str]:
     """Insert every materialized session into the ISOLATED profile.
 
     Returns the inserted id_hex list. Each LongMemEval question carries its own

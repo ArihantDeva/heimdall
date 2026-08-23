@@ -93,6 +93,9 @@ export class Journal {
   }
 
   close() {
+    // Idempotent: cleanup paths (and tests) may close twice. node:sqlite
+    // exposes isOpen, not an .open boolean.
+    if (!this.db?.isOpen) return;
     this.db.close();
   }
 
