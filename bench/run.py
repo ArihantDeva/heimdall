@@ -27,6 +27,9 @@ def main() -> None:
     ap.add_argument("--dataset", choices=["oracle", "s", "m"], required=True)
     ap.add_argument("--limit", type=int, default=500)
     ap.add_argument("--top-k", type=int, default=25)
+    ap.add_argument("--chunk-size", type=int, default=0,
+                    help="turns per retrieval unit; 0 = whole session")
+    ap.add_argument("--chunk-stride", type=int, default=2)
     ap.add_argument("--recall-only", action="store_true",
                     help="token-free retrieval diagnostic; skips reader+judge")
     args = ap.parse_args()
@@ -50,7 +53,9 @@ def main() -> None:
         # sessions in the profile would let retrieval pull evidence that this
         # question's memory never saw, which inflates the score meaninglessly.
         try:
-            ids = ingest_question(question, run_dir / "sessions")
+            ids = ingest_question(question, run_dir / "sessions",
+                                  chunk_size=args.chunk_size,
+                                  chunk_stride=args.chunk_stride)
         except Exception as exc:
             failures.append({"question_id": question["question_id"],
                              "stage": "ingest", "error": str(exc)})
@@ -86,6 +91,9 @@ def main() -> None:
     sink.close()
 
     summary = {"dataset": args.dataset,
+               "chunk_size": args.chunk_size,
+               "chunk_stride": args.chunk_stride,
+               "top_k": args.top_k,
                "n_questions": len(records),
                "n_failed": len(failures),
                "failures": failures,

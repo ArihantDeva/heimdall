@@ -19,15 +19,15 @@ QUESTION = {
 }
 
 def test_materialize_writes_one_file_per_session(tmp_path):
-    paths = materialize(QUESTION, tmp_path)
-    assert len(paths) == 2
-    assert all(p.exists() for p in paths)
+    out = materialize(QUESTION, tmp_path)
+    assert len(out) == 2, "unchunked, one file per session"
+    assert [idx for _, idx in out] == [0, 1]
+    assert all(p.exists() for p, _ in out)
 
 def test_session_file_embeds_its_timestamp(tmp_path):
     """F5: graft insert has no timestamp field, so the date must live in the text
     or temporal-reasoning and knowledge-update are unanswerable."""
-    paths = materialize(QUESTION, tmp_path)
-    body = paths[0].read_text()
+    body = materialize(QUESTION, tmp_path)[0][0].read_text()
     assert "2023/03/03" in body, "session date missing from body"
     assert "user:" in body and "assistant:" in body, "roles must be preserved"
 

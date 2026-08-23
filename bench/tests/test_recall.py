@@ -1,7 +1,41 @@
 import pathlib, sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from recall import evidence_hit
-from ingest import session_title, session_id_at
+from ingest import session_title, session_id_at, materialize, windows
+
+
+def test_windows_cover_every_turn():
+    """A window scheme that drops turns silently loses evidence."""
+    covered = set()
+    for lo, hi in windows(17, size=4, stride=2):
+        covered.update(range(lo, hi))
+    assert covered == set(range(17))
+
+
+def test_windows_no_chunking_is_one_span():
+    assert windows(9, size=0, stride=2) == [(0, 9)]
+    assert windows(3, size=4, stride=2) == [(0, 3)]
+
+
+def test_windows_do_not_duplicate_a_trailing_span():
+    assert windows(6, size=4, stride=2) == [(0, 4), (2, 6)]
+
+
+def test_chunked_titles_still_carry_the_gold_session_id(tmp_path):
+    """Chunking must not break recall scoring: every chunk of a session keeps
+    that session's id in its title, or evidence_hit can never match gold."""
+    q = {"question_id": "q1",
+         "haystack_session_ids": ["answer_abc_0", "answer_abc_1"],
+         "haystack_dates": ["2023/03/03 (Fri) 14:12", "2023/03/04 (Sat) 09:00"],
+         "haystack_sessions": [[{"role": "user", "content": f"t{i}"}
+                                for i in range(8)],
+                               [{"role": "user", "content": "solo"}]],
+         "answer_session_ids": ["answer_abc_0"]}
+    out = materialize(q, tmp_path, chunk_size=3, chunk_stride=2)
+    assert len(out) > 2, "session 0 should have produced multiple chunks"
+    titles = [session_title(session_id_at(q, idx), q["haystack_dates"][idx])
+              for _, idx in out]
+    assert evidence_hit(q, titles) is True
 
 def test_evidence_hit_true_when_gold_session_retrieved():
     question = {"answer_session_ids": ["3"]}

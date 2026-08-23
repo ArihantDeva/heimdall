@@ -117,7 +117,8 @@ def ingest_question(question: dict, root: pathlib.Path,
         )
     inserted: list[str] = []
     try:
-        return _insert_all(question, root, profile, inserted)
+        return _insert_all(question, root, profile, inserted,
+                           chunk_size, chunk_stride)
     except BaseException:
         # A partial haystack must not survive: it would leak into the next
         # question's retrieval, and the `finally` in the caller never sees
@@ -127,10 +128,11 @@ def ingest_question(question: dict, root: pathlib.Path,
 
 
 def _insert_all(question: dict, root: pathlib.Path, profile: str,
-                inserted: list[str]) -> list[str]:
-    for idx, path in enumerate(materialize(question, root)):
-        date = (question.get("haystack_dates") or [""])[idx] \
-            if idx < len(question.get("haystack_dates") or []) else ""
+                inserted: list[str], chunk_size: int = 0,
+                chunk_stride: int = 2) -> list[str]:
+    dates = question.get("haystack_dates") or []
+    for path, idx in materialize(question, root, chunk_size, chunk_stride):
+        date = dates[idx] if idx < len(dates) else ""
         cmd = [
             str(GRAFT), "insert",
             "--title", session_title(session_id_at(question, idx), date),
