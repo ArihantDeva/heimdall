@@ -41,10 +41,12 @@ def get_node(id_hex):
 
 
 HOME = os.path.expanduser("~")
-# Home-anchored forms: ~/... shorthand and the /Users/<name>/... absolute form.
+# Home-anchored forms: ~/... shorthand and the /Users/<name>/... absolute form
+# (macOS layout; on Linux HOME itself is the anchor, e.g. /home/runner).
 # The older "~?/Users/..." pattern could never match "~/..." because a literal
 # tilde sits where the optional prefix expects the abs prefix.
-HOME_RE = re.compile(r"~/[^\s\"]+|/Users/[^\s\"]+")
+_HOME_ABS = "/Users/" if os.path.isdir("/Users") else HOME + "/"
+HOME_RE = re.compile(r"~/[^\s\"]+|" + re.escape(_HOME_ABS) + r"[^\s\"]+")
 # graft via absolute path (env-overridable) — never PATH-resolved: a shadowed
 # graft binary could delete memory nodes from inside a search (supply-chain guard)
 GRAFT = os.environ.get("GRAFT", os.path.join(HOME, ".local", "bin", "graft"))
@@ -87,14 +89,14 @@ def extract_paths(text):
                 # unresolvable token (reorg'd-away / case-variant): return it so
                 # the stale scan can flag/rehome/remove it
                 paths.append(base)
-    # absolute fallback: any /Users/... token (e.g. quoted inside JSON, or a
-    # path under a different home root than this machine's HOME) not already
+    # absolute fallback: any home-anchored token (e.g. quoted inside JSON, or
+    # a path under a different home root than this machine's HOME) not already
     # caught by HOME_RE. The whole-token rstrip is safe here because the loop
     # above already extended through spaces when the long form resolved.
     if not paths:
-        for m in re.finditer(r"/Users/[^\s\"]+", text):
+        for m in re.finditer(re.escape(_HOME_ABS) + r"[^\s\"]+", text):
             tok = m.group(0).rstrip(".,;:")
-            if tok.startswith("/Users/") and tok not in paths:
+            if tok.startswith(_HOME_ABS) and tok not in paths:
                 paths.append(tok)
     return paths
 

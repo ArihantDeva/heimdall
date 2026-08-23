@@ -72,9 +72,9 @@ test("extract_paths: ~-anchored path resolves (tilde form bug regression)", () =
 });
 
 test("extract_paths: /Users/... absolute form still resolves", () => {
-  const abs = join(HOME, "Repos/heimdall/README.md");
-  const paths = extractPaths(`see ${abs} — markdown`);
-  assert.deepEqual(paths, [abs]);
+  const macAbs = "/Users/arihantdeva/Repos/heimdall/README.md";
+  const paths = extractPaths(`see ${macAbs} — markdown`);
+  assert.deepEqual(paths, [macAbs]);
 });
 
 test("extract_paths: no path token yields nothing", () => {
