@@ -987,10 +987,27 @@ Plan 2 is written *after* Task 6 produces numbers. Writing it now would be guess
 | ~~`cross_encoder_enabled: true`, `rerank.enabled: true` (F3/F4)~~ **REJECTED — measurably worse, see note above** | CPU-only ✅ | nothing; halves recall@1 |
 | Calibrated abstention threshold on `s_vec`/`s_ce` instead of RRF rank (F1/F2) | CPU-only ✅ | Every `_abs` question |
 | Dual-granularity indexing (round-level + session-level) with session expansion on hit | CPU-only ✅ | single-session-preference, multi-session |
-| Raise `threads`, enable `hardware_accel` on the M1 Pro (F6) | CPU-only ✅ | Ingest throughput only — not accuracy |
+| Raise `threads`, enable `hardware_accel` on the M1 Pro (F6) | CPU-only ✅ | **18x ingest throughput, and it fixes a graftd segfault** — see note below |
 | Reader decomposition for multi-session aggregation | Token spend ✅ (permitted) | multi-session |
 | Recency-ordered evidence presentation | CPU-only ✅ | knowledge-update, temporal-reasoning |
 | Reader verification pass | Token spend ✅ (permitted) | Oracle ceiling 0.836 → 0.90 |
+
+> **Measured 2026-08-23 — F6 is not just a throughput lever, it fixes a crash.**
+> Under the shipped `threads: 2, hardware_accel: false`, `graftd` segfaults
+> under sustained embedding load: five `EXC_BAD_ACCESS` crash reports between
+> 02:25 and 02:40, every one of them in
+> `ggml_gemm_q8_0_4x4_q8_0` on a `ggml_graph_compute_secondary_thread` — the
+> llama.cpp AArch64 CPU repack GEMM kernel. This is the same failure that killed
+> the first full S recall at question 423/500 and that the harness's insert-retry
+> logic was papering over; it is a real Heimdall bug, not benchmark flakiness.
+> Setting `threads: 6, hardware_accel: true` routes matmul to Metal, bypassing
+> the buggy repack path entirely: zero crashes since, and per-question ingest
+> went from ~3 min to ~20 s (54 sessions or 230 chunks). Backup of the old
+> config is at `~/.graft/config.yaml.pre-throughput-2026-08-23`.
+>
+> **This should be fixed in Heimdall/graft proper, independently of the
+> benchmark** — anyone running the shipped default on Apple Silicon is one
+> sustained ingest away from a segfaulting memory daemon.
 
 **The honest risk, stated up front:** S ≥ 0.90 requires Oracle > 0.90, i.e. cutting reader error from 16.4% to under 10% *with perfect evidence already in hand*. Published leaderboard systems that clear 90% (MemPalace 96.6%, OMEGA 95.4%, Mastra 94.87%, Mem0 93.4%) all do LLM-based consolidation at ingest — the thing this plan's first global constraint forbids. Moving that consolidation to read time is a credible substitute, but it is **not a proven-equivalent one**, and some residual LongMemEval error is label ambiguity that no system recovers. If Task 6's diagnostics show the reader gap is dominated by genuine reasoning failures rather than evidence-presentation failures, the no-LLM-at-ingest constraint should be revisited as a deliberate decision rather than quietly worked around.
 
