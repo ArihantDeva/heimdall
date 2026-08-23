@@ -969,9 +969,22 @@ git commit -m "bench: end-to-end LongMemEval baseline run with per-type breakdow
 
 Plan 2 is written *after* Task 6 produces numbers. Writing it now would be guesswork. The diagnostics select among these pre-identified levers:
 
+> **Measured 2026-08-23 — the reranker lever is dead.** Enabling
+> `cross_encoder_enabled: true` + `rerank.enabled: true` and restarting the
+> `longmemeval` daemon moved S recall on the first 50 questions from
+> @1 0.18 / @5 0.34 / @10 0.40 / @25 0.78 to
+> @1 **0.04** / @5 **0.16** / @10 **0.30** / @25 0.78.
+> recall@25 is identical because rerank only reorders within the RRF pool; the
+> reordering is strongly anti-correlated with gold. Config reverted; backup at
+> `~/.graft/config.yaml.pre-rerank-2026-08-23`. Root cause is most likely the
+> same one the chunking lever addresses: the cross-encoder is scoring an entire
+> multi-turn session transcript against a short question, so it too is working
+> on a unit of retrieval that is far too coarse. Worth re-testing *after*
+> chunking lands, not before.
+
 | Lever | Constraint status | Unblocks |
 |---|---|---|
-| Download `bge-reranker-v2-m3.gguf`, set `cross_encoder_enabled: true`, `rerank.enabled: true` (F3/F4) | CPU-only ✅ | Retrieval precision; populates `s_ce` |
+| ~~`cross_encoder_enabled: true`, `rerank.enabled: true` (F3/F4)~~ **REJECTED — measurably worse, see note above** | CPU-only ✅ | nothing; halves recall@1 |
 | Calibrated abstention threshold on `s_vec`/`s_ce` instead of RRF rank (F1/F2) | CPU-only ✅ | Every `_abs` question |
 | Dual-granularity indexing (round-level + session-level) with session expansion on hit | CPU-only ✅ | single-session-preference, multi-session |
 | Raise `threads`, enable `hardware_accel` on the M1 Pro (F6) | CPU-only ✅ | Ingest throughput only — not accuracy |
