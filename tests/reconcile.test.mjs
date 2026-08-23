@@ -347,6 +347,11 @@ test("a git checkout is picked up (the old command-regex path could not see it)"
     const f = join(repo, "src.txt");
     writeFileSync(f, "on main\n");
     git("add", "."); git("commit", "-qm", "one");
+    // The branch switch rewrites the file with no tool call and no bash path
+    // token the old classifier would have understood. The initial branch is
+    // whatever HEAD points at after the first commit (main or master by git
+    // version/config) — capture it before switching away.
+    const defBranch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
     git("checkout", "-qb", "other");
     writeFileSync(f, "on other\n");
     git("commit", "-qam", "two");
@@ -356,8 +361,9 @@ test("a git checkout is picked up (the old command-regex path could not see it)"
     assert.equal(s.journal.getPath(f).hash, sha256(readFileSync(f)));
 
     // The branch switch rewrites the file with no tool call and no bash path
-    // token the old classifier would have understood.
-    git("checkout", "-q", "main");
+    // token the old classifier would have understood. Default branch name
+    // varies by git version/config (master vs main) — detect it.
+    git("checkout", "-q", defBranch);
     const drift = audit(s.ctx, { enqueue: false });
     assert.equal(drift.length, 1, "audit sees it regardless of how it changed");
     audit(s.ctx);

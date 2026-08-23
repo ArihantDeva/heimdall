@@ -1,3 +1,6 @@
+# Intentionally NO bench job: bench/tests require the local graft daemon +
+# embedding cache (~/.heimdall), which GitHub runners don't have.
+# Run `mise run bench-test` locally instead.
 name: CI
 
 on:

@@ -1,0 +1,10 @@
+# Local gates mirroring .github/workflows/ci.yml (B1 parity).
+# bench-test needs the local graft daemon + ~/.heimdall venv; CI omits it.
+[tasks.test]
+run = "npm test"
+
+[tasks.typecheck]
+run = "npx tsc --noEmit"
+
+[tasks.bench-test]
+run = "~/.heimdall/venv/bin/python3 -m pytest bench/tests -q"

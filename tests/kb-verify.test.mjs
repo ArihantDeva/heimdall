@@ -71,10 +71,17 @@ test("extract_paths: ~-anchored path resolves (tilde form bug regression)", () =
   assert.deepEqual(paths, [join(HOME, "Repos/poker-bot/tools")]);
 });
 
-test("extract_paths: /Users/... absolute form still resolves", () => {
+test("extract_paths: home-anchored absolute form still resolves", () => {
+  // macOS layout: /Users/<name>/...; Linux: /home/<user>/... is HOME-anchored.
   const macAbs = "/Users/arihantdeva/Repos/heimdall/README.md";
-  const paths = extractPaths(`see ${macAbs} — markdown`);
-  assert.deepEqual(paths, [macAbs]);
+  if (process.platform === "darwin") {
+    assert.deepEqual(extractPaths(`see ${macAbs} — markdown`), [macAbs]);
+  } else {
+    // On Linux, /Users/* is NOT a known anchor — nothing resolves.
+    assert.deepEqual(extractPaths(`see ${macAbs} — markdown`), []);
+    const linAbs = join(HOME, "Repos/heimdall/README.md");
+    assert.deepEqual(extractPaths(`see ${linAbs} — markdown`), [linAbs]);
+  }
 });
 
 test("extract_paths: no path token yields nothing", () => {
