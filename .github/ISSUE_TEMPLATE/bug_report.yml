@@ -1,0 +1,37 @@
+name: Bug report
+description: Something in Heimdall misbehaves
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you ran, what you expected, what actually happened.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: heimdall doctor output
+      description: Redact private paths from graph output.
+      render: text
+  - type: dropdown
+    id: harness
+    attributes:
+      label: Harness
+      options:
+        - pi
+        - claude-code
+        - codex
+        - cursor
+        - windsurf
+        - none / standalone CLI
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      placeholder: heimdall --version or commit hash
+    validations:
+      required: true

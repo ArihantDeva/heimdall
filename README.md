@@ -2,6 +2,7 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@arihantdeva/heimdall"><img alt="npm" src="https://img.shields.io/npm/v/%40arihantdeva%2Fheimdall"></a>
+  <a href="https://github.com/ArihantDeva/heimdall/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/ArihantDeva/heimdall/ci.yml?branch=main"></a>
   <a href="https://github.com/ArihantDeva/heimdall/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/ArihantDeva/heimdall?style=social"></a>
   <img alt="license" src="https://img.shields.io/badge/license-MIT-blue">
 </p>
@@ -47,6 +48,48 @@ $ kb_search "portfolio optimization jam optimizer"
 
 One call. Verified paths. Straight to work.
 
+## How it compares
+
+| | Heimdall | mem0 | Claude Memory | Letta (MemGPT) | cAST /
+grep |
+|---|---|---|---|---|---|
+| Scope | **All your repos, one graph** | per-app/per-user | per-conversation/account | per-agent | per-repo |
+| Runs on CPU only | **yes** | cloud or self-host | cloud | self-host | yes |
+| Token cost of indexing | **zero** (tree-sitter + local embeddings) | LLM extraction | LLM summarization | LLM | zero but manual |
+| Trust verdicts on results | **STRONG / WEAK / REBUILT / STALE** | none | none | none | none |
+| Self-healing (moved files re-anchored) | **yes** | no | no | no | no |
+| Harness integrations | pi, Claude Code, Codex, Cursor, Windsurf | SDK/API | Claude products | SDK/API | editor plugins |
+| Local-first, your data stays home | **yes** | optional | no | yes | yes |
+
+Heimdall is the only one built for the actual workflow: many repos, many months, one agent session at a time, on hardware you already own.
+
+## FAQ
+
+**Does my code leave my machine?** No. Indexing is tree-sitter parsing + local embeddings on CPU. Search runs against your local daemon. Nothing phones home.
+
+**Do I need a GPU?** No. The embedding model (bge-m3) runs on Apple Silicon / any modern CPU.
+
+**How is this different from grep?** Grep finds strings you already know exist. Heimdall answers "have I solved anything like this before?" across every project you've touched, ranked and verified against what's actually on disk right now.
+
+**What if a file moves or gets deleted?** The reconciler notices on its next pass. Moved files are re-homed automatically (REBUILT verdict); deletions retract exactly their own nodes. A stale path never ranks again.
+
+**Does it work with my agent?** One command wires it into pi, Claude Code, Codex, Cursor, or Windsurf. Anything that can run a CLI can use `search`/`insert` directly.
+
+**Is it production-ready?** It runs daily on this author's machine across ~12,800 live nodes with a 166-test suite guarding the concurrency invariants. v0.2.0. LongMemEval benchmark harness is in `bench/` (in progress).
+
+## Roadmap
+
+- [x] v0.1 — packaged CLI, five harness adapters, trust verdicts
+- [x] v0.2 — single-writer reconciler, depth-ladder indexing (symbols + call edges)
+- [ ] LongMemEval-S score ≥ 0.90 published from `bench/` (baseline S 0.740 reproduced)
+- [ ] One-command graft backend install (`heimdall init --backend`)
+- [ ] Linux daemon packaging
+- [ ] MCP server mode
+
+## Contributing
+
+PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). The concurrency invariants are tested; break them and the suite goes red before you do.
+
 ## Quickstart
 
 ```bash
@@ -67,6 +110,23 @@ heimdall search "excel tracker portfolio optimization"
 
 On macOS the backend runs as the launchd job `com.graft.daemon` (template: `launchd/com.heimdall.backend.plist.example`).
 
+## Demo
+
+<!-- TODO(deva): record 30s terminal demo GIF: heimdall init → search with verdicts → insert. Drop at assets/demo.gif and uncomment. -->
+<!-- ![Heimdall demo](assets/demo.gif) -->
+
+Real session output (abridged):
+
+```
+$ kb_search "portfolio optimization jam optimizer"
+== retrieve (hybrid ranked): portfolio optimization jam optimizer
+   1. [STRONG] cov83%  poker jam_opt optimizer — ~/Repos/poker-bot/tools
+      heads-up jam/fold EV optimizer, edited 2026-08-14
+   2. [WEAK]   TypeE excel build — ~/Desktop/Shepherd Ventures/MVO2
+```
+
+Every hit carries a trust verdict computed against the live filesystem — not a cached embedding score.
+
 ## Design history
 
 v0.1.0 hooks inferred graph mutations by regex-parsing bash commands and writing the graph from every hook process. It collapsed: writes it didn't recognize were invisible, concurrent hook processes raced delete+insert, and a misparse wrote wrong data as fact. v0.2.0 replaced all of it with a **single-writer, level-triggered reconciler**: nothing ever tells the graph *what* changed, only *that a path might have*. The reconciler reads the file from disk and makes the graph match.
@@ -76,6 +136,8 @@ The trust verdict layer came from the same lesson one level up: even a perfect g
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=ArihantDeva/heimdall&type=Date)](https://star-history.com/#ArihantDeva/heimdall&Date)
+
+If Heimdall saved you a rebuild, a star helps other agents' humans find it.
 
 
 ## Architecture / how it works

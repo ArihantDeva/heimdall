@@ -22,21 +22,16 @@ elif [ ! -x "$GRAFT" ]; then
   echo "  Then re-run: heimdall init"
   exit 1
 else
-  echo "WARN: graft stats unresponsive — restarting daemon"
-  pkill -f "graftd --config" 2>/dev/null; sleep 5
-  # Prefer the launchd-managed job (avoids orphaned daemons fighting KeepAlive);
-  # nohup only as Linux/no-launchd fallback.
-  if launchctl print "gui/$(id -u)/com.graft.daemon" >/dev/null 2>&1; then
-    launchctl kickstart -k "gui/$(id -u)/com.graft.daemon" 2>/dev/null || true
-  else
-    nohup "$GRAFT"d --config "${GRAFT_CONFIG:-$HOME/.graft/config.yaml}" > "${HOME}/.graft/graftd.log" 2>&1 &
-  fi
-  sleep 8
-  if ! timeout 10 "$GRAFT" stats >/dev/null 2>&1; then
-    echo "FAIL: graft daemon unreachable after restart. Log: $HOME/.graft/graftd.log"
-    echo "  First-time setup: cp \"\$(npm root -g)/@arihantdeva/heimdall/config/heimdall.yaml.example\" ~/.graft/config.yaml"
-    exit 1
-  fi
+  # NEVER kill the daemon here: launchd owns its lifecycle, and Metal
+  # first-compile warmup legitimately takes minutes (2026-08-23 storm lesson —
+  # pkill-on-timeout racing KeepAlive respawn caused the dual-daemon socket fight).
+  echo "WARN: graft stats unresponsive — waiting up to 10min for daemon warmup"
+  WARMED=0
+  for i in $(seq 1 60); do
+    sleep 10
+    if timeout 10 "$GRAFT" stats >/dev/null 2>&1; then WARMED=1; break; fi
+  done
+  [ "$WARMED" = 1 ] || { echo "FAIL: graft daemon unreachable after warmup window. Log: $HOME/.graft/graftd.log"; exit 1; }
 fi
 
 # 2. CLI responsive (daemon reachable)
