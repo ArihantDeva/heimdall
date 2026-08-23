@@ -55,11 +55,28 @@ def compare(current: dict, baseline: dict) -> list[str]:
     return drops
 
 
+def gate_tier(summaries: list[dict], tier: str | None) -> tuple[list[str], int]:
+    """Gate the newest run of a tier against its best prior. Returns
+    (drops, exit_code); exit 0 also when fewer than two runs exist yet."""
+    runs = [s for s in summaries if tier is None or s.get("tier") == tier]
+    if len(runs) < 2:
+        return ([f"fewer than two recorded runs for tier={tier}; "
+                 "nothing to gate yet — record more runs first"], 0)
+    current, priors = runs[-1], runs[:-1]
+    # Gate vs each prior that shares cells; fail if ANY prior beats current.
+    drops: list[str] = []
+    for p in priors:
+        drops += compare(current, p)
+    return (drops, 1 if drops else 0)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--current")
     ap.add_argument("--baseline")
     ap.add_argument("--tier", default=None, help="cpu|agent filter for --gate-all")
+    ap.add_argument("--gate-all", action="store_true",
+                    help="gate newest vs best prior for every recorded tier")
     args = ap.parse_args()
 
     summaries = load_summaries()
@@ -70,21 +87,24 @@ def main() -> int:
             print("run dir(s) not found", file=sys.stderr)
             return 2
         drops = compare(cur, base)
+    elif args.gate_all:
+        # Gate every recorded tier; any tier failing fails the whole gate.
+        tiers = sorted({s["tier"] for s in summaries if s.get("tier")})
+        if not tiers:
+            print("no runs carry a tier stamp; nothing to gate", file=sys.stderr)
+            return 2
+        exit_code = 0
+        for t in tiers:
+            print(f"[{t}]", flush=True)
+            drops_t, code = gate_tier(summaries, t)
+            if drops_t:
+                print("\n".join(drops_t))
+                print("no regression: current run matches or beats all baselines"
+                      if not drops_t else "")
+            exit_code = max(exit_code, code)
+        return exit_code
     else:
-        tier = args.tier
-        runs = [s for s in summaries
-                if tier is None or s.get("tier") == tier]
-        if len(runs) < 2:
-            print(f"fewer than two recorded runs for tier={tier}; "
-                  "nothing to gate yet — record more runs first")
-            return 0
-        current, priors = runs[-1], runs[:-1]
-        # best prior = max mean recall over shared cells per prior run; gate vs
-        # each prior that shares cells, fail if ANY prior beats current anywhere
-        all_drops = []
-        for p in priors:
-            all_drops += compare(current, p)
-        drops = all_drops
+        drops, _ = gate_tier(summaries, args.tier)
 
     if drops:
         print("\n".join(drops))

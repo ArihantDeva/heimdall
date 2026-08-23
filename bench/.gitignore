@@ -3,4 +3,7 @@ runs/*
 !runs/20260823-134319-cycle1-cpu-tier/
 !runs/20260823-134319-cycle1-agent-tier/
 !runs/20260823-134319-cycle1-eval.md
+!runs/20260823-171209-cycle2-cpu-control/
+!runs/20260823-171743-cycle2-agent-expansion/
+!runs/20260823-134319-cycle2-eval.md
 *.log
