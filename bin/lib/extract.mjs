@@ -15,10 +15,6 @@ const BRIDGE = join(REPO_ROOT, "bin", "lib", "heimdall_extract.py");
 
 export const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
 
-export function hashFile(path) {
-  return sha256(readFileSync(path));
-}
-
 const LANG_BY_EXT = {
   ".py": "python", ".js": "javascript", ".jsx": "javascript",
   ".ts": "typescript", ".tsx": "typescript", ".mjs": "javascript", ".cjs": "javascript",

@@ -20,7 +20,6 @@ export const rank = (d) => LEVELS.indexOf(d);
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = dirname(dirname(HERE));
-export const VENDOR_GRAPHIFY = join(REPO_ROOT, "vendor", "graphify");
 
 export const configPath = () => join(homedir(), ".heimdall", "config.json");
 export const journalPath = () => join(homedir(), ".heimdall", "journal.db");
