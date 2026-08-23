@@ -27,6 +27,9 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", choices=["oracle", "s", "m"], required=True)
     ap.add_argument("--limit", type=int, default=500)
+    ap.add_argument("--subset", choices=["cycle1"], default=None,
+                    help="named question subset for cross-run comparability; "
+                         "overrides --limit")
     ap.add_argument("--top-k", type=int, default=25)
     ap.add_argument("--chunk-size", type=int, default=0,
                     help="turns per retrieval unit; 0 = whole session")
@@ -52,7 +55,16 @@ def main() -> None:
     require_empty_profile()
 
     rows = json.loads((DATA / f"longmemeval_{args.dataset}.json").read_text())
-    rows = rows[: args.limit]
+    if args.subset == "cycle1":
+        # The exact selection behind the committed cycle-1 ablation
+        # (runs/20260823-134319-cycle1-eval.md): first 20 single-session-user
+        # + first 10 multi-session, dataset order preserved within each type.
+        # Committed here so every future cycle measures the same questions.
+        singles = [r for r in rows if r["question_type"] == "single-session-user"][:20]
+        multis = [r for r in rows if r["question_type"] == "multi-session"][:10]
+        rows = singles + multis
+    else:
+        rows = rows[: args.limit]
 
     run_dir = RUNS / time.strftime("%Y%m%d-%H%M%S")
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -113,6 +125,7 @@ def main() -> None:
     sink.close()
 
     summary = {"dataset": args.dataset,
+               "subset": args.subset,
                "tier": args.tier,
                "facts": args.facts,
                "chunk_size": args.chunk_size,
