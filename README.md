@@ -112,8 +112,7 @@ On macOS the backend runs as the launchd job `com.graft.daemon` (template: `laun
 
 ## Demo
 
-<!-- TODO(deva): record 30s terminal demo GIF: heimdall init → search with verdicts → insert. Drop at assets/demo.gif and uncomment. -->
-<!-- ![Heimdall demo](assets/demo.gif) -->
+![Heimdall demo](assets/demo.gif)
 
 Real session output (abridged):
 
