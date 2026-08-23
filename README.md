@@ -99,7 +99,7 @@ heimdall init --harness claude-code   # or pi | codex | cursor | windsurf | all
 
 That's it for install + harness wiring (`init`, `insert` work immediately).
 
-Ranked search and `doctor` need the [graft backend](https://github.com/tinygrad/graft) — one extra step:
+Ranked search and `doctor` need the [graft backend](https://github.com/AEndrix03/Graft) — one extra step:
 
 ```bash
 # build graft from source, put the binary on PATH, then:
@@ -309,7 +309,7 @@ MIT. Independent project — not affiliated with Graft or its authors.
 
 ### Attribution
 
-- **[Graft](https://github.com/tinygrad/graft)** (Apache 2.0) — vendored as the default semantic-memory backend (`vendor/graft/`, source + build instructions, not prebuilt).
+- **[Graft](https://github.com/AEndrix03/Graft)** (Apache 2.0) — vendored as the default semantic-memory backend (`vendor/graft/`, source + build instructions, not prebuilt).
 - **[graphify](https://github.com/safishamsi/graphify)** v0.3.17 (MIT, © Safi Shamsi) — vendored per-repo code-graph extraction (`vendor/graphify/`), the tree-sitter bridge's extraction engine.
 
 ## Runtime state
