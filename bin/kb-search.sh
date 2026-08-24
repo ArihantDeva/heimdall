@@ -29,7 +29,7 @@ SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd -P)"
 VERIFY="$SCRIPT_DIR/kb_search_verify.py"
 [ -f "$VERIFY" ] || VERIFY="$HOME/knowledge-base/kb_search_verify.py"
 
-GRAFT="${GRAFT:-$(command -v graft 2>/dev/null || echo "$HOME/.local/bin/graft")}"
+export GRAFT="${GRAFT:-$(command -v graft 2>/dev/null || echo "$HOME/.local/bin/graft")}"
 
 print_results() {
 	[ -f "$VERIFY" ] || { echo "ERROR: verify script missing: $VERIFY"; exit 1; }
