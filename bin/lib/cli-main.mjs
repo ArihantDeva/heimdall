@@ -107,7 +107,7 @@ function runInit(args) {
   );
   console.log(`adapter: ${JSON.stringify(installed)}`);
   console.log(
-    "backend: graft — binary NOT auto-installed. See https://github.com/tinygrad/graft, then: heimdall doctor",
+    "backend: graft — binary NOT auto-installed. See https://github.com/NanoNets/Graft, then: heimdall doctor",
   );
   return 0;
 }

@@ -65,7 +65,7 @@ If you need a vector DB, use a vector DB. Graft is for the layer above: **persis
 ## Install in 30 seconds
 
 ```bash
-brew tap AEndrix03/graft https://github.com/AEndrix03/Graft.git
+brew tap nanonets/graft https://github.com/NanoNets/Graft.git
 brew install graft
 graft stats
 ```
@@ -75,7 +75,7 @@ That's it. No daemon to start. No model to download by hand. No config to write.
 > Not on macOS / Linux Homebrew? Run the cross-platform installer:
 >
 > ```bash
-> git clone https://github.com/AEndrix03/graft.git && cd graft
+> git clone https://github.com/nanonets/graft.git && cd graft
 > bash scripts/install.sh         # Linux, macOS, Windows MSYS2
 > pwsh scripts/install.ps1        # Windows (auto-installs MSYS2 if needed)
 > ```
@@ -415,7 +415,7 @@ Honest disclosures:
 
 ```bash
 # 1. clone, install, smoke-test
-git clone https://github.com/AEndrix03/graft.git && cd graft
+git clone https://github.com/nanonets/graft.git && cd graft
 bash scripts/install.sh
 graft stats
 
@@ -427,7 +427,7 @@ graft stats
 
 Builds are kept lightweight so contributors can iterate quickly. Tests run with `cmake --build build --target test`. Pre-commit hook for Conventional Commits is installed automatically by `scripts/install.sh`.
 
-Bug reports and feature ideas: [GitHub Issues](https://github.com/AEndrix03/graft/issues). Read [CONTRIBUTING.md](./CONTRIBUTING.md) for the short version.
+Bug reports and feature ideas: [GitHub Issues](https://github.com/nanonets/graft/issues). Read [CONTRIBUTING.md](./CONTRIBUTING.md) for the short version.
 
 ---
 
@@ -439,7 +439,7 @@ Bug reports and feature ideas: [GitHub Issues](https://github.com/AEndrix03/graf
 
 <br/>
 <sub>Built in C11. Local-first. No SaaS. No API key.<br/>
-<a href="./docs/">docs</a> · <a href="./docs/install/">install</a> · <a href="./docs/use-cases.md">use cases</a> · <a href="./docs/concepts.md">concepts</a> · <a href="./docs/microservices/">microservices pattern</a> · <a href="https://github.com/AEndrix03/graft/issues">issues</a></sub>
+<a href="./docs/">docs</a> · <a href="./docs/install/">install</a> · <a href="./docs/use-cases.md">use cases</a> · <a href="./docs/concepts.md">concepts</a> · <a href="./docs/microservices/">microservices pattern</a> · <a href="https://github.com/nanonets/graft/issues">issues</a></sub>
 <br/><br/>
 
 </div>

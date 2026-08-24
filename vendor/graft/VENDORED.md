@@ -4,7 +4,7 @@
 memory daemon (SQLite + local embeddings + graph edges) that powers Heimdall's
 storage + hybrid ranked retrieval.
 
-- **Upstream:** https://github.com/tinygrad/graft (Apache 2.0)
+- **Upstream:** https://github.com/NanoNets/Graft (Apache 2.0)
 - **License:** Apache 2.0 — see `vendor/graft/LICENSE`
 - **Vendored date:** 2026-08-20
 - **Contents:** source (`src/`), headers (`include/`), CMake build, config

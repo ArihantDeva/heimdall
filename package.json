@@ -1,6 +1,6 @@
 {
   "name": "@arihantdeva/heimdall",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Verified, self-healing knowledge layer for AI coding agents (orchestration over Graft-style semantic memory backends)",
   "license": "MIT",
   "bin": {

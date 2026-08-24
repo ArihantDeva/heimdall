@@ -309,8 +309,27 @@ mg_err_t mg_op_insert(mg_ctx_t *ctx, mpack_node_t args, mpack_writer_t *result) 
   mg_uuidv7(node.id);
   memcpy(node.content_hash, content_hash, MG_HASH_BYTES);
 
+  /* Embed title+body so the vector lane carries content, not just a
+   * heading. Titles like "session <id> — <date>" are content-free, which
+   * made vector top-k useless for content queries (LongMemEval analysis).
+   * Body may be long; BGE-M3 mean-pools across the token window, which is
+   * exactly what we want for a whole-session vector. */
   mg_embedding_t q;
-  err = mg_embed_text(ctx->embed, title, q);
+  char *embed_text = NULL;
+  if (body && body[0]) {
+    size_t tlen = strlen(title), blen = strlen(body);
+    if (tlen > 0 && tlen + blen + 2 < (size_t)INT32_MAX) {
+      embed_text = (char *)malloc(tlen + blen + 2);
+      if (embed_text) {
+        memcpy(embed_text, title, tlen);
+        embed_text[tlen] = '\n';
+        memcpy(embed_text + tlen + 1, body, blen);
+        embed_text[tlen + 1 + blen] = '\0';
+      }
+    }
+  }
+  err = mg_embed_text(ctx->embed, embed_text ? embed_text : (title ? title : ""), q);
+  free(embed_text);
   if (err != MG_OK) {
     free_keywords(keywords, n_keywords);
     free(title);

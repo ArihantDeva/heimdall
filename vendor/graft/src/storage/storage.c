@@ -672,7 +672,13 @@ static char *build_scoped_fts_query(const char *col, const char *query_text) {
     size_t tok_len = i - tok_start;
     if (tok_len == 0) continue;
     if (wrote_any) {
-      if (op + 1 < cap) out[op++] = ' ';
+      if (op + 4 >= cap) break;
+      /* OR-join tokens: an unquoted space in FTS5 MATCH is an AND of all
+       * terms, so a natural-language query like "what degree did I
+       * graduate with" required every stopword to appear in the same
+       * node — matching almost nothing. OR lets BM25 score partial
+       * matches, which is what recall needs (LongMemEval analysis). */
+      memcpy(out + op, " OR ", 4); op += 4;
     }
     /* <col>:"<token with " doubled>" */
     if (op + col_len + 2 >= cap) break;

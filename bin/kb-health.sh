@@ -18,7 +18,7 @@ if timeout 10 "$GRAFT" stats >/dev/null 2>&1; then
   ok "graft stats responsive"
 elif [ ! -x "$GRAFT" ]; then
   echo "SETUP NEEDED: graft binary not found at $GRAFT."
-  echo "  Install: see https://github.com/AEndrix03/Graft (or set GRAFT=/path/to/graft)."
+  echo "  Install: see https://github.com/NanoNets/Graft (or set GRAFT=/path/to/graft)."
   echo "  Then re-run: heimdall init"
   exit 1
 else
