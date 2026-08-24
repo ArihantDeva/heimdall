@@ -97,7 +97,12 @@ for repo in repos:
     except Exception:
         continue
 # Global semantic hits (bge-m3): append as top-ranked candidates.
-sem = os.path.join(os.getcwd(), "bin", "embed-index.py")
+# Resolve embed-index.py relative to THIS script, not cwd (same bug class as
+# the PR #2 GRAFT-resolution fix).
+sem = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0] if sys.argv[0] != "<stdin>" else os.getcwd())), "embed-index.py")
+# fall back to cwd-relative if the script-dir guess misses
+if not os.path.exists(sem):
+    sem = os.path.join(os.getcwd(), "bin", "embed-index.py")
 venv_py = os.path.expanduser("~/.heimdall/venv/bin/python3")
 if os.path.exists(venv_py) and os.path.exists(os.path.expanduser("~/.heimdall/global.db")) and os.path.exists(sem):
     try:
@@ -130,8 +135,8 @@ if os.path.exists(venv_py) and os.path.exists(os.path.expanduser("~/.heimdall/gl
                     "path": full,
                     "semantic": True,
                 })
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"WARN: semantic layer failed: {e}", file=sys.stderr)
 # dedupe by title, keep top score
 seen = {}
 for r in sorted(results, key=lambda x: -x["score"]):
