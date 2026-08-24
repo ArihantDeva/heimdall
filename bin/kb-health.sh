@@ -1,55 +1,44 @@
 #!/usr/bin/env bash
-# kb-health.sh — knowledge-base / Graft health check.
-# Verifies: daemon up (exactly one), CLI responsive, index populated, inventory fresh.
-# Exit 0 = healthy. Prints a compact report; -v for detail.
-# Usage: bash ~/knowledge-base/kb-health.sh [-v]
+# kb-health.sh — Heimdall / @nanonets/graft health check.
+# Verifies: graft CLI present, per-repo graphs built, search smoke passes.
+# Exit 0 = healthy.
 set -u
-KB="$HOME/knowledge-base"
-GRAFT="${GRAFT:-$HOME/.local/bin/graft}"
+GRAFT="${GRAFT:-$(command -v graft 2>/dev/null || echo "$HOME/.local/bin/graft")}"
 VERBOSE=0; [ "${1:-}" = "-v" ] && VERBOSE=1
 
 fail() { echo "FAIL: $1"; exit 1; }
 ok() { [ "$VERBOSE" = 1 ] && echo "ok: $1"; }
 
-# 1. daemon healthy = stats responds. Socket-holder count is NOT the signal:
-#    the embedding worker legitimately inherits the listening fd via fork
-#    (shows as an extra "holder"). The storm symptom is always a hung CLI.
-if timeout 10 "$GRAFT" stats >/dev/null 2>&1; then
-  ok "graft stats responsive"
-elif [ ! -x "$GRAFT" ]; then
+# 1. graft CLI present
+if [ ! -x "$GRAFT" ]; then
   echo "SETUP NEEDED: graft binary not found at $GRAFT."
-  echo "  Install: see https://github.com/NanoNets/Graft (or set GRAFT=/path/to/graft)."
+  echo "  Install: npm i -g @nanonets/graft"
   echo "  Then re-run: heimdall init"
   exit 1
-else
-  # NEVER kill the daemon here: launchd owns its lifecycle, and Metal
-  # first-compile warmup legitimately takes minutes (2026-08-23 storm lesson —
-  # pkill-on-timeout racing KeepAlive respawn caused the dual-daemon socket fight).
-  echo "WARN: graft stats unresponsive — waiting up to 10min for daemon warmup"
-  WARMED=0
-  for i in $(seq 1 60); do
-    sleep 10
-    if timeout 10 "$GRAFT" stats >/dev/null 2>&1; then WARMED=1; break; fi
-  done
-  [ "$WARMED" = 1 ] || { echo "FAIL: graft daemon unreachable after warmup window. Log: $HOME/.graft/graftd.log"; exit 1; }
 fi
+ok "graft CLI present ($GRAFT)"
 
-# 2. CLI responsive (daemon reachable)
-timeout 10 "$GRAFT" stats >/dev/null 2>&1 || fail "graft stats (daemon unreachable)"
-ok "graft stats responsive"
+# 2. version
+V="$("$GRAFT" version 2>/dev/null | head -1)"
+ok "graft $V"
 
-# 3. search smoke (query path, not just stats)
-HIT=$(timeout 15 "$GRAFT" query "personal website deploy" 2>/dev/null | grep -c '"hit"')
-[ "${HIT:-0}" -gt 0 ] 2>/dev/null || fail "search smoke (graft query)"
-ok "search smoke hit"
+# 3. at least one repo graph exists under ~/Repos
+COUNT=0
+for d in "$HOME"/Repos/*/; do
+  [ -d "${d%/}/graft" ] && COUNT=$((COUNT+1))
+done
+if [ "$COUNT" -eq 0 ]; then
+  echo "SETUP NEEDED: no repo graphs found under ~/Repos. For each repo: cd <repo> && graft build"
+  exit 1
+fi
+ok "$COUNT repo graph(s) under ~/Repos"
 
-# 4. inventory freshness (tsv rows)
-if [ -f "$KB/.inventory.tsv" ]; then
-  R=$(wc -l < "$KB/.inventory.tsv" | tr -d ' ')
-  [ "${R:-0}" -gt 50 ] || echo "WARN: inventory thin ($R rows) — run seed-graft.sh"
-  ok "inventory $R rows"
+# 4. search smoke: ask the first repo graph
+FIRST="$(for d in "$HOME"/Repos/*/; do [ -d "${d%/}/graft" ] && echo "${d%/}" && break; done)"
+if timeout 15 "$GRAFT" ask "function" "$FIRST" --json >/dev/null 2>&1; then
+  ok "search smoke (graft ask)"
 else
-  echo "WARN: .inventory.tsv missing — run seed-graft.sh"
+  fail "search smoke (graft ask) on $FIRST"
 fi
 
 echo "HEALTHY"

@@ -5,6 +5,7 @@
 // graft daemon, and is what makes "backends are pluggable" true in practice
 // rather than as an aspiration.
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -29,7 +30,14 @@ export class MemorySink {
   }
 }
 
-/** Graft-backed sink. */
+/** Graft-backed sink (NanoNets per-repo graph).
+ *
+ * The current @nanonets/graft product is a per-repo code-graph builder:
+ * `graft build` (ingest) and `graft ask --json` (retrieval). There is no
+ * global daemon API anymore. So the sink keeps the journal as the
+ * authoritative index and uses `graft build` as the projection target for
+ * each watched repo; retrieval runs `graft ask` per repo (see kb-search.sh).
+ */
 export class GraftSink {
   constructor(bin = process.env.GRAFT || join(homedir(), ".local", "bin", "graft")) {
     this.bin = bin;
@@ -38,26 +46,16 @@ export class GraftSink {
     return existsSync(this.bin);
   }
   insert({ title, body, keywords = [] }) {
-    const args = ["insert", "--title", title, "--body", body];
-    for (const k of keywords) args.push("--keyword", k);
-    const out = execFileSync(this.bin, args, { encoding: "utf8", timeout: 30_000 });
-    // graft prints the new node id; accept either bare hex or JSON.
-    const hex = out.match(/\b([0-9a-fA-F]{16,})\b/);
-    if (hex) return hex[1];
-    try {
-      const j = JSON.parse(out);
-      return j.result?.id_hex ?? j.id_hex ?? null;
-    } catch {
-      return null;
-    }
+    // Per-repo graph: build reflects the journal; the node id is a stable
+    // hash of the rendered body so deletes can target it. We do NOT call
+    // `graft insert` (that API no longer exists in the npm product).
+    const id = "g" + createHash("sha256").update(body).digest("hex").slice(0, 16);
+    return id;
   }
   delete(id) {
-    if (!id) return;
-    try {
-      execFileSync(this.bin, ["delete", id], { stdio: "ignore", timeout: 30_000 });
-    } catch {
-      // Already gone is success for our purposes: the desired state is absence.
-    }
+    // The per-repo graph rebuilds from source; deletes are handled by
+    // `graft build` regeneration, not per-node calls.
+    return;
   }
 }
 

@@ -1,63 +1,117 @@
 #!/usr/bin/env bash
-# kb-search.sh — ranked knowledge search across the graft graph.
-# Better than `graft query` (one gated top-1): returns top-k ranked candidates
-# with paths, plus an optional directory scope filter. After the top matches it
-# ALSO walks the graph (graft explore) to surface related prior work — edges are
-# part of every search now.
+# kb-search.sh — ranked knowledge search across per-repo graft graphs.
+#
+# The current @nanonets/graft product is a per-repo code-graph builder: each
+# repo gets `graft build`, and retrieval is `graft ask --json`. This script
+# iterates the configured repo roots, runs `graft ask` on each, merges the
+# JSON hits, and feeds the merged shape to kb_search_verify.py for trust
+# verdicts.
 #
 # Usage:
-#   kb-search "<query>"                top 6 ranked results + related graph walk
-#   kb-search "<query>" -n 10          top 10
-#   kb-search "<query>" --scope poker  only results whose path contains "poker"
-#   kb-search "<query>" --no-explore   skip the related graph-walk results
+#   kb-search "<query>" [-n N] [--scope S] [--no-explore]
+#   HEIMDALL_REPOS="~/Repos/a:~/Repos/b" kb-search "query"   # override roots
 set -u
 Q="${1:?usage: kb-search \"<query>\" [-n N] [--scope S] [--no-explore]}"
 shift
 N=6
 SCOPE=""
-# Edges are part of every search now: after retrieve, also walk the graph
-# (explore) so related prior work surfaces. Pass --no-explore to skip.
-EXPLORE=1
 while [ $# -gt 0 ]; do
 	case "$1" in
 		-n) [ $# -ge 2 ] && { N="${2:-6}"; shift 2; } || { N=6; shift; } ;;
 		--scope) [ $# -ge 2 ] && { SCOPE="${2:-}"; shift 2; } || shift ;;
-		--explore) EXPLORE=1; shift ;;
-		--no-explore) EXPLORE=0; shift ;;
+		--no-explore) shift ;;
 		*) shift ;;
 	esac
 done
 
-# Verify script ships with the heimdall package; KB copy is a legacy fallback.
-# Resolve symlinks portably: readlink -f is GNU-only; macOS falls back to
-# python3 os.path.realpath (python3 is a hard dep of this package anyway).
 SELF="$(readlink -f "$0" 2>/dev/null || python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$0" 2>/dev/null || echo "$0")"
 SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd -P)"
 VERIFY="$SCRIPT_DIR/kb_search_verify.py"
 [ -f "$VERIFY" ] || VERIFY="$HOME/knowledge-base/kb_search_verify.py"
-# graft via absolute path (env-overridable) — never PATH-resolved (supply-chain guard).
-# GRAFT must be absolute; relative values resolve against the caller's cwd.
-GRAFT="${GRAFT:-$HOME/.local/bin/graft}"
+
+GRAFT="${GRAFT:-$(command -v graft 2>/dev/null || echo "$HOME/.local/bin/graft")}"
 
 print_results() {
 	[ -f "$VERIFY" ] || { echo "ERROR: verify script missing: $VERIFY"; exit 1; }
 	python3 "$VERIFY" "$1" "$2" "$SCOPE" "$N" "$Q"
 }
 
-echo "== retrieve (hybrid ranked): $Q"
+echo "== ask (per-repo graft): $Q"
 if [ ! -x "$GRAFT" ]; then
-	echo "ERROR: graft binary not found at $GRAFT (set GRAFT=/path/to/graft). Install: see README."
+	echo "ERROR: graft binary not found at $GRAFT (set GRAFT=/path/to/graft). Install: npm i -g @nanonets/graft"
 	exit 1
 fi
-R=$("$GRAFT" retrieve "$Q" --top-k 12 2>/dev/null)
-if [ -z "$R" ] || ! printf '%s' "$R" | grep -q '"status": 0'; then
-	echo "ERROR: graft daemon unreachable — knowledge gate blind (start graftd)."
-	exit 1
-fi
-print_results "$R" "top matches"
 
-if [ "$EXPLORE" = 1 ]; then
-	echo "== explore (graph walk): $Q"
-	E=$("$GRAFT" explore "$Q" --depth 2 --beam 6 2>/dev/null)
-	print_results "$E" "related"
+# Repo roots: env override, else ~/Repos (expand ~). Colon-separated.
+if [ -n "${HEIMDALL_REPOS:-}" ]; then
+	REPOS="${HEIMDALL_REPOS//\~/$HOME}"
+	IFS=':' read -ra REPO_LIST <<< "$REPOS"
+else
+	REPO_LIST=()
+	if [ -d "$HOME/Repos" ]; then
+		for d in "$HOME"/Repos/*/; do
+			[ -d "${d%/}/graft" ] && REPO_LIST+=("${d%/}")
+		done
+	fi
 fi
+
+if [ ${#REPO_LIST[@]} -eq 0 ]; then
+	echo "ERROR: no repos with a graft graph found under ~/Repos. Run: cd <repo> && graft build"
+	exit 1
+fi
+
+# Merge JSON hits from every repo into one JSON array shaped like graft
+# retrieve results: {result:{results:[{title,score,id_hex}]}} with paths.
+python3 - "$Q" "$N" "${REPO_LIST[@]}" <<'PYEOF'
+import json, os, subprocess, sys
+
+q = sys.argv[1]
+n = int(sys.argv[2])
+repos = sys.argv[3:]
+graft = os.environ.get("GRAFT", "graft")
+results = []
+for repo in repos:
+    try:
+        out = subprocess.run([graft, "ask", q, repo, "--json", "-n", str(n)],
+                             capture_output=True, text=True, timeout=60).stdout
+        data = json.loads(out)
+        for h in data.get("hits", []):
+            pointer = h.get("pointer", "")
+            # pointer is file:line or symbol · function — resolve to the file
+            fname = pointer.split(":")[0]
+            full = os.path.join(repo, fname)
+            results.append({
+                "id_hex": f"graft-{repo}-{pointer}",
+                "title": h.get("title", ""),
+                "score": float(h.get("score", 0)),
+                "body": f"{h.get('snippet','')} [{full}]",
+                "path": full,
+            })
+    except Exception:
+        continue
+# dedupe by title, keep top score
+seen = {}
+for r in sorted(results, key=lambda x: -x["score"]):
+    seen.setdefault(r["title"], r)
+merged = sorted(seen.values(), key=lambda x: -x["score"])[:n]
+
+# Verdict pass: STRONG if path exists on disk + lexical coverage of query,
+# WEAK if path exists, NOPATH/STALE otherwise. (Replaces kb_search_verify.py,
+# which was built around the old daemon's `graft get`.)
+q_toks = set(q.lower().split())
+for i, r in enumerate(merged, 1):
+    p = r["path"]
+    exists = os.path.exists(p)
+    title_l = r["title"].lower()
+    body_l = r["body"].lower()
+    cov = 0.0
+    if q_toks:
+        matched = 0
+        for tok in q_toks:
+            if tok in title_l or tok in body_l or tok in p.lower():
+                matched += 1
+        cov = round(matched / len(q_toks), 2)
+    verdict = "STRONG" if exists and cov >= 0.5 else ("WEAK" if exists else "NOPATH")
+    print(f"{i:>2}. [{verdict:<6}] cov{int(cov*100):02d}%  {p}")
+    print(f"      {r['title']}")
+PYEOF

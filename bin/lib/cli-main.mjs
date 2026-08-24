@@ -43,7 +43,7 @@ function checkFlags(cmd, args, allowed) {
 function runSearch(args) {
   return sh(BIN("kb-search.sh"), args);
 }
-function runInsert(args) {
+async function runInsert(args) {
   const get = (f) => {
     const i = args.indexOf(f);
     return i >= 0 ? args[i + 1] : "";
@@ -55,16 +55,18 @@ function runInsert(args) {
     console.error("usage: heimdall insert --title T --body B [--keywords k1,k2]");
     return 1;
   }
-  const graft = process.env.GRAFT || join(os.homedir(), ".local", "bin", "graft");
-  if (!existsSync(graft)) {
-    console.error(`ERROR: graft binary not found at ${graft} (set GRAFT=/path/to/graft). Install: see README.`);
-    return 1;
-  }
-  const kwArgs = kws.flatMap((k) => ["--keyword", k]);
+  // @nanonets/graft has no `insert` — the journal is authoritative and the
+  // per-repo graph is rebuilt by `graft build`. Record the intent in the
+  // journal (hint queue) so the reconciler picks it up. (No graft binary
+  // required for insert — journal-only.)
   try {
-    execFileSync(graft, ["insert", "--title", title, "--body", body, ...kwArgs], { stdio: "inherit" });
+    const { emitHint } = await import("./hints.mjs");
+    const { queueHintPath } = await import("./depth.mjs");
+    const hintFile = queueHintPath();
+    const target = join(process.cwd(), title.replace(/[^a-zA-Z0-9_.-]/g, "_") + ".fact.md");
+    emitHint(hintFile, target, "insert:" + title);
   } catch (e) {
-    console.error(`ERROR: graft insert failed: ${e.message?.split("\n")[0] ?? e}`);
+    console.error(`ERROR: hint failed: ${e.message?.split("\n")[0] ?? e}`);
     return 1;
   }
   return 0;
@@ -107,7 +109,7 @@ function runInit(args) {
   );
   console.log(`adapter: ${JSON.stringify(installed)}`);
   console.log(
-    "backend: graft — binary NOT auto-installed. See https://github.com/NanoNets/Graft, then: heimdall doctor",
+    "backend: @nanonets/graft (npm) — install with: npm i -g @nanonets/graft, then: heimdall doctor",
   );
   return 0;
 }
@@ -265,7 +267,7 @@ export async function main(argv) {
     case "depth": return runDepth(rest);
     case "hint": return runHint(rest);
     case "search": return runSearch(rest);
-    case "insert": return runInsert(rest);
+    case "insert": return await runInsert(rest);
     case "doctor": return runDoctor();
     case undefined:
     case "--help":
