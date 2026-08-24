@@ -34,16 +34,16 @@ Without Heimdall:
 
 ```
 $ grep -r "portfolio optimization" .            # wrong repo, 40s
-$ find ~/Repos -name "*.py" | xargs grep -l jam_opt   # 2 min
-$ ls ~/Desktop/... ; cat notes.md ; ...         # 15 commands later
+$ find ~/work -name "*.py" | xargs grep -l optimizer   # 2 min
+$ ls ~/work/... ; cat notes.md ; ...         # 15 commands later
 ```
 
 With Heimdall:
 
 ```
 $ kb_search "portfolio optimization jam optimizer"
-   1. [STRONG] poker jam_opt optimizer — ~/Repos/poker-bot/tools — heads-up jam/fold EV optimizer
-   2. [STRONG] TypeE excel build — ~/Desktop/Shepherd Ventures/MVO2 — 276-session tracking table
+   1. [STRONG] portfolio optimizer — ~/work/quant-bot/src — EV-optimizer entry point
+   2. [STRONG] excel report builder — ~/work/reports/excel — 276-session tracking table
 ```
 
 One call. Verified paths. Straight to work.
@@ -118,9 +118,9 @@ Real session output (abridged):
 ```
 $ kb_search "portfolio optimization jam optimizer"
 == retrieve (hybrid ranked): portfolio optimization jam optimizer
-   1. [STRONG] cov83%  poker jam_opt optimizer — ~/Repos/poker-bot/tools
-      heads-up jam/fold EV optimizer, edited 2026-08-14
-   2. [WEAK]   TypeE excel build — ~/Desktop/Shepherd Ventures/MVO2
+   1. [STRONG] cov83%  portfolio optimizer — ~/work/quant-bot/src
+      EV-optimizer entry point, edited 2026-08-14
+   2. [WEAK]   excel report builder — ~/work/reports/excel
 ```
 
 Every hit carries a trust verdict computed against the live filesystem — not a cached embedding score.
@@ -246,9 +246,9 @@ On this machine the Pi extensions are live at `~/.pi/agent/extensions/kb-*.ts`. 
 
 ```bash
 heimdall search "excel tracker portfolio optimization"   # ranked + verified knowledge search
-heimdall insert --title "poker jam_opt optimizer" \
-  --body "~/Repos/poker-bot/tools — heads-up jam/fold EV optimizer" \
-  --keywords poker,optimize                              # record reusable work
+heimdall insert --title "portfolio optimizer" \
+  --body "~/work/quant-bot/src — EV-optimizer entry point" \
+  --keywords portfolio,optimize                              # record reusable work
 heimdall init --harness claude-code                      # wire into your harness (idempotent)
 heimdall doctor                                          # daemon + index health
 ```
