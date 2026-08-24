@@ -69,12 +69,13 @@ fi
 # Merge JSON hits from every repo into one JSON array shaped like graft
 # retrieve results: {result:{results:[{title,score,id_hex}]}} with paths.
 # PLUS global semantic hits from embed-index.py.
-python3 - "$Q" "$N" "${REPO_LIST[@]}" <<'PYEOF'
+python3 - "$Q" "$N" "$SCRIPT_DIR" "${REPO_LIST[@]}" <<'PYEOF'
 import json, os, subprocess, sys
 
 q = sys.argv[1]
 n = int(sys.argv[2])
-repos = sys.argv[3:]
+script_dir = sys.argv[3]
+repos = sys.argv[4:]
 graft = os.environ.get("GRAFT", "graft")
 results = []
 for repo in repos:
@@ -97,9 +98,9 @@ for repo in repos:
     except Exception:
         continue
 # Global semantic hits (bge-m3): append as top-ranked candidates.
-# Resolve embed-index.py relative to THIS script, not cwd (same bug class as
-# the PR #2 GRAFT-resolution fix).
-sem = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0] if sys.argv[0] != "<stdin>" else os.getcwd())), "embed-index.py")
+# embed-index.py lives next to kb-search.sh; the shell passes SCRIPT_DIR in
+# argv[3] because sys.argv[0] is "-" for stdin-invoked python.
+sem = os.path.join(script_dir, "embed-index.py")
 # fall back to cwd-relative if the script-dir guess misses
 if not os.path.exists(sem):
     sem = os.path.join(os.getcwd(), "bin", "embed-index.py")

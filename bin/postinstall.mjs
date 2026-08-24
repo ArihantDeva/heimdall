@@ -16,13 +16,23 @@ if (process.env.HEIMDALL_NO_AUTOINIT === "1") {
 
 try {
 	const heimdallJs = join(dirname(dirname(fileURLToPath(import.meta.url))), "bin", "heimdall.js");
+	const wired = [];
 
-	// 1. sync wiring — bounded, fast
-	const res = spawnSync(process.execPath, [heimdallJs, "init", "--harness", "all", "--quiet"], {
+	// 1. sync wiring — only for harnesses actually detected on this machine.
+	//    Wiring all blindly would litter $HOME and poison --detect forever.
+	const det = spawnSync(process.execPath, [heimdallJs, "init", "--detect"], {
 		encoding: "utf8",
-		timeout: 30_000,
+		timeout: 15_000,
 	});
-	if (res.stdout?.trim()) console.log("[heimdall] enforcement stacks wired:", res.stdout.trim().split("\n").join(", "));
+	const found = (det.stdout ?? "").split("\n").map((s) => s.trim()).filter((s) => s && !s.startsWith("("));
+	for (const h of found) {
+		const r = spawnSync(process.execPath, [heimdallJs, "init", "--harness", h, "--quiet"], {
+			encoding: "utf8",
+			timeout: 30_000,
+		});
+		if (r.status === 0) wired.push(h);
+	}
+	if (wired.length) console.log(`[heimdall] enforcement stacks wired: ${wired.join(", ")}`);
 
 	// 2. detached background bootstrap index (graft build per repo + embed build).
 	//    Logs to ~/.heimdall/bootstrap.log; survives npm exiting.

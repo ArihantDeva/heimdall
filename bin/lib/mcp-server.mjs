@@ -4,11 +4,16 @@
 // kb_sync → reconcile. Zero dependencies; stdout carries ONLY protocol
 // frames (all diagnostics go to stderr).
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const BIN_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HEIMDALL_JS = join(BIN_DIR, "heimdall.js");
+let VERSION = "0.0.0";
+try {
+	VERSION = JSON.parse(readFileSync(join(BIN_DIR, "..", "package.json"), "utf8")).version ?? VERSION;
+} catch { /* dev checkout without package.json at root */ }
 
 const TOOLS = [
 	{
@@ -25,7 +30,10 @@ const TOOLS = [
 			},
 			required: ["query"],
 		},
-		run: (a) => cli(["search", String(a.query), "-n", String(a.n ?? 6)]),
+		run: (a) => {
+			if (typeof a.query !== "string" || !a.query.trim()) return Promise.resolve({ code: 1, text: "ERROR: query is required and must be a non-empty string" });
+			return cli(["search", String(a.query), "-n", String(Math.max(1, Math.min(50, Number(a.n) || 6)))]);
+		},
 	},
 	{
 		name: "kb_insert",
@@ -41,11 +49,15 @@ const TOOLS = [
 			},
 			required: ["title", "body"],
 		},
-		run: (a) =>
-			cli([
+		run: (a) => {
+			if (typeof a.title !== "string" || !a.title.trim() || typeof a.body !== "string" || !a.body.trim()) {
+				return Promise.resolve({ code: 1, text: "ERROR: title and body are required non-empty strings" });
+			}
+			return cli([
 				"insert", "--title", String(a.title), "--body", String(a.body),
 				...(a.keywords ? ["--keywords", String(a.keywords)] : []),
-			]),
+			]);
+		},
 	},
 	{
 		name: "kb_sync",
@@ -82,7 +94,7 @@ async function handle(msg) {
 		return ok(msg.id, {
 			protocolVersion: "2024-11-05",
 			capabilities: { tools: {} },
-			serverInfo: { name: "heimdall", version: "0.6.0" },
+			serverInfo: { name: "heimdall", version: VERSION },
 		});
 	}
 	if (msg.method === "notifications/initialized") return null;
@@ -105,7 +117,8 @@ async function handle(msg) {
 		}
 	}
 	if (msg.id !== undefined && msg.method?.startsWith("prompts/")) return err(msg.id, -32601, "prompts not supported");
-	return err(msg.id ?? null, -32601, `method not found: ${msg.method}`);
+	if (msg.id === undefined) return null; // notifications never get replies (JSON-RPC 2.0)
+	return err(msg.id, -32601, `method not found: ${msg.method}`);
 }
 
 export async function serveMcp(input = process.stdin, output = process.stdout) {

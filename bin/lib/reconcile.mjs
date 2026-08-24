@@ -17,6 +17,11 @@ export function skipPath(path, home) {
   if (!path.startsWith("/")) return true;
   if (path.startsWith("/tmp/") || path.startsWith("/private/tmp/")) return true;
   if (home) {
+    // fact-layer carve-out (spec D1, 2026-08-23): prompt logs under
+    // ~/.heimdall/prompts/ are the canonical memory write path and must
+    // reconcile despite living in a dotdir.
+    const promptsPrefix = `${home}/.heimdall/prompts/`;
+    if (path.startsWith(promptsPrefix)) return false;
     if (path.startsWith(`${home}/.`)) return true;
     if (path.startsWith(`${home}/Library/`)) return true;
   }

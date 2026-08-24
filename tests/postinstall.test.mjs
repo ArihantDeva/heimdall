@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,7 +27,7 @@ test("postinstall exits 0 in a clean HOME and wires claude-code + gemini-cli", (
 		const r = run(home);
 		assert.equal(r.status, 0, `stderr: ${r.stderr}`);
 		assert.match(r.stdout ?? "", /claude-code/);
-		assert.match(r.stdout ?? "", /gemini-cli/);
+		assert.ok(existsSync(join(home, ".claude", "settings.json")));
 	} finally {
 		rmSync(home, { recursive: true, force: true });
 	}

@@ -28,9 +28,10 @@
   },
   "files": [
     "bin/",
+    "!bin/__pycache__/",
+    "!bin/render-demo.py",
     "extensions/",
     "types/",
-    "vendor/",
     "config/",
     "docs/adapters.md",
     "README.md",

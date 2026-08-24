@@ -34,11 +34,20 @@ function upsertMarkdownBlock(mdPath, block = ruleBlock()) {
 	return true;
 }
 
-/** Merge a JSON file deeply-ish (top-level + one nested level), preserving non-heimdall keys. */
+/** Merge a JSON file deeply-ish (top-level + one nested level), preserving non-heimdall keys.
+ * Parse failure = ABORT (never reset user config from {}); backs up before first write. */
 function mergeJson(jsonPath, patch) {
 	let data = {};
 	if (existsSync(jsonPath)) {
-		try { data = JSON.parse(readFileSync(jsonPath, "utf8")); } catch { /* start fresh */ }
+		const raw = readFileSync(jsonPath, "utf8");
+		if (raw.trim()) {
+			try {
+				data = JSON.parse(raw);
+			} catch (e) {
+				throw new Error(`${jsonPath} is not valid JSON (${e.message}) — fix or remove it, then rerun init`);
+			}
+			copyFileSync(jsonPath, `${jsonPath}.heimdall-bak`);
+		}
 	}
 	for (const [k, v] of Object.entries(patch)) {
 		if (v && typeof v === "object" && !Array.isArray(v) && data[k] && typeof data[k] === "object" && !Array.isArray(data[k])) {
@@ -108,13 +117,17 @@ function writeClaudeCode(home) {
 	const hookBin = installHookBinary(home);
 	mergeJson(join(home, ".claude", "settings.json"), {
 		mcpServers: { heimdall: mcpServerEntry(process.execPath, cli) },
-		hooks: {
-			PostToolUse: [{
-				matcher: "Bash|Grep|Glob|Read",
-				hooks: [{ type: "command", command: `'${hookBin}'`, timeout: 5 }],
-			}],
-		},
 	});
+	// hooks.PostToolUse is an ARRAY the user may already use (formatters etc).
+	// Merge entry-wise: drop prior heimdall entries (idempotency), keep theirs.
+	const settingsPath = join(home, ".claude", "settings.json");
+	let settings = {};
+	try { settings = JSON.parse(readFileSync(settingsPath, "utf8")); } catch { /* fresh */ }
+	settings.hooks = settings.hooks ?? {};
+	const existing = Array.isArray(settings.hooks.PostToolUse) ? settings.hooks.PostToolUse : [];
+	const ours = { matcher: "Bash|Grep|Glob|Read", hooks: [{ type: "command", command: `'${hookBin}'`, timeout: 5 }] };
+	const kept = existing.filter((e) => !JSON.stringify(e).includes("heimdall-hook"));
+	writeFileSync(settingsPath, JSON.stringify({ ...settings, hooks: { ...settings.hooks, PostToolUse: [...kept, ours] } }, null, 2) + "\n");
 	upsertMarkdownBlock(join(home, ".claude", "CLAUDE.md"), ruleBlock("mcp__heimdall__kb_search"));
 	return "claude-code";
 }
@@ -212,13 +225,16 @@ function writeDeepseek(home) {
 	mergeJson(join(home, ".deepseek", "settings.json"), {
 		experimental_heimdall: true,
 		mcpServers: { heimdall: mcpServerEntry(process.execPath, cli) },
-		hooks: {
-			PostToolUse: [{
-				matcher: "Bash|Grep|Glob|Read",
-				hooks: [{ type: "command", command: `'${hookBin}'`, timeout: 5 }],
-			}],
-		},
 	});
+	// same array-aware PostToolUse merge as claude-code
+	const settingsPath = join(home, ".deepseek", "settings.json");
+	let settings = {};
+	try { settings = JSON.parse(readFileSync(settingsPath, "utf8")); } catch { /* fresh */ }
+	settings.hooks = settings.hooks ?? {};
+	const existing = Array.isArray(settings.hooks.PostToolUse) ? settings.hooks.PostToolUse : [];
+	const ours = { matcher: "Bash|Grep|Glob|Read", hooks: [{ type: "command", command: `'${hookBin}'`, timeout: 5 }] };
+	const kept = existing.filter((e) => !JSON.stringify(e).includes("heimdall-hook"));
+	writeFileSync(settingsPath, JSON.stringify({ ...settings, hooks: { ...settings.hooks, PostToolUse: [...kept, ours] } }, null, 2) + "\n");
 	upsertMarkdownBlock(join(home, ".deepseek", "AGENTS.md"), ruleBlock("mcp__heimdall__kb_search"));
 	return "deepseek (experimental — verify config path matches your DeepSeek harness version)";
 }

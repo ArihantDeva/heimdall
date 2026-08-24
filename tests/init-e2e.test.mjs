@@ -81,8 +81,10 @@ test("e2e: installed heimdall-hook binary warns on 3rd grep action and resets on
 		const feed = (tool) => spawnSync(hook, { input: JSON.stringify({ tool_name: tool }), encoding: "utf8" });
 		assert.equal(feed("Bash").stdout.trim(), "");
 		assert.equal(feed("Grep").stdout.trim(), "");
-		assert.match(feed("Read").stdout, /kb_search/);
-		// MCP-style reset
+		assert.match(feed("Bash").stdout, /kb_search/); // 3rd grep-style action fires
+		// read is a RESET tool now (reading a kb_search hit is normal flow)
+		feed("Read");
+		// MCP-style reset also works
 		feed("mcp__heimdall__kb_search");
 		assert.equal(feed("Bash").stdout.trim(), "");
 	} finally {
