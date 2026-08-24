@@ -50,9 +50,8 @@ One call. Verified paths. Straight to work.
 
 ## How it compares
 
-| | Heimdall | mem0 | Claude Memory | Letta (MemGPT) | cAST /
-grep |
-|---|---|---|---|---|---|
+| **Heimdall** | mem0 | Claude Memory | Letta (MemGPT) | cAST / grep |
+|---|---|---|---|---|
 | Scope | **All your repos, one graph** | per-app/per-user | per-conversation/account | per-agent | per-repo |
 | Runs on CPU only | **yes** | cloud or self-host | cloud | self-host | yes |
 | Token cost of indexing | **zero** (tree-sitter + local embeddings) | LLM extraction | LLM summarization | LLM | zero but manual |
