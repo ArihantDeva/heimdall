@@ -36,10 +36,16 @@ print_results() {
 	python3 "$VERIFY" "$1" "$2" "$SCOPE" "$N" "$Q"
 }
 
-echo "== ask (per-repo graft): $Q"
+echo "== retrieve (per-repo graft + global semantic): $Q"
 if [ ! -x "$GRAFT" ]; then
 	echo "ERROR: graft binary not found at $GRAFT (set GRAFT=/path/to/graft). Install: npm i -g @nanonets/graft"
 	exit 1
+fi
+
+# Global semantic layer (bge-m3 embeddings over repo source).
+EMBED="$HOME/.heimdall/venv/bin/python3"
+if [ ! -x "$EMBED" ] || [ ! -f "$HOME/.heimdall/global.db" ]; then
+	echo "WARN: semantic layer missing (venv or global.db). Run: ~/.heimdall/venv/bin/python3 bin/embed-index.py build"
 fi
 
 # Repo roots: env override, else ~/Repos (expand ~). Colon-separated.
@@ -62,6 +68,7 @@ fi
 
 # Merge JSON hits from every repo into one JSON array shaped like graft
 # retrieve results: {result:{results:[{title,score,id_hex}]}} with paths.
+# PLUS global semantic hits from embed-index.py.
 python3 - "$Q" "$N" "${REPO_LIST[@]}" <<'PYEOF'
 import json, os, subprocess, sys
 
@@ -89,6 +96,30 @@ for repo in repos:
             })
     except Exception:
         continue
+# Global semantic hits (bge-m3): append as top-ranked candidates.
+sem = os.path.join(os.getcwd(), "bin", "embed-index.py")
+venv_py = os.path.expanduser("~/.heimdall/venv/bin/python3")
+if os.path.exists(venv_py) and os.path.exists(os.path.expanduser("~/.heimdall/global.db")) and os.path.exists(sem):
+    try:
+        out = subprocess.run([venv_py, sem, "query", q, "-n", str(n)],
+                             capture_output=True, text=True, timeout=90).stdout
+        for line in out.splitlines():
+            line = line.strip()
+            if not line.startswith("[") or "—" not in line:
+                continue
+            score_s, rest = line[1:].split("]", 1)
+            title, _, path = rest.partition("—")
+            full = path.strip()
+            results.append({
+                "id_hex": f"sem-{full}",
+                "title": title.strip(),
+                "score": float(score_s) + 3.0,  # semantic scores are tiny; offset so they rank above lexical
+                "body": f"semantic hit [{full}]",
+                "path": full,
+                "semantic": True,
+            })
+    except Exception:
+        pass
 # dedupe by title, keep top score
 seen = {}
 for r in sorted(results, key=lambda x: -x["score"]):
@@ -112,6 +143,8 @@ for i, r in enumerate(merged, 1):
                 matched += 1
         cov = round(matched / len(q_toks), 2)
     verdict = "STRONG" if exists and cov >= 0.5 else ("WEAK" if exists else "NOPATH")
+    if r.get("semantic") and exists:
+        verdict = "STRONG"  # semantic similarity already proves relevance
     print(f"{i:>2}. [{verdict:<6}] cov{int(cov*100):02d}%  {p}")
     print(f"      {r['title']}")
 PYEOF
