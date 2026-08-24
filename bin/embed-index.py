@@ -76,19 +76,28 @@ def build() -> int:
     c = conn()
     init(c)
     model_inst = model()
-    total = 0
+    # Collect all cards first, then encode in batches — one-by-one encoding
+    # costs ~0.65s/card on CPU (23 min for 2k cards); batching cuts it ~10×.
+    all_cards: list[tuple[str, str, str, str, str]] = []
     for repo in sorted(REPOS.glob("*")):
         if not repo.is_dir():
             continue
-        for cid, repo_path, rel, title, body in cards_for(repo):
-            vec = model_inst.encode(title + " " + body[:1500], normalize_embeddings=True).tolist()
+        all_cards.extend(cards_for(repo))
+    B = 32
+    total = 0
+    for i in range(0, len(all_cards), B):
+        batch = all_cards[i : i + B]
+        vecs = model_inst.encode(
+            [title + " " + body[:1500] for _, _, _, title, body in batch],
+            normalize_embeddings=True,
+        )
+        for (cid, repo_path, rel, title, body), vec in zip(batch, vecs):
             c.execute("INSERT OR REPLACE INTO cards VALUES (?,?,?,?,?)", (cid, repo_path, rel, title, body))
             row = c.execute("SELECT rowid FROM cards WHERE id=?", (cid,)).fetchone()
             c.execute("DELETE FROM vec WHERE rowid=?", (row[0],))
-            c.execute("INSERT INTO vec (rowid, embedding) VALUES (?, ?)", (row[0], json.dumps(vec)))
+            c.execute("INSERT INTO vec (rowid, embedding) VALUES (?, ?)", (row[0], json.dumps(vec.tolist())))
             total += 1
-    c.commit()
-    c.close()
+        c.commit()
     return total
 
 

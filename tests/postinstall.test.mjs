@@ -33,6 +33,19 @@ test("postinstall exits 0 in a clean HOME and wires claude-code + gemini-cli", (
 	}
 });
 
+test("postinstall exits fast and spawns detached background index", () => {
+	const home = mkdtempSync(join(tmpdir(), "heimdall-postinstall-"));
+	try {
+		mkdirSync(join(home, ".claude"), { recursive: true });
+		const t0 = Date.now();
+		run(home);
+		const dt = Date.now() - t0;
+		assert.ok(dt < 15_000, `postinstall took ${dt}ms — must return fast`);
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
+});
+
 test("HEIMDALL_NO_AUTOINIT=1 skips everything", () => {
 	const home = mkdtempSync(join(tmpdir(), "heimdall-postinstall-"));
 	try {

@@ -72,6 +72,23 @@ async function runInsert(args) {
   return 0;
 }
 
+function runIndexCmd(args) {
+  const json = args.includes("--json");
+  const rootIdx = args.indexOf("--root");
+  const root = rootIdx >= 0 ? args[rootIdx + 1] : undefined;
+  return import("./index-bootstrap.mjs").then(({ runIndex }) => {
+    const { repos, embed } = runIndex({ root });
+    if (json) {
+      console.log(JSON.stringify({ repos, embed }, null, 2));
+      return 0;
+    }
+    for (const r of repos) console.log(`  ${r.status.padEnd(7)} ${r.repo}${r.detail ? ` — ${r.detail}` : ""}`);
+    console.log(embed);
+    if (!repos.length) console.log("(no git repos found)");
+    return 0;
+  });
+}
+
 function runDoctor() {
   return sh(BIN("kb-health.sh"), []);
 }
@@ -283,6 +300,7 @@ export async function main(argv) {
     case "search": return runSearch(rest);
     case "insert": return await runInsert(rest);
     case "doctor": return runDoctor();
+    case "index": return runIndexCmd(rest);
     case "mcp": return (await import("./mcp-server.mjs")).serveMcp().then(() => 0);
     case undefined:
     case "--help":
