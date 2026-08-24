@@ -92,7 +92,7 @@ def build() -> int:
     return total
 
 
-def query(q: str, n: int = 5) -> list[dict]:
+def query(q: str, n: int = 5, related: bool = False) -> list[dict]:
     c = conn()
     vec = model().encode(q, normalize_embeddings=True).tolist()
     rows = c.execute(
@@ -118,6 +118,20 @@ def query(q: str, n: int = 5) -> list[dict]:
                 if found:
                     src = pathlib.Path(os.path.relpath(found, repo_dir))
             out.append({"id": card[0], "repo": card[1], "path": str(src), "title": card[3], "score": 1.0 - dist})
+    # Structural second pass (issue #1): siblings of top hits in the same
+    # repo directory — same module, same feature area — regardless of score.
+    # Score-cutoff false-negatives get rescued by file structure.
+    if related and out:
+        seen = {o["path"] for o in out}
+        top = out[0]
+        parent = pathlib.Path(top["repo"]) / pathlib.Path(top["path"]).parent
+        if parent.is_dir():
+            for sibling in sorted(parent.iterdir()):
+                if sibling.is_file() and sibling.suffix in (".py", ".js", ".mjs", ".ts", ".sh", ".c", ".cpp"):
+                    rel = sibling.relative_to(top["repo"]).as_posix()
+                    if rel not in seen:
+                        out.append({"id": f"sib-{rel}", "repo": top["repo"], "path": rel,
+                                    "title": sibling.name, "score": 0.0, "related": True})
     c.close()
     return out
 
@@ -138,7 +152,9 @@ if __name__ == "__main__":
     elif cmd == "query":
         q = sys.argv[2]
         n = int(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[3] == "-n" else 5
-        for r in query(q, n):
-            print(f"  [{r['score']:.2f}] {r['title']} — {os.path.join(r['repo'], r['path'])}")
+        related = "--related" in sys.argv
+        for r in query(q, n, related):
+            tag = " ·related" if r.get("related") else ""
+            print(f"  [{r['score']:.2f}] {r['title']}{tag} — {os.path.join(r['repo'], r['path'])}")
     elif cmd == "status":
         print(json.dumps(status()))

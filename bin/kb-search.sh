@@ -101,7 +101,7 @@ sem = os.path.join(os.getcwd(), "bin", "embed-index.py")
 venv_py = os.path.expanduser("~/.heimdall/venv/bin/python3")
 if os.path.exists(venv_py) and os.path.exists(os.path.expanduser("~/.heimdall/global.db")) and os.path.exists(sem):
     try:
-        out = subprocess.run([venv_py, sem, "query", q, "-n", str(n)],
+        out = subprocess.run([venv_py, sem, "query", q, "-n", str(n), "--related"],
                              capture_output=True, text=True, timeout=90).stdout
         for line in out.splitlines():
             line = line.strip()
@@ -110,14 +110,26 @@ if os.path.exists(venv_py) and os.path.exists(os.path.expanduser("~/.heimdall/gl
             score_s, rest = line[1:].split("]", 1)
             title, _, path = rest.partition("—")
             full = path.strip()
-            results.append({
-                "id_hex": f"sem-{full}",
-                "title": title.strip(),
-                "score": float(score_s) + 3.0,  # semantic scores are tiny; offset so they rank above lexical
-                "body": f"semantic hit [{full}]",
-                "path": full,
-                "semantic": True,
-            })
+            is_related = "·related" in title
+            title = title.replace("·related", "").strip()
+            if is_related:
+                results.append({
+                    "id_hex": f"sem-{full}",
+                    "title": title,
+                    "score": -5.0,  # structural siblings rank below semantic+lexical
+                    "body": f"related file [{full}]",
+                    "path": full,
+                    "semantic": False,
+                })
+            else:
+                results.append({
+                    "id_hex": f"sem-{full}",
+                    "title": title,
+                    "score": float(score_s) + 3.0,  # semantic scores are tiny; offset so they rank above lexical
+                    "body": f"semantic hit [{full}]",
+                    "path": full,
+                    "semantic": True,
+                })
     except Exception:
         pass
 # dedupe by title, keep top score
