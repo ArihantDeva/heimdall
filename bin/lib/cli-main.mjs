@@ -89,19 +89,33 @@ function writeConfig(harness) {
   writeFileSync(configPath(), JSON.stringify(cfg, null, 2) + "\n");
 }
 
-import { installAdapter } from "./adapters.mjs";
+import { installAdapter, detectHarnesses, KNOWN_HARNESSES } from "./adapters.mjs";
+const adaptersModule = () => ({ installAdapter, detectHarnesses, KNOWN_HARNESSES });
 
 function runInit(args) {
+  if (args.includes("--detect")) {
+    const { detectHarnesses } = adaptersModule();
+    const found = detectHarnesses();
+    console.log(found.length ? found.join("\n") : "(no harness configs found)");
+    return 0;
+  }
   const i = args.indexOf("--harness");
   const harness = i >= 0 ? args[i + 1] : "pi";
-  const valid = ["pi", "claude-code", "codex", "cursor", "windsurf", "all"];
+  const valid = [...adaptersModule().KNOWN_HARNESSES, "all"];
   if (!valid.includes(harness)) {
     console.error(`invalid --harness ${harness} (choose: ${valid.join("|")})`);
     return 1;
   }
+  const quiet = args.includes("--quiet");
   const existed = existsSync(configPath());
   writeConfig(harness);
   const installed = installAdapter(harness);
+  if (quiet) {
+    // one name per line, machine-readable for postinstall
+    const names = Array.isArray(installed) ? installed : [installed];
+    console.log(names.map((r) => String(r).split(" ")[0]).join("\n"));
+    return 0;
+  }
   console.log(
     existed
       ? `ok: config already present, harness set to ${harness}`
@@ -269,6 +283,7 @@ export async function main(argv) {
     case "search": return runSearch(rest);
     case "insert": return await runInsert(rest);
     case "doctor": return runDoctor();
+    case "mcp": return (await import("./mcp-server.mjs")).serveMcp().then(() => 0);
     case undefined:
     case "--help":
     case "-h":

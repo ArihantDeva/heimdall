@@ -232,15 +232,29 @@ Extraction is tree-sitter AST parsing via a Python bridge, **not an LLM call**: 
 
 ## Harness integration
 
-| Harness | Command | Integration |
-|---|---|---|
-| **Pi** | `heimdall init --harness pi` | native extensions: `kb_search`/`kb_insert`/`kb_sync` tools, edit autosync, session orientation |
-| **Claude Code** | `heimdall init --harness claude-code` | PostToolUse hook emits path hints + memory snippet |
-| **Codex CLI** | `heimdall init --harness codex` | `AGENTS.md` search/insert instructions |
-| **Cursor** | `heimdall init --harness cursor` | rules file with search-first workflow |
-| **Windsurf** | `heimdall init --harness windsurf` | rules file with search-first workflow |
+One command wires the **full enforcement stack** into any supported harness: memory rules in the agent's instruction file, an MCP server (`kb_search` / `kb_insert` / `kb_sync`), and a guard hook that warns when the agent falls back to `ls`/`grep`/`find` chains instead of searching memory:
 
-On this machine the Pi extensions are live at `~/.pi/agent/extensions/kb-*.ts`. The Claude Code hook resolves the CLI once at init (`npm root -g`) and falls back to a PATH shim; it stays fast and never writes the graph.
+```bash
+heimdall init --harness claude-code   # or codex, cursor, pi, opencode, gemini-cli, deepseek
+heimdall init --detect                # list harnesses found on this machine
+heimdall mcp                          # raw stdio MCP server (for anything else)
+HEIMDALL_NO_AUTOINIT=1 npm i -g @arihantdeva/heimdall   # skip auto-setup
+```
+
+`npm i -g` runs a best-effort postinstall that auto-wires every detected harness (never fails the install; opt out with `HEIMDALL_NO_AUTOINIT=1`).
+
+| Harness | Command | Rules file | MCP | Guard hook |
+|---|---|---|---|---|
+| **Claude Code** | `init --harness claude-code` | `~/.claude/CLAUDE.md` | ✅ `settings.json` | ✅ PostToolUse hook |
+| **Codex CLI** | `init --harness codex` | `~/AGENTS.md` | ✅ `config.toml` | rules only |
+| **Cursor** | `init --harness cursor` | `.cursor/rules/heimdall.mdc` | ✅ `mcp.json` | rules only |
+| **Pi** | `init --harness pi` | `~/.pi/agent/AGENTS.md` | native tools | ✅ kb-search-guard extension |
+| **OpenCode** | `init --harness opencode` | AGENTS.md plugin dir | ✅ `opencode.json` | ✅ plugin hook |
+| **Gemini CLI** | `init --harness gemini-cli` | `~/.gemini/GEMINI.md` | ✅ `settings.json` | rules only |
+| **DeepSeek** *(experimental)* | `init --harness deepseek` | `~/.deepseek/AGENTS.md` | ✅ `settings.json` | ✅ PostToolUse hook |
+| Anything else | `heimdall mcp` | your rules | ✅ stdio server | — |
+
+Every adapter merges into existing config files (never clobbers your keys), is idempotent on re-run, and embeds the same canonical rule block — no per-harness rule drift. The DeepSeek adapter is experimental: DeepSeek's published harness config format may differ; verify paths after running init.
 
 ## Usage
 

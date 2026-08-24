@@ -1,0 +1,75 @@
+// mcp-server — contract tests for `heimdall mcp` stdio JSON-RPC server.
+// Protocol: MCP 2024-11-05, newline-delimited JSON over stdin/stdout.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const repo = dirname(dirname(fileURLToPath(import.meta.url)));
+const HEIMDALL = process.platform === "win32" ? test.skip : "node";
+
+function rpc(msgs, { timeout = 30_000 } = {}) {
+	return new Promise((resolve, reject) => {
+		const child = spawn(process.execPath, [join(repo, "bin", "heimdall.js"), "mcp"], {
+			env: { ...process.env },
+			stdio: ["pipe", "pipe", "pipe"],
+		});
+		let buf = "";
+		const out = [];
+		const timer = setTimeout(() => { child.kill(); reject(new Error("mcp timeout; got: " + out.length)); }, timeout);
+		child.stdout.on("data", (d) => {
+			buf += d;
+			let i;
+			while ((i = buf.indexOf("\n")) >= 0) {
+				const line = buf.slice(0, i).trim();
+				buf = buf.slice(i + 1);
+				if (!line) continue;
+				try { out.push(JSON.parse(line)); } catch {}
+			}
+			if (out.length >= msgs.filter((m) => !m._notify).length) {
+				clearTimeout(timer);
+				child.kill();
+				resolve(out);
+			}
+		});
+		child.stderr.on("data", () => {});
+		for (const m of msgs) child.stdin.write(JSON.stringify(m) + "\n");
+	});
+}
+
+const INIT = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test", version: "0" } } };
+const LIST = { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} };
+
+test("mcp: initialize responds with protocol version + server info", async () => {
+	const [res] = await rpc([INIT]);
+	assert.equal(res.id, 1);
+	assert.equal(res.result.protocolVersion, "2024-11-05");
+	assert.equal(res.result.serverInfo.name, "heimdall");
+});
+
+test("mcp: tools/list exposes search, insert, sync", async () => {
+	const [, res] = await rpc([INIT, LIST]);
+	assert.equal(res.id, 2);
+	const names = res.result.tools.map((t) => t.name).sort();
+	assert.deepEqual(names, ["kb_insert", "kb_search", "kb_sync"]);
+	assert.ok(res.result.tools.every((t) => typeof t.description === "string" && t.inputSchema.type === "object"));
+});
+
+test("mcp: tools/call kb_search returns text content", async () => {
+	const CALL = { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "kb_search", arguments: { query: "reconcile graph convergence" } } };
+	const res = await rpc([INIT, LIST, CALL], { timeout: 120_000 });
+	const call = res.find((r) => r.id === 3);
+	assert.ok(call, "no response for call");
+	assert.equal(call.result.isError ?? false, false);
+	assert.ok(Array.isArray(call.result.content));
+	assert.ok(call.result.content[0].text.includes("["));
+}, { timeout: 150_000 });
+
+test("mcp: unknown tool → isError with message", async () => {
+	const CALL = { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "nope", arguments: {} } };
+	const res = await rpc([INIT, CALL]);
+	const call = res.find((r) => r.id === 4);
+	assert.equal(call.result.isError, true);
+	assert.match(call.result.content[0].text, /unknown tool/i);
+});
