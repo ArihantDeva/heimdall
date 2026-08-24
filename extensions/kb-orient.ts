@@ -41,8 +41,8 @@ export default function kbOrientExtension(pi: ExtensionAPI): void {
 			// Cap total retrieval time — a hung graft must never stall the first prompt.
 			const [retrieveOut, exploreOut] = await Promise.race([
 				Promise.all([
-					run("graft", ["retrieve", text, "--top-k", "3"]),
-					run("graft", ["explore", text, "--depth", "2", "--beam", "4"]),
+					run("heimdall", ["search", text, "-n", "3"]),
+					run("heimdall", ["search", text, "-n", "6"]),
 				]),
 				new Promise<[string, string]>((resolve) => setTimeout(() => resolve(["", ""]), 2500)),
 			]);

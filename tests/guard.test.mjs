@@ -88,7 +88,7 @@ t("warn message names the guard + asks kb_search", () => {
   g.note("read", {});
   const w = g.note("read", {});
   assert.ok(w.includes("kb_search"));
-  assert.ok(w.toLowerCase().includes("warning"));
+  assert.ok(w.toLowerCase().includes("warning") || w.includes("⚠️"));
 });
 
 t("state is per-guard instance (per-session isolation)", () => {

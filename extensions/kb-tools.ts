@@ -1,22 +1,19 @@
 /**
- * kb-tools — expose the machine knowledge base (Graft) as first-class
- * Pi tools: ranked search, verified query, insert, edit-log sync.
- * Backends: ~/knowledge-base/kb-search.sh, graft CLI, sync-edits.sh.
+ * kb-tools — expose Heimdall memory as first-class Pi tools:
+ * ranked verified search, insert, index sync. Backends: the `heimdall`
+ * CLI (npm @arihantdeva/heimdall) which fronts graft per-repo graphs
+ * + the global bge-m3 semantic index.
  */
 import { execFile } from "node:child_process";
 import { dirname, join } from "node:path";
-import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-// Scripts ship inside this package; legacy ~/knowledge-base copies are fallback.
+// Route through the installed heimdall CLI; fall back to repo bin scripts.
 const PKG_BIN = join(dirname(fileURLToPath(import.meta.url)), "..", "bin");
-const kbScript = (name: string): string => {
-	const pkg = join(PKG_BIN, name);
-	if (existsSync(pkg)) return pkg;
-	return join(process.env.HOME ?? "", "knowledge-base", name);
-};
+const kbScript = (name: string): string => join(PKG_BIN, name);
+const HEIMDALL = process.env.HEIMDALL_BIN ?? "heimdall";
 
 const run = (cmd: string, args: string[], signal?: AbortSignal): Promise<{ ok: boolean; text: string }> =>
 	new Promise((resolve) => {
@@ -34,7 +31,7 @@ export default function kbToolsExtension(pi: ExtensionAPI): void {
 		name: "kb_search",
 		label: "Knowledge Search",
 		description:
-			"Ranked cross-project knowledge search over the machine index (~/knowledge-base + Graft graph). Use BEFORE starting any implementation to find existing work: returns top-k candidate titles with relevance scores. Prefer this over graft query for discovery; use --scope to filter by directory.",
+			"Heimdall memory search: ranked, verified hits across ALL repos on this machine (lexical code graph + semantic embeddings). Use BEFORE any implementation/fix/research and INSTEAD of ls/grep/find chains for locating prior work. Every hit carries a trust verdict (STRONG/WEAK) verified against the live filesystem.",
 		promptSnippet: "Search machine knowledge for existing work before implementing",
 		promptGuidelines: [
 			"Use kb_search BEFORE any implementation, feature, or fix to find work that already exists in another project/directory — the cross-project reuse gate.",
@@ -45,13 +42,11 @@ export default function kbToolsExtension(pi: ExtensionAPI): void {
 			query: Type.String({ description: "What you're about to build or look for" }),
 			n: Type.Optional(Type.Number({ description: "Max results (default 6)" })),
 			scope: Type.Optional(Type.String({ description: "Filter by directory/path substring, e.g. poker, job" })),
-			explore: Type.Optional(Type.Boolean({ description: "Also walk the graph for related knowledge" })),
 		}),
 		async execute(_id, params, signal) {
 			const args = [params.query, "-n", String(params.n ?? 6)];
 			if (params.scope) args.push("--scope", params.scope);
-			if (params.explore) args.push("--explore");
-			const { ok, text } = await run("bash", [kbScript("kb-search.sh"), ...args], signal);
+			const { ok, text } = await run(HEIMDALL, ["search", ...args], signal);
 			return { content: [{ type: "text", text }], details: { ok } };
 		},
 	});
@@ -59,7 +54,7 @@ export default function kbToolsExtension(pi: ExtensionAPI): void {
 		name: "kb_insert",
 		label: "Knowledge Insert",
 		description:
-			"Record reusable work into the Graft memory graph: title (anchor), body (path + what/why), keywords. Mandatory AFTER completing reusable work (fix, pattern, decision, gotcha) so future sessions find and reuse it.",
+			"Record reusable work into Heimdall memory: title (anchor), body (path + what/why), keywords. Mandatory AFTER completing reusable work (fix, pattern, decision, gotcha) so future sessions find and reuse it.",
 		promptSnippet: "Record completed reusable work into machine memory",
 		promptGuidelines: [
 			"Use kb_insert after completing any reusable work: fix, pattern, decision, or gotcha.",
@@ -71,8 +66,8 @@ export default function kbToolsExtension(pi: ExtensionAPI): void {
 		}),
 		async execute(_id, params, _signal) {
 			const args = ["insert", "--title", params.title, "--body", params.body];
-			for (const k of params.keywords ?? []) args.push("--keyword", k);
-			const { ok, text } = await run("graft", args);
+			for (const k of params.keywords ?? []) args.push("--keywords", k);
+			const { ok, text } = await run(HEIMDALL, args);
 			return { content: [{ type: "text", text }], details: { ok } };
 		},
 	});
@@ -81,11 +76,11 @@ export default function kbToolsExtension(pi: ExtensionAPI): void {
 		name: "kb_sync",
 		label: "Knowledge Sync",
 		description:
-			"Converge the knowledge graph with the filesystem (incremental, cheap): replays write/edit tool-call paths since the last sync into the reconciler queue, then reconciles. The reconciler re-reads each file from disk, so a duplicate or wrong path costs a stat and cannot corrupt the graph.",
+			"Converge Heimdall indexes with the filesystem (incremental, cheap): reconciles queued edit hints against disk so moved/deleted files re-anchor or get pruned. Run after bulk file operations or before important searches.",
 		promptSnippet: "Refresh knowledge index from session edit logs",
 		parameters: Type.Object({}),
 		async execute() {
-			const { ok, text } = await run("bash", [kbScript("sync-edits.sh")]);
+			const { ok, text } = await run(HEIMDALL, ["reconcile"]);
 			return { content: [{ type: "text", text }], details: { ok } };
 		},
 	});
