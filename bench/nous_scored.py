@@ -25,6 +25,17 @@ HERE = pathlib.Path(__file__).resolve().parent
 RUNS = HERE / "runs"
 
 BASE = "https://inference-api.nousresearch.com/v1/chat/completions"
+# Three independent ox-alpha gateways: direct Nous API, CommandCode, OpenRouter.
+# Each is a separate upstream pool, so a 429 on one doesn't block the others.
+GATEWAYS = [
+    {"url": BASE, "key": "nous-a1"},
+    {"url": BASE, "key": "nous-a2"},
+    {"url": BASE, "key": "nous-a3"},
+    {"url": "https://api.commandcode.ai/provider/v1/chat/completions",
+     "key": "command-code"},
+    {"url": "https://openrouter.ai/api/v1/chat/completions",
+     "key": "openrouter-a1"},
+]
 MODELS = ["stealth/ox-alpha"]  # only model these keys can call; others 404/403
 
 SYSTEM = """You answer questions from a user's own chat history.
@@ -50,30 +61,37 @@ RUBRIC = {
 DEFAULT_RUBRIC = "The response must contain the correct answer."
 
 
-def _keys() -> list[str]:
+def _keys() -> list[tuple[str, str]]:
     import json as j
     auth = j.loads(pathlib.Path.home().joinpath(
         ".pi", "agent", "auth.json").read_text())
-    return [auth[k]["key"] for k in ("nous-a1", "nous-a2", "nous-a3") if k in auth]
+    out = []
+    for g in GATEWAYS:
+        k = auth.get(g["key"])
+        if k:
+            key = k.get("key") or k.get("api_key") or ""
+            if key:
+                out.append((g["url"], key))
+    return out
 
 
 def _call(messages: list[dict], max_tokens: int = 512) -> str:
-    """One completion with model fallback + key rotation on 429."""
-    keys = _keys()
+    """One completion across 5 gateways (3×nous, cc, or) with rotation."""
+    gw = _keys()
     body = json.dumps({"model": MODELS[0], "messages": messages,
                        "max_tokens": max_tokens}).encode()
     last_err = ""
-    for attempt in range(12):
-        key = keys[attempt % len(keys)]
+    for attempt in range(10):
+        url, key = gw[attempt % len(gw)]
         req = urllib.request.Request(
-            BASE, data=body, method="POST",
+            url, data=body, method="POST",
             headers={"Authorization": f"Bearer {key}",
                      "Content-Type": "application/json",
                      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                                     "Chrome/126.0.0.0 Safari/537.36"})
         try:
-            with urllib.request.urlopen(req, timeout=180) as resp:
+            with urllib.request.urlopen(req, timeout=240) as resp:
                 d = json.loads(resp.read())
                 content = d["choices"][0]["message"].get("content")
                 if not content:
@@ -82,11 +100,10 @@ def _call(messages: list[dict], max_tokens: int = 512) -> str:
         except Exception as e:
             last_err = str(e)
             err = str(e)
-            if "429" in err or "capacity" in err.lower():
-                time.sleep(2 + attempt)
+            if "429" in err or "capacity" in err.lower() or "unavailable" in err.lower():
+                time.sleep(2 + attempt % 4)
                 continue
             if "403" in err:
-                # key-specific block or model entitlement — rotate key, not model
                 time.sleep(1)
                 continue
             time.sleep(1)
@@ -98,9 +115,9 @@ def _reader(item: dict) -> str:
              f"The question is being asked on: {item['question_date']}", ""]
     if item.get("context"):
         parts.append("Relevant sessions from the user's history:")
-        for c in item["context"]:
+        for c in item["context"][:8]:
             parts.append(f"\n--- {c['title']} ---")
-            parts.append(c.get("body") or "")
+            parts.append((c.get("body") or "")[:1500])
     else:
         parts.append("No sessions were retrieved.")
     parts += ["", f"Question: {item['question']}", "", "Answer:"]
@@ -117,7 +134,7 @@ def _grade(item: dict, response: str) -> bool:
               f"Correct answer: {item['answer']}\n"
               f"Model response: {response}\n\n"
               "Reply with exactly one word: CORRECT or INCORRECT.")
-    out = _call([{"role": "user", "content": prompt}], max_tokens=8)
+    out = _call([{"role": "user", "content": prompt}], max_tokens=64)
     return out.strip().upper().startswith("CORRECT")
 
 
