@@ -64,7 +64,9 @@ test("mcp: tools/call kb_search returns text content", async () => {
 	assert.ok(call, "no response for call");
 	assert.equal(call.result.isError ?? false, false);
 	assert.ok(Array.isArray(call.result.content));
-	assert.ok(call.result.content[0].text.includes("["));
+	// Contract: non-empty text content. (Bracketed hit lines are env-dependent —
+	// a machine with zero indexed repos validly returns guidance text.)
+	assert.ok(typeof call.result.content[0]?.text === "string" && call.result.content[0].text.length > 0);
 }, { timeout: 150_000 });
 
 test("mcp: kb_search on fresh machine (no graft, no ~/.heimdall) still returns content, not an error", async () => {
