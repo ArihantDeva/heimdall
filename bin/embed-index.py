@@ -83,6 +83,25 @@ def build() -> int:
         if not repo.is_dir():
             continue
         all_cards.extend(cards_for(repo))
+    # Prune stale rows BEFORE embedding: cards removed from disk (e.g. mailbox
+    # roll-off past the ingest limit, or a graft build regenerating graft/)
+    # otherwise linger as vec orphans that pollute k-NN results with dead paths.
+    # This sqlite-vec build keeps tombstones on rowid DELETE, so the only clean
+    # way out is dropping + recreating the whole vec table. Trigger on EITHER
+    # stale cards OR existing orphans; embeddings are rebuilt for all cards below.
+    keep = {cid for cid, *_ in all_cards}
+    stale = [(cid, rid) for (cid, rid) in c.execute("SELECT id, rowid FROM cards").fetchall() if cid not in keep]
+    orphan_vec = sum(
+        1
+        for (rid,) in c.execute("SELECT rowid FROM vec")
+        if not c.execute("SELECT id FROM cards WHERE rowid=?", (rid,)).fetchone()
+    )
+    if stale:
+        for cid, rid in stale:
+            c.execute("DELETE FROM cards WHERE rowid=?", (rid,))
+    if stale or orphan_vec:
+        c.execute("DROP TABLE vec")
+        c.execute(f"CREATE VIRTUAL TABLE vec USING vec0(embedding float[{DIM}])")
     B = 32
     total = 0
     for i in range(0, len(all_cards), B):
