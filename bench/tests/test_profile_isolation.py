@@ -3,7 +3,7 @@ import json, os, subprocess, pathlib, sys, pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from ingest import BENCH_MARKER
 
-GRAFT = pathlib.Path.home() / ".local/bin/graft"
+GRAFT = pathlib.Path(__file__).resolve().parents[2] / "vendor/graft/build/graft"
 DEFAULT_DB = pathlib.Path.home() / ".graft/profiles/default/graft.db"
 
 def _profiles():

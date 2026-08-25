@@ -249,17 +249,19 @@ def _insert_all(question: dict, root: pathlib.Path, profile: str,
     return inserted
 
 
-def _insert_one(cmd: list[str], env: dict, attempts: int = 3) -> str:
+def _insert_one(cmd: list[str], env: dict, attempts: int = 6) -> str:
     """One insert, retried. The daemon fails intermittently under sustained
-    load, and a bare CalledProcessError hides graft's stderr entirely."""
+    load (status=4 storage / status=5 embedding, rc=3); a bare
+    CalledProcessError hides graft's stderr entirely. v1 lost 10/490
+    questions to 3-attempt linear retry; exponential backoff + more
+    attempts rides out longer daemon stalls."""
     for attempt in range(1, attempts + 1):
         out = subprocess.run(cmd, capture_output=True, text=True, env=env)
         if out.returncode == 0 and out.stdout.strip():
             return json.loads(out.stdout)["result"]["id_hex"]
-        if attempt == attempts:
-            raise RuntimeError(
-                f"graft insert failed after {attempts} attempts "
-                f"(rc={out.returncode}): {out.stderr.strip() or out.stdout.strip()!r}"
-            )
-        time.sleep(2 * attempt)
-    raise AssertionError("unreachable")
+        if attempt < attempts:
+            time.sleep(min(2 ** (attempt - 1), 20))
+    raise RuntimeError(
+        f"graft insert failed after {attempts} attempts "
+        f"(rc={out.returncode}): {out.stderr.strip() or out.stdout.strip()!r}"
+    )

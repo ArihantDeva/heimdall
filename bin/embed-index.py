@@ -83,6 +83,25 @@ def build() -> int:
         if not repo.is_dir():
             continue
         all_cards.extend(cards_for(repo))
+    # Prune stale rows BEFORE embedding: cards removed from disk (e.g. mailbox
+    # roll-off past the ingest limit, or a graft build regenerating graft/)
+    # otherwise linger as vec orphans that pollute k-NN results with dead paths.
+    # This sqlite-vec build keeps tombstones on rowid DELETE, so the only clean
+    # way out is dropping + recreating the whole vec table. Trigger on EITHER
+    # stale cards OR existing orphans; embeddings are rebuilt for all cards below.
+    keep = {cid for cid, *_ in all_cards}
+    stale = [(cid, rid) for (cid, rid) in c.execute("SELECT id, rowid FROM cards").fetchall() if cid not in keep]
+    orphan_vec = sum(
+        1
+        for (rid,) in c.execute("SELECT rowid FROM vec")
+        if not c.execute("SELECT id FROM cards WHERE rowid=?", (rid,)).fetchone()
+    )
+    if stale:
+        for cid, rid in stale:
+            c.execute("DELETE FROM cards WHERE rowid=?", (rid,))
+    if stale or orphan_vec:
+        c.execute("DROP TABLE vec")
+        c.execute(f"CREATE VIRTUAL TABLE vec USING vec0(embedding float[{DIM}])")
     B = 32
     total = 0
     for i in range(0, len(all_cards), B):
@@ -112,20 +131,25 @@ def query(q: str, n: int = 5, related: bool = False) -> list[dict]:
     for rowid, dist in rows:
         card = c.execute("SELECT id, repo, path, title FROM cards WHERE rowid=?", (rowid,)).fetchone()
         if card:
-            # card path is graft/<file>.md → map back to the real source file
+            # card path is graft/<file>.md → map back to the real source file.
+            # graft/<x>.md with no sibling <x>.<ext> means the card IS the source
+            # (email ingestion cards live at graft/mail/...) — keep graft/ prefix.
             src = pathlib.Path(card[2])
             if src.suffix == ".md":
                 base = src.with_suffix("")
-                # find the real file: probe common extensions
                 repo_dir = pathlib.Path(card[1])
                 found = None
-                for ext in ("", ".js", ".mjs", ".ts", ".py", ".sh", ".c", ".cpp", ".md"):
+                for ext in (".js", ".mjs", ".ts", ".py", ".sh", ".c", ".cpp", ""):
                     cand = repo_dir / (str(base) + ext)
                     if cand.is_file():
                         found = cand
                         break
                 if found:
                     src = pathlib.Path(os.path.relpath(found, repo_dir))
+                else:
+                    # No sibling source: the card IS the content (email ingestion
+                    # cards live at graft/mail/...) — point at the card itself.
+                    src = pathlib.Path("graft") / src
             out.append({"id": card[0], "repo": card[1], "path": str(src), "title": card[3], "score": 1.0 - dist})
     # Structural second pass (issue #1): siblings of top hits in the same
     # repo directory — same module, same feature area — regardless of score.

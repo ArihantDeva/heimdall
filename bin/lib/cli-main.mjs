@@ -13,6 +13,7 @@ const USAGE = `usage: heimdall <command>
   init [--harness pi|claude-code|codex|cursor|windsurf|all]   configure backend + harness hooks
   search "<query>" [-n N] [--scope S] [--no-explore]          ranked + verified knowledge search
   insert --title T --body B [--keywords k1,k2]                record reusable knowledge
+  ingest-email [--accounts a,b] [--limit N] [--root DIR]      index mailbox (read-only via cli-email)
   doctor                                                      daemon + index health check
 
   daemon [--once] [--scan] [--dry-run]                        run the single-writer reconciler
@@ -237,6 +238,33 @@ async function runVerify(args) {
   }
 }
 
+async function runIngestEmail(args) {
+  const get = (f, dflt) => {
+    const i = args.indexOf(f);
+    return i >= 0 && i + 1 < args.length ? args[i + 1] : dflt;
+  };
+  const accounts = get("--accounts", "").split(",").filter(Boolean);
+  const limit = Number(get("--limit", "50"));
+  const root = resolve(process.cwd(), expandPath(get("--root", join("Repos", "email-archive"))));
+  const { ingestEmail, EMAIL_CLI } = await import("./ingest-email.mjs");
+  const { spawnSync } = await import("node:child_process");
+  // Read-only boundary: only list/show ever reach cli-email.
+  const run = (sub, subArgs) => {
+    const r = spawnSync(EMAIL_CLI, [sub, ...subArgs], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    if (r.error) throw r.error;
+    return r.stdout ?? "";
+  };
+  try {
+    const summary = await ingestEmail({ accounts, limit, root, run });
+    console.log(`ingest-email: fetched ${summary.fetched}, wrote ${summary.written} card(s) under ${join(root, "graft")}`);
+    console.log("next: heimdall index   # embed cards into the global semantic layer (CPU-only)");
+    return 0;
+  } catch (e) {
+    console.error(`ingest-email failed: ${e.message?.split("\n")[0] ?? e}`);
+    return 1;
+  }
+}
+
 async function runDepth(args) {
   const bad = checkFlags("depth", args, []);
   if (bad) return bad;
@@ -299,6 +327,7 @@ export async function main(argv) {
     case "hint": return runHint(rest);
     case "search": return runSearch(rest);
     case "insert": return await runInsert(rest);
+    case "ingest-email": return await runIngestEmail(rest);
     case "doctor": return runDoctor();
     case "index": return runIndexCmd(rest);
     case "mcp": return (await import("./mcp-server.mjs")).serveMcp().then(() => 0);

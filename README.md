@@ -292,6 +292,24 @@ heimdall hint PATH ...       # mark paths dirty — no lock needed, any process
 heimdall hint --stdin        # harness hooks hand tool-call JSON on stdin
 ```
 
+### Email ingestion (CPU-only, read-only)
+
+Index your own mailbox into the knowledge base. Reads mail exclusively
+through the local [cli-email](https://github.com/) binary's read-only
+subcommands (`list`, `show` — never send/mark/move); renders one markdown
+card per message; retrieval rides the existing semantic layer (CPU bge-m3,
+no GPU, no cloud calls).
+
+```bash
+heimdall ingest-email --accounts a1,a2 --limit 50   # cards → ~/Repos/email-archive/graft/mail/<account>/<uid>.md
+~/.heimdall/venv/bin/python3 bin/embed-index.py build   # embed new cards (CPU-only)
+heimdall search "subject or sender words"           # emails now rank like any other knowledge
+```
+
+Re-runs are idempotent (byte-compare per card — unchanged mail is not
+rewritten). Point `--root` at any directory under `~/Repos` to change where
+the card tree lives.
+
 ## Testing
 
 ```bash
