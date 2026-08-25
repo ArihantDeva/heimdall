@@ -25,8 +25,11 @@ from sentence_transformers import SentenceTransformer
 
 DB = pathlib.Path.home() / ".heimdall" / "global.db"
 REPOS = pathlib.Path.home() / "Repos"
-MODEL = "BAAI/bge-m3"
-DIM = 1024
+# bge-m3 weights are ~2.3GB; on a 16GB machine a query-time load can OOM the
+# system when several run in parallel. bge-small is 30x lighter and plenty for
+# card-title recall. Flip back to bge-m3 if recall quality measurably drops.
+MODEL = os.environ.get("HEIMDALL_EMBED_MODEL", "BAAI/bge-small-en-v1.5")
+DIM = 384 if "bge-small" in MODEL else 1024
 
 MODEL_CACHE: SentenceTransformer | None = None
 
@@ -102,7 +105,7 @@ def build() -> int:
     if stale:
         for cid, rid in stale:
             c.execute("DELETE FROM cards WHERE rowid=?", (rid,))
-    if stale or orphan_vec:
+    if stale or orphan_vec or _db_dim(c) != DIM:
         c.execute("DROP TABLE vec")
         c.execute(f"CREATE VIRTUAL TABLE vec USING vec0(embedding float[{DIM}] distance_metric=cosine)")
     B = 32
@@ -130,6 +133,9 @@ def build() -> int:
 
 def query(q: str, n: int = 5, related: bool = False) -> list[dict]:
     c = conn()
+    if DIM != _db_dim(c):
+        print("[]")  # ponytail: index still at old dim; rebuild (embed-index.py build) before semantic search works again
+        return []
     vec = model().encode(q, normalize_embeddings=True).tolist()
     rows = c.execute(
         "SELECT rowid, distance FROM vec WHERE embedding MATCH ? AND k = ?",
@@ -175,6 +181,18 @@ def query(q: str, n: int = 5, related: bool = False) -> list[dict]:
                                     "title": sibling.name, "score": 0.0, "related": True})
     c.close()
     return out
+
+
+def _db_dim(c: sqlite3.Connection) -> int:
+    row = c.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='vec'"
+    ).fetchone()
+    if not row or not row[0]:
+        return -1
+    import re
+
+    m = re.search(r"float\[(\d+)\]", row[0])
+    return int(m.group(1)) if m else -1
 
 
 def status() -> dict:
