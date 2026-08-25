@@ -109,6 +109,20 @@ heimdall search "excel tracker portfolio optimization"
 
 On macOS the backend runs as the launchd job `com.graft.daemon` (template: `launchd/com.heimdall.backend.plist.example`).
 
+### Alternative backend: Mnemosyne
+
+Ranked search also supports [mnemosyne-oss](https://github.com/mnemosyne-oss/mnemosyne) (SQLite-backed agent memory) as the retrieval backend. Graft remains the zero-config default; select mnemosyne per-invocation or persistently:
+
+```bash
+pip install mnemosyne-memory            # or: uv pip install mnemosyne-memory
+HEIMDALL_BACKEND=mnemosyne heimdall search "preferences"        # one-off
+# persistent:
+python3 -c 'import json,pathlib; p=pathlib.Path.home()/".heimdall/config.json"; c=json.loads(p.read_text()) if p.exists() else {}; c["backend"]="mnemosyne"; p.write_text(json.dumps(c,indent=2))'
+heimdall search "preferences"
+```
+
+Resolution order: `$HEIMDALL_BACKEND` > `~/.heimdall/config.json` `backend` key > `graft`. Pin a non-PATH binary with `MNEMOSYNE=/path/to/mnemosyne`. Mnemosyne results flow through the same ranked/verified output as graft hits.
+
 ## Demo
 
 ![Heimdall demo](assets/demo.gif)

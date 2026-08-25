@@ -11,7 +11,7 @@
  * leaves tool results untouched.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createGuard, GREP_TOOLS, RESET_TOOLS } from "./lib/kb-guard-core.mjs";
+import { createGuard, GREP_TOOLS, RESET_TOOLS, BLOCK_REASON } from "./lib/kb-guard-core.mjs";
 
 export default function kbSearchGuardExtension(pi: ExtensionAPI): void {
   const guard = createGuard();
@@ -23,9 +23,12 @@ export default function kbSearchGuardExtension(pi: ExtensionAPI): void {
     // feeding there would double-count). String verdicts = warn/escalate,
     // stashed and delivered on tool_result. Object verdicts = block, acted
     // on here — tool_call is the only hook that can block.
-    const v = guard.note(event.toolName, event.input as Record<string, unknown>);
-    if (v && typeof v === "object" && v.block === true) {
-      return { block: true, reason: v.reason };
+    const v: string | { block?: boolean; reason?: string } | null = guard.note(
+      event.toolName,
+      event.input as Record<string, unknown>,
+    );
+    if (v !== null && typeof v === "object" && v.block === true) {
+      return { block: true, reason: v.reason ?? BLOCK_REASON };
     }
     if (typeof v === "string") pending = v;
   });
