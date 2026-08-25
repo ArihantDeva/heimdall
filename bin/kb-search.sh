@@ -35,11 +35,12 @@ print_results() {
 	[ -f "$VERIFY" ] || { echo "ERROR: verify script missing: $VERIFY"; exit 1; }
 	python3 "$VERIFY" "$1" "$2" "$SCOPE" "$N" "$Q"
 }
-
 echo "== retrieve (per-repo graft + global semantic): $Q"
 if [ ! -x "$GRAFT" ]; then
-	echo "ERROR: graft binary not found at $GRAFT (set GRAFT=/path/to/graft). Install: npm i -g @nanonets/graft"
-	exit 1
+	# Not a tool failure: a fresh/unconfigured machine has validly zero results.
+	# Exit 0 so callers (MCP kb_search) get an answer, not isError.
+	echo "WARN: graft binary not found at $GRAFT (set GRAFT=/path/to/graft). Install: npm i -g @nanonets/graft. Search unavailable until indexed — this is an empty result, not an error."
+	exit 0
 fi
 
 # Global semantic layer (bge-m3 embeddings over repo source).
@@ -62,8 +63,10 @@ else
 fi
 
 if [ ${#REPO_LIST[@]} -eq 0 ]; then
-	echo "ERROR: no repos with a graft graph found under ~/Repos. Run: cd <repo> && graft build"
-	exit 1
+	# Fresh install / no indexed repos yet: valid empty answer (exit 0), with
+	# setup guidance in-band. Exit 1 here broke MCP kb_search (isError) on CI.
+	echo "No repos with a graft graph found under ~/Repos yet. Index one: cd <repo> && heimdall index (or graft build). Search returns no hits until then."
+	exit 0
 fi
 
 # Merge JSON hits from every repo into one JSON array shaped like graft

@@ -1,18 +1,19 @@
-// mcp-server — contract tests for `heimdall mcp` stdio JSON-RPC server.
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 // Protocol: MCP 2024-11-05, newline-delimited JSON over stdin/stdout.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
 
 const repo = dirname(dirname(fileURLToPath(import.meta.url)));
 const HEIMDALL = process.platform === "win32" ? test.skip : "node";
 
-function rpc(msgs, { timeout = 30_000 } = {}) {
+function rpc(msgs, { timeout = 30_000, env = process.env } = {}) {
 	return new Promise((resolve, reject) => {
 		const child = spawn(process.execPath, [join(repo, "bin", "heimdall.js"), "mcp"], {
-			env: { ...process.env },
+			env,
 			stdio: ["pipe", "pipe", "pipe"],
 		});
 		let buf = "";
@@ -65,6 +66,35 @@ test("mcp: tools/call kb_search returns text content", async () => {
 	assert.ok(Array.isArray(call.result.content));
 	assert.ok(call.result.content[0].text.includes("["));
 }, { timeout: 150_000 });
+
+test("mcp: kb_search on fresh machine (no graft, no ~/.heimdall) still returns content, not an error", async () => {
+	const fresh = mkdtempSync(join(tmpdir(), "heimdall-fresh-"));
+	try {
+		const CALL = { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "kb_search", arguments: { query: "anything" } } };
+		const res = await rpc([INIT, CALL], { env: { ...process.env, HOME: fresh, GRAFT: "", HEIMDALL_REPOS: "" }, timeout: 30_000 });
+		const call = res.find((r) => r.id === 5);
+		assert.ok(call, "no response for call");
+		assert.equal(call.result.isError ?? false, false, `expected success, got: ${JSON.stringify(call.result.content)}`);
+		assert.ok(Array.isArray(call.result.content) && call.result.content[0]?.text?.length > 0, "empty content");
+	} finally {
+		rmSync(fresh, { recursive: true, force: true });
+	}
+});
+
+test("mcp: kb_search with graft binary but zero indexed repos → content, not an error", async () => {
+	const fresh = mkdtempSync(join(tmpdir(), "heimdall-norepos-"));
+	mkdirSync(join(fresh, ".local", "bin"), { recursive: true });
+	writeFileSync(join(fresh, ".local", "bin", "graft"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+	try {
+		const CALL = { jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "kb_search", arguments: { query: "anything" } } };
+		const res = await rpc([INIT, CALL], { env: { ...process.env, HOME: fresh, HEIMDALL_REPOS: "" }, timeout: 30_000 });
+		const call = res.find((r) => r.id === 6);
+		assert.ok(call, "no response for call");
+		assert.equal(call.result.isError ?? false, false, `expected success, got: ${JSON.stringify(call.result.content)}`);
+	} finally {
+		rmSync(fresh, { recursive: true, force: true });
+	}
+});
 
 test("mcp: unknown tool → isError with message", async () => {
 	const CALL = { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "nope", arguments: {} } };
