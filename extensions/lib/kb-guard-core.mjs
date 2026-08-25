@@ -52,11 +52,39 @@ function consequence(firings) {
 export function createGuard() {
   let chain = 0;
   let firings = 0; // total warnings fired this session — drives escalation
+  let pausedTurns = 0; // >0: agent-requested suspension — note() always null
   return {
+    /** Suspend all enforcement for N model turns (agent self-service escape hatch).
+     * Returns turns actually applied (clamped to 1..20, floored; junk → 0 = no-op).
+     * Re-suspend takes the MAX, so a small second call never shortens a pause. */
+    suspend(turns) {
+      const n = Math.min(20, Math.floor(Number(turns)));
+      if (!Number.isFinite(n) || n < 1) return 0;
+      pausedTurns = Math.max(pausedTurns, n);
+      return pausedTurns;
+    },
+    /** Advance the turn clock by one model turn; expires a lapsed pause with a
+     * full clean slate — consulting knowledge de-escalates, same as kb_search. */
+    tickTurn() {
+      if (pausedTurns <= 0) return;
+      pausedTurns -= 1;
+      if (pausedTurns === 0) {
+        chain = 0;
+        firings = 0;
+      }
+    },
+    get pausedTurns() {
+      return pausedTurns;
+    },
+    get firings() {
+      return firings;
+    },
     /** Feed one tool call. Returns warning string, block verdict {block,reason}, else null.
+     * While suspended (agent-called kb_guard_pause), always null — full bypass.
      * Resets are clean-slate: chain AND firings cleared — consulting knowledge
      * de-escalates fully; a stale bad stretch can't prime later blocks. */
     note(toolName, input) {
+      if (pausedTurns > 0) return null; // suspension active — enforcement off
       if (RESET_TOOLS.has(toolName)) {
         chain = 0;
         firings = 0;

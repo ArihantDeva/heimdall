@@ -14,7 +14,13 @@ export interface BlockVerdict {
 
 export interface Guard {
   note(toolName: string, input: Record<string, unknown>): string | BlockVerdict | null;
+  /** Suspend enforcement for N model turns (clamped 1–20; returns applied turns). */
+  suspend(turns: number): number;
+  /** Advance the turn clock; expires a lapsed pause with a clean slate. */
+  tickTurn(): void;
   readonly chain: number;
+  readonly firings: number;
+  readonly pausedTurns: number;
 }
 
 export function createGuard(): Guard;
