@@ -8,3 +8,6 @@ run = "npx tsc --noEmit"
 
 [tasks.bench-test]
 run = "~/.heimdall/venv/bin/python3 -m pytest bench/tests -q"
+
+[tools]
+bun = "1.4.0"

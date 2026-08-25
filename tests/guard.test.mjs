@@ -153,6 +153,13 @@ t("BLOCK8: search binary anywhere in pipe/chain segment is blockable", () => {
   assert.equal(g.note("bash", { command: "npm test 2>&1 | tail -5" }), null); // no search head
 });
 
+t("BLOCK7: graft/heimdall bash prefix still resets", () => {
+  const g = createGuard();
+  for (let i = 0; i < 7; i++) g.note("read", {});
+  assert.equal(g.note("bash", { command: "graft status" }), null);
+  assert.equal(g.note("bash", { command: "heimdall doctor" }), null);
+});
+
 t("BLOCK5: grep/ls/find-headed bash blocked too", () => {
   const g = blockReady();
   assert.equal(g.note("bash", { command: "/usr/bin/grep -rn x ." }).block, true);
@@ -167,9 +174,19 @@ t("BLOCK6: kb_search reset clears block state", () => {
   assert.equal(g.note("read", {}), null); // fresh chain — no warning, no block
 });
 
-t("BLOCK7: graft/heimdall bash prefix still resets", () => {
+t("BLOCK10: kb_sync reset clears block state identically", () => {
   const g = createGuard();
   for (let i = 0; i < 7; i++) g.note("read", {});
-  assert.equal(g.note("bash", { command: "graft status" }), null);
-  assert.equal(g.note("bash", { command: "heimdall doctor" }), null);
+  assert.equal(g.note("kb_sync", {}), null); // reset signal
+  assert.equal(g.note("find", {}), null); // fresh chain — no warning, no block
+  g.note("read", {});
+  const w = g.note("read", {}); // chain back at 3 → firing 1 again
+  assert.equal(typeof w, "string");
+  assert.ok(w.includes("⚠️")); // ladder restarted from warn, not block
+});
+
+t("BLOCK9: non-search bash at block stage neither fires nor advances chain", () => {
+  const g = blockReady();
+  assert.equal(g.note("bash", { command: "npm test" }), null);
+  assert.equal(g.chain, 6); // unchanged — chain counts search actions only
 });
