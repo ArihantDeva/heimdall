@@ -50,15 +50,32 @@ One call. Verified paths. Straight to work.
 
 ## How it compares
 
-| | **Heimdall** | mem0 | Claude Memory | Letta (MemGPT) | cAST / grep |
-|---|---|---|---|---|---|
-| Scope | **All your repos, one graph** | per-app/per-user | per-conversation/account | per-agent | per-repo |
-| Runs on CPU only | **yes** | cloud or self-host | cloud | self-host | yes |
-| Token cost of indexing | **zero** (tree-sitter + local embeddings) | LLM extraction | LLM summarization | LLM | zero but manual |
-| Trust verdicts on results | **STRONG / WEAK / REBUILT / STALE** | none | none | none | none |
-| Self-healing (moved files re-anchored) | **yes** | no | no | no | no |
-| Harness integrations | pi, Claude Code, Codex, Cursor, Windsurf | SDK/API | Claude products | SDK/API | editor plugins |
-| Local-first, your data stays home | **yes** | optional | no | yes | yes |
+Architecture-level comparison of shipped defaults — not benchmark claims. "LLM extraction" etc. describe each project's default pipeline as documented; self-hosted or configured-differently deployments vary.
+
+| | **Heimdall** | mem0 | Zep (Graphiti) | Letta (MemGPT) | LangMem / LangChain Memory | Vector-DB RAG | Claude Memory | cAST / grep |
+|---|---|---|---|---|---|---|---|---|
+| Scope | **All your repos, one graph** | per-app/per-user memories | per-user/session graph | per-agent | per-app/thread | per-corpus/index | per-conversation/account | per-repo |
+| Runs on CPU only | **yes** | LLM+embeddings in the loop | LLM extraction for entities/edges | LLM-in-the-loop memory management | LLM extraction + embeddings | embeddings (GPU-friendly) | cloud | yes |
+| Token cost of indexing | **zero** (tree-sitter + local embeddings) | LLM extraction per memory op | LLM calls per episode | LLM calls throughout | LLM extraction per write | embedding tokens only | LLM summarization | zero but manual |
+| Trust verdicts on results | **STRONG / WEAK / REBUILT / STALE** | none | none | none | none | similarity score only | none | none |
+| Self-healing (moved files re-anchored) | **yes** | no | no | no | no | no (stale chunks rank) | no | no |
+| Convergent state (idempotent re-index) | **yes** (level-triggered reconciler) | append-oriented | event-sourced episodes | conversation-scoped | append-oriented | re-ingest to update | opaque | n/a |
+| Reads private source locally | **yes, never leaves disk** | sent to extraction LLM | sent to extraction LLM | stays local w/ local models | sent to extraction LLM | local if self-hosted | cloud | yes |
+| Harness integrations | pi, Claude Code, Codex, Cursor, Windsurf | SDK/API | SDK/API + Graphiti | SDK/API | LangChain-native | DIY per stack | Claude products | editor plugins |
+
+### Where Heimdall beats mem0 and common RAG
+
+By design, not by benchmark — these follow from the architecture:
+
+1. **Zero-LLM indexing vs extraction pipelines.** mem0, Zep, Letta, and LangMem all put an LLM inside the write path: every remembered fact costs extraction tokens, adds latency, and means your code/notes are processed by (or prompt-built for) a hosted model unless you wire your own. Heimdall's ingest is tree-sitter plus local CPU embeddings — indexing 10k files costs $0 and leaks nothing.
+
+2. **Verified hits vs plausible hits.** RAG returns nearest neighbors with a similarity score; nothing checks that the chunk still exists, let alone that it answers the question. Heimdall re-verifies every result against the live filesystem at query time (path exists? content still matches?) and labels it STRONG/WEAK/REBUILT/STALE. Agents can act on STRONG without a confirmation round-trip.
+
+3. **Self-healing vs stale corpora.** In vector-RAG, a moved file leaves orphaned chunks ranking forever until someone re-runs ingestion. Heimdall's level-triggered reconciler converges: moved files re-anchor automatically (REBUILT), deletions retract exactly their own nodes, and re-indexing twice is identical to once.
+
+4. **Cross-repo scope without a corpus pipeline.** Classic RAG needs you to define, chunk, and refresh a corpus per app. Heimdall watches working trees continuously — new repos join the graph on their own, and personal context (prompt logs, notes, now even email via `heimdall ingest-email`) lands in the same graph your code lives in.
+
+5. **What they win back.** Fair's fair: mem0/Zep/Letta excel at conversational fact curation across chat products, multi-user serving, and hosted APIs; LLM extraction summarizes messy prose better than regexes. Heimdall is the opposite bet — a single developer's machine-wide workspace where the unit of memory is verified file-level knowledge, not chat utterances.
 
 Heimdall is the only one built for the actual workflow: many repos, many months, one agent session at a time, on hardware you already own.
 
@@ -239,7 +256,8 @@ Extraction is tree-sitter AST parsing via a Python bridge, **not an LLM call**: 
 | **Pi extension: tools** | `extensions/kb-tools.ts` | exposes `kb_search` / `kb_insert` / `kb_sync` as agent tools |
 | **Pi extension: autosync** | `extensions/kb-autosync.ts` | hook that appends path hints — never writes the graph |
 | **Pi extension: orient** | `extensions/kb-orient.ts` | injects prior-work hits into the first user prompt of a session (2.5s cap, silent degrade) |
-| **Pi extension: guard** | `extensions/kb-search-guard.ts` + `extensions/lib/kb-guard-core.mjs` | warns after 3 consecutive grep-style actions without kb_search |
+| **Pi extension: guard** | `extensions/kb-search-guard.ts` + `extensions/lib/kb-guard-core.mjs` | warns after 3 consecutive grep-style actions without kb_search; agent can self-suspend via the `kb_guard_pause` tool for 1–20 turns (enforcement resumes clean-slate on expiry) |
+| **Email ingestion** | `bin/lib/ingest-email.mjs` | mailbox → graft-style cards (read-only via cli-email `list`/`show`), idempotent; retrieval rides the semantic layer |
 | **Backends** | `vendor/graft/` (Apache 2.0), `vendor/graphify/` (MIT) | Graft = semantic-memory daemon; graphify = code-graph extractors |
 
 **Backends are pluggable.** Any store speaking the graft CLI contract works; Graft is the vendored reference. See `docs/heimdall_compare.dot/png` for the graphify vs Graft vs Heimdall positioning (graphify answers *codebase* questions, Graft persists *notes/facts* across projects, Heimdall ties them together with trust verdicts and self-healing).
@@ -319,7 +337,7 @@ npm run typecheck   # extensions typecheck
 
 Suites:
 - `tests/reconcile.test.mjs` — the point. Invariant tests: 40 racing writers converge to one node set; separate OS processes hinting one file collapse to one queue row; reconciling twice is byte-identical; ABA generation guard rejects stale commits; deletion retracts exactly its own nodes; cross-file edges converge regardless of reconcile order; depth clamping; parse-failure degrades to L1; audit catches behind-our-back edits incl. same-size-same-mtime rewrites (`--deep`); git checkout picked up (the old command-regex path could not see it); lock admits exactly one writer + stale-PID reclamation; node-id path namespacing; garbage hints dropped. The L3 end-to-end test self-skips without tree-sitter.
-- `tests/guard.test.mjs` — kb-search-guard contract (warn on 3rd consecutive grep action, reset on kb_search/kb_sync/graft, interleaved reads do NOT reset).
+- `tests/guard.test.mjs` — kb-search-guard contract (warn on 3rd consecutive grep action, reset on kb_search/kb_sync/graft, interleaved reads do NOT reset; agent-callable `suspend(N)`/`tickTurn()` pause: silences all enforcement for N model turns, clamped 1–20, expiry restores clean-slate).
 - `tests/init.test.mjs` + `tests/adapters.test.mjs` — CLI contract and per-harness config-writer smoke tests against temp HOMEs.
 - `tests/kb-verify.test.mjs` — content-aware verdict contract via `selftest:` node ids (no graft daemon needed): content mismatch downgrades STRONG, content match upgrades to STRONG, binary files degrade gracefully, `extract_paths` home-anchor regression (the tilde-form bug).
 

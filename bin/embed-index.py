@@ -18,15 +18,25 @@ import json
 import os
 import pathlib
 import sqlite3
+import subprocess
 import sys
+import fcntl
 
 import sqlite_vec
 from sentence_transformers import SentenceTransformer
 
 DB = pathlib.Path.home() / ".heimdall" / "global.db"
 REPOS = pathlib.Path.home() / "Repos"
-MODEL = "BAAI/bge-m3"
-DIM = 1024
+# Heavy model is fine again — safeguards below stop parallel stacking:
+# single-flight lock + free-RAM gate. Set HEIMDALL_EMBED_MODEL=BAAI/bge-small-en-v1.5
+# (and rebuild) to drop query RSS from ~2.1GB to ~0.5GB.
+MODEL = os.environ.get("HEIMDALL_EMBED_MODEL", "BAAI/bge-m3")
+DIM = 384 if "bge-small" in MODEL else 1024
+
+# Safeguards (2026-08-25 halt): every invocation loads model weights fresh.
+# N parallel callers used to stack N × ~2GB and halt a 16GB machine.
+MIN_FREE_GB = float(os.environ.get("HEIMDALL_MIN_FREE_GB", "2"))
+BUILD_HEADROOM_GB = 4.0  # batch encode activations on top of weights
 
 MODEL_CACHE: SentenceTransformer | None = None
 
@@ -45,9 +55,61 @@ def conn() -> sqlite3.Connection:
     return c
 
 
+class Busy(Exception):
+    """Another embed-index process already holds the single-flight lock."""
+
+
+LOCK_PATH = pathlib.Path.home() / ".heimdall" / "embed-index.lock"
+
+
+def _acquire_lock():
+    """Nonblocking exclusive flock; raises Busy if someone else is mid-flight.
+    ponytail: handle intentionally never closed/released — this is a one-shot
+    CLI, the OS drops the lock at process exit."""
+    fh = open(LOCK_PATH, "w")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        raise Busy() from None
+    return fh
+
+
+def _free_ram_gb() -> float:
+    out = subprocess.run(["vm_stat"], capture_output=True, text=True).stdout
+    pages = {}
+    for line in out.splitlines():
+        key, _, val = line.partition(":")
+        val = val.strip().rstrip(".")
+        if val.isdigit():
+            pages[key.strip()] = int(val)
+    page = 16384 if "16384" in out.splitlines()[0] else 4096
+    free = (
+        pages.get("Pages free", 0)
+        + pages.get("Pages purgeable", 0)
+        + pages.get("Pages speculative", 0)
+    ) * page / 1e9
+    return free
+
+
+def _ram_ok(min_gb: float, what: str) -> bool:
+    free = _free_ram_gb()
+    if free >= min_gb:
+        return True
+    print(
+        f"embed-index: skipping {what} — {free:.1f}GB free RAM < {min_gb}GB "
+        "required for the heavy embed model. Retry when memory frees up.",
+        file=sys.stderr,
+    )
+    return False
+
+
 def init(c: sqlite3.Connection) -> None:
     c.execute("CREATE TABLE IF NOT EXISTS cards (id TEXT PRIMARY KEY, repo TEXT, path TEXT, title TEXT, body TEXT)")
-    c.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS vec USING vec0(embedding float[{DIM}])")
+    # distance_metric=cosine: vec0's default is L2, whose distance (sqrt(2-2cos))
+    # exceeds 1 and made `1 - distance` scores go negative while ranking stayed
+    # correct. v0.1.9 syntax: column-level `distance_metric=cosine` (no comma).
+    c.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS vec USING vec0(embedding float[{DIM}] distance_metric=cosine)")
 
 
 def cards_for(repo: pathlib.Path) -> list[tuple[str, str, str, str]]:
@@ -73,6 +135,13 @@ def cards_for(repo: pathlib.Path) -> list[tuple[str, str, str, str]]:
 
 
 def build() -> int:
+    try:
+        _acquire_lock()
+    except Busy:
+        print("embed-index: another instance is running; skipping build.", file=sys.stderr)
+        raise SystemExit(1)
+    if not _ram_ok(MIN_FREE_GB + BUILD_HEADROOM_GB, "build"):
+        raise SystemExit(1)
     c = conn()
     init(c)
     model_inst = model()
@@ -99,9 +168,9 @@ def build() -> int:
     if stale:
         for cid, rid in stale:
             c.execute("DELETE FROM cards WHERE rowid=?", (rid,))
-    if stale or orphan_vec:
+    if stale or orphan_vec or _db_dim(c) != DIM:
         c.execute("DROP TABLE vec")
-        c.execute(f"CREATE VIRTUAL TABLE vec USING vec0(embedding float[{DIM}])")
+        c.execute(f"CREATE VIRTUAL TABLE vec USING vec0(embedding float[{DIM}] distance_metric=cosine)")
     B = 32
     total = 0
     for i in range(0, len(all_cards), B):
@@ -111,6 +180,11 @@ def build() -> int:
             normalize_embeddings=True,
         )
         for (cid, repo_path, rel, title, body), vec in zip(batch, vecs):
+            # INSERT OR REPLACE moves the row (delete+insert) → NEW rowid when
+            # the id already existed; delete any vec rows for this card id's
+            # old rowids first so no orphan shadows k-NN with a dead vector.
+            c.execute("DELETE FROM vec WHERE rowid IN "
+                      "(SELECT rowid FROM cards WHERE id=?)", (cid,))
             c.execute("INSERT OR REPLACE INTO cards VALUES (?,?,?,?,?)", (cid, repo_path, rel, title, body))
             row = c.execute("SELECT rowid FROM cards WHERE id=?", (cid,)).fetchone()
             c.execute("DELETE FROM vec WHERE rowid=?", (row[0],))
@@ -121,7 +195,27 @@ def build() -> int:
 
 
 def query(q: str, n: int = 5, related: bool = False) -> list[dict]:
+    global MODEL, DIM
     c = conn()
+    db_d = _db_dim(c)
+    if DIM != db_d:
+        # Index was built with another model (e.g. heavy rebuild gated on RAM
+        # while a lighter index exists). Adapt to the index so search keeps
+        # working; `build` is the only path that changes dims.
+        DIM = db_d
+        MODEL = "BAAI/bge-small-en-v1.5" if db_d == 384 else "BAAI/bge-m3"
+        if db_d < 0:
+            print("[]")  # ponytail: no vec table yet; run embed-index.py build
+            return []
+    try:
+        _acquire_lock()
+    except Busy:
+        # Degrade gracefully: kb-search.sh still has lexical hits. Only lines
+        # starting with '[' are consumed, so stderr notes are safe here.
+        print("embed-index: another instance holds the model; semantic layer skipped this call.", file=sys.stderr)
+        return []
+    if not _ram_ok(MIN_FREE_GB, "query"):
+        return []
     vec = model().encode(q, normalize_embeddings=True).tolist()
     rows = c.execute(
         "SELECT rowid, distance FROM vec WHERE embedding MATCH ? AND k = ?",
@@ -167,6 +261,18 @@ def query(q: str, n: int = 5, related: bool = False) -> list[dict]:
                                     "title": sibling.name, "score": 0.0, "related": True})
     c.close()
     return out
+
+
+def _db_dim(c: sqlite3.Connection) -> int:
+    row = c.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='vec'"
+    ).fetchone()
+    if not row or not row[0]:
+        return -1
+    import re
+
+    m = re.search(r"float\[(\d+)\]", row[0])
+    return int(m.group(1)) if m else -1
 
 
 def status() -> dict:

@@ -190,3 +190,71 @@ t("BLOCK9: non-search bash at block stage neither fires nor advances chain", () 
   assert.equal(g.note("bash", { command: "npm test" }), null);
   assert.equal(g.chain, 6); // unchanged — chain counts search actions only
 });
+
+// ── Pause/suspend (2026-08-25): agent-callable temporary disable for N turns ──
+
+t("PAUSE1: suspend silences warnings entirely", () => {
+  const g = createGuard();
+  assert.equal(g.suspend(2), 2);
+  g.note("read", {});
+  g.note("read", {});
+  assert.equal(g.note("read", {}), null);
+  assert.equal(g.note("grep", {}), null);
+});
+
+t("PAUSE2: suspend prevents blocks even from a pre-fired ladder", () => {
+  const g = blockReady();
+  assert.equal(g.suspend(3), 3);
+  assert.equal(g.note("find", {}), null);
+  assert.equal(g.note("bash", { command: "ls -la" }), null);
+  assert.equal(g.note("bash", { command: "rg x ." }), null);
+});
+
+t("PAUSE3: turns above 20 clamp to 20", () => {
+  const g = createGuard();
+  assert.equal(g.suspend(500), 20);
+  assert.equal(g.pausedTurns, 20);
+});
+
+t("PAUSE4: non-positive/non-numeric turns rejected, fractions floored", () => {
+  const g = createGuard();
+  assert.equal(g.suspend(0), 0);
+  assert.equal(g.suspend(-3), 0);
+  assert.equal(g.suspend("abc"), 0);
+  assert.equal(g.suspend(NaN), 0);
+  assert.equal(g.suspend(2.9), 2);
+  assert.equal(g.pausedTurns, 2);
+});
+
+t("PAUSE5: expiry via tickTurn restores enforcement from clean slate", () => {
+  const g = createGuard();
+  g.suspend(1);
+  g.note("read", {});
+  g.note("read", {});
+  g.tickTurn(); // pause over
+  assert.equal(g.pausedTurns, 0);
+  assert.equal(g.chain, 0);
+  assert.equal(g.firings, 0);
+  g.note("read", {});
+  g.note("read", {});
+  const w = g.note("read", {}); // 3rd since expiry → firing 1 = warn, ladder restarted
+  assert.equal(typeof w, "string"); // warn again — ladder restarted, not block
+  assert.ok(w.includes("⚠️"));
+});
+
+t("PAUSE6: tickTurn is inert when not paused", () => {
+  const g = createGuard();
+  g.tickTurn();
+  g.note("read", {});
+  g.note("read", {});
+  assert.equal(typeof g.note("read", {}), "string");
+});
+
+t("PAUSE7: re-suspend extends rather than shrinks", () => {
+  const g = createGuard();
+  g.suspend(10);
+  g.suspend(2);
+  assert.equal(g.pausedTurns, 10);
+  g.suspend(15);
+  assert.equal(g.pausedTurns, 15);
+});
