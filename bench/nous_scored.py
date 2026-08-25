@@ -44,9 +44,18 @@ Rules:
   when something happened, or about what is currently true.
 - When two sessions conflict, the LATER timestamp wins — the user changed
   their mind or updated the fact.
+- The sessions are ranked by retrieval relevance, not by truth: irrelevant
+  sessions may be present and relevant details may sit deep inside a long
+  session. Scan ALL of them before concluding the answer is absent.
 - If the sessions genuinely do not contain the answer, reply exactly NO_ANSWER.
   Do not guess. An invented answer is worse than an admitted gap.
 - Otherwise answer concisely and directly."""
+
+# ox-alpha serves a ~1M-token window; the old 12-session x 6000-char cap
+# discarded the answer in 648/681 gold-in-context cases (v1 analysis).
+# Full bodies of all retrieved sessions max out near 220k chars (~55k tokens).
+MAX_SESSIONS = 0   # 0 = no cap, keep every retrieved session
+MAX_BODY_CHARS = 0 # 0 = no truncation
 
 RUBRIC = {
     "temporal-reasoning":
@@ -76,7 +85,13 @@ def _keys() -> list[tuple[str, str]]:
 
 
 def _call(messages: list[dict], max_tokens: int = 512) -> str:
-    """One completion across 5 gateways (3×nous, cc, or) with rotation."""
+    """One completion across 5 gateways (3×nous, cc, or) with rotation.
+
+    Retries are classified: 429/capacity/empty-content rotate to the next
+    gateway with short backoff (empty content is a known upstream flake,
+    not a prompt problem); other errors back off longer. Only after the
+    full rotation budget fails does it raise — v1 raised on the first
+    empty-content run, stranding 40 questions as correct=None."""
     gw = _keys()
     body = json.dumps({"model": MODELS[0], "messages": messages,
                        "max_tokens": max_tokens}).encode()
@@ -94,7 +109,7 @@ def _call(messages: list[dict], max_tokens: int = 512) -> str:
             with urllib.request.urlopen(req, timeout=240) as resp:
                 d = json.loads(resp.read())
                 content = d["choices"][0]["message"].get("content")
-                if not content:
+                if not content or not content.strip():
                     raise RuntimeError("empty content")
                 return content.strip()
         except Exception as e:
@@ -103,11 +118,13 @@ def _call(messages: list[dict], max_tokens: int = 512) -> str:
             if "429" in err or "capacity" in err.lower() or "unavailable" in err.lower():
                 time.sleep(2 + attempt % 4)
                 continue
-            if "403" in err:
+            if "empty content" in err or "403" in err:
                 time.sleep(1)
                 continue
-            time.sleep(1)
-    raise RuntimeError(f"all calls failed: {last_err}")
+            if isinstance(e, urllib.error.HTTPError):
+                e.close()
+            time.sleep(min(2 * attempt, 15))
+    raise RuntimeError(f"all calls failed after {10 * len(gw)} attempts: {last_err}")
 
 
 def _reader(item: dict) -> str:
@@ -115,9 +132,15 @@ def _reader(item: dict) -> str:
              f"The question is being asked on: {item['question_date']}", ""]
     if item.get("context"):
         parts.append("Relevant sessions from the user's history:")
-        for c in item["context"][:8]:
+        sessions = item["context"]
+        if MAX_SESSIONS:
+            sessions = sessions[:MAX_SESSIONS]
+        for c in sessions:
             parts.append(f"\n--- {c['title']} ---")
-            parts.append((c.get("body") or "")[:1500])
+            body = c.get("body") or ""
+            if MAX_BODY_CHARS:
+                body = body[:MAX_BODY_CHARS]
+            parts.append(body)
     else:
         parts.append("No sessions were retrieved.")
     parts += ["", f"Question: {item['question']}", "", "Answer:"]
@@ -134,7 +157,7 @@ def _grade(item: dict, response: str) -> bool:
               f"Correct answer: {item['answer']}\n"
               f"Model response: {response}\n\n"
               "Reply with exactly one word: CORRECT or INCORRECT.")
-    out = _call([{"role": "user", "content": prompt}], max_tokens=64)
+    out = _call([{"role": "user", "content": prompt}], max_tokens=512)
     return out.strip().upper().startswith("CORRECT")
 
 
@@ -152,10 +175,28 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=10)
     ap.add_argument("--limit", type=int, default=0,
                     help="0 = all; else first N (smoke test)")
+    ap.add_argument("--resume", action="store_true",
+                    help="reuse prior non-ERROR responses from nous_graded.json; "
+                         "only re-run missing/errored items")
     args = ap.parse_args()
 
     scored_dir = RUNS / args.run / "scored"
     items = json.loads((scored_dir / "inputs.json").read_text())
+
+    # Resume: keep prior good answers (reader output is deterministic input
+    # for the judge only when we reuse BOTH reader+judge result — so a kept
+    # row must have a non-ERROR response and a boolean verdict).
+    prior: dict[str, dict] = {}
+    if args.resume:
+        gp = scored_dir / "nous_graded.json"
+        if gp.exists():
+            for r in json.loads(gp.read_text()):
+                if r.get("correct") is not None \
+                        and not str(r.get("response", "")).startswith("ERROR"):
+                    prior[r["question_id"]] = r
+        items = [i for i in items if i["question_id"] not in prior]
+        print(f"resume: {len(prior)} kept, {len(items)} to (re)run")
+
     if args.limit:
         items = items[: args.limit]
 
@@ -179,14 +220,18 @@ def main() -> None:
                 print(f"  {done}/{len(items)} in {el:.0f}s "
                       f"({el/max(done,1):.1f}s/q)", flush=True)
 
+    results.extend(prior.values())
+    results.sort(key=lambda r: r["question_id"])
+
     (scored_dir / "nous_graded.json").write_text(
         json.dumps(results, indent=1), encoding="utf-8")
     graded = [r for r in results if r["correct"] is not None]
+    errors = len(results) - len(graded)
     overall = sum(r["correct"] for r in graded) / len(graded)
     by_type = {}
     for r in graded:
         by_type.setdefault(r["question_type"], []).append(r["correct"])
-    summary = {"run": args.run, "n": len(graded),
+    summary = {"run": args.run, "n": len(graded), "errors": errors,
                "overall": overall,
                "by_type": {k: sum(v) / len(v) for k, v in by_type.items()}}
     (scored_dir / "s_score.json").write_text(
