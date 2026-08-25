@@ -47,7 +47,10 @@ def conn() -> sqlite3.Connection:
 
 def init(c: sqlite3.Connection) -> None:
     c.execute("CREATE TABLE IF NOT EXISTS cards (id TEXT PRIMARY KEY, repo TEXT, path TEXT, title TEXT, body TEXT)")
-    c.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS vec USING vec0(embedding float[{DIM}])")
+    # distance_metric=cosine: vec0's default is L2, whose distance (sqrt(2-2cos))
+    # exceeds 1 and made `1 - distance` scores go negative while ranking stayed
+    # correct. v0.1.9 syntax: column-level `distance_metric=cosine` (no comma).
+    c.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS vec USING vec0(embedding float[{DIM}] distance_metric=cosine)")
 
 
 def cards_for(repo: pathlib.Path) -> list[tuple[str, str, str, str]]:
@@ -101,7 +104,7 @@ def build() -> int:
             c.execute("DELETE FROM cards WHERE rowid=?", (rid,))
     if stale or orphan_vec:
         c.execute("DROP TABLE vec")
-        c.execute(f"CREATE VIRTUAL TABLE vec USING vec0(embedding float[{DIM}])")
+        c.execute(f"CREATE VIRTUAL TABLE vec USING vec0(embedding float[{DIM}] distance_metric=cosine)")
     B = 32
     total = 0
     for i in range(0, len(all_cards), B):
@@ -111,6 +114,11 @@ def build() -> int:
             normalize_embeddings=True,
         )
         for (cid, repo_path, rel, title, body), vec in zip(batch, vecs):
+            # INSERT OR REPLACE moves the row (delete+insert) → NEW rowid when
+            # the id already existed; delete any vec rows for this card id's
+            # old rowids first so no orphan shadows k-NN with a dead vector.
+            c.execute("DELETE FROM vec WHERE rowid IN "
+                      "(SELECT rowid FROM cards WHERE id=?)", (cid,))
             c.execute("INSERT OR REPLACE INTO cards VALUES (?,?,?,?,?)", (cid, repo_path, rel, title, body))
             row = c.execute("SELECT rowid FROM cards WHERE id=?", (cid,)).fetchone()
             c.execute("DELETE FROM vec WHERE rowid=?", (row[0],))
