@@ -18,3 +18,9 @@ __pycache__/
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/
+
+# graft runtime DB + build artifacts
+vendor/graft/graft.db*
+vendor/graft/build/
+vendor/graft/models/
+vendor/graft/third_party/

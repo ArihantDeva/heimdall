@@ -100,3 +100,76 @@ t("state is per-guard instance (per-session isolation)", () => {
   assert.equal(b.note("read", {}), null);
   assert.ok(a.note("read", {}));
 });
+
+// ── Block ladder (2026-08-25): firing 1 warn → firing 2 escalate → firing 3+ block ──
+
+function blockReady() {
+  const g = createGuard();
+  for (let i = 0; i < 6; i++) g.note("read", {}); // firings 1+2 (warn, escalate) + chain past 3
+  return g;
+}
+
+t("BLOCK1: firing 1 is a warning string", () => {
+  const g = createGuard();
+  g.note("read", {});
+  g.note("read", {});
+  const w = g.note("read", {});
+  assert.equal(typeof w, "string");
+  assert.ok(w.includes("⚠️"));
+});
+
+t("BLOCK2: firing 2 is an escalation string", () => {
+  const g = createGuard();
+  for (let i = 0; i < 3; i++) g.note("read", {}); // firing 1
+  const w = g.note("read", {}); // firing 2
+  assert.equal(typeof w, "string");
+  assert.ok(w.includes("🛑"));
+});
+
+t("BLOCK3: firing 3 blocks a search TOOL call", () => {
+  const g = blockReady();
+  const v = g.note("find", {});
+  assert.ok(v && typeof v === "object");
+  assert.equal(v.block, true);
+  assert.ok(v.reason.includes("kb_search"));
+});
+
+t("BLOCK4: firing 3+ blocks rg-headed bash, not other bash", () => {
+  const g = blockReady();
+  // non-search bash passes even at block stage
+  assert.equal(g.note("bash", { command: "npm test" }), null);
+  assert.equal(g.note("bash", { command: "git status --short" }), null);
+  // rg-headed bash IS blocked
+  const v = g.note("bash", { command: "rg pattern src/" });
+  assert.ok(v && typeof v === "object");
+  assert.equal(v.block, true);
+});
+
+t("BLOCK8: search binary anywhere in pipe/chain segment is blockable", () => {
+  const g = blockReady();
+  assert.equal(g.note("bash", { command: "cat f | grep x" }).block, true);
+  assert.equal(g.note("bash", { command: "echo hi && ls -la" }).block, true);
+  assert.equal(g.note("bash", { command: "rg foo src | head -3" }).block, true);
+  assert.equal(g.note("bash", { command: "npm test 2>&1 | tail -5" }), null); // no search head
+});
+
+t("BLOCK5: grep/ls/find-headed bash blocked too", () => {
+  const g = blockReady();
+  assert.equal(g.note("bash", { command: "/usr/bin/grep -rn x ." }).block, true);
+  assert.equal(g.note("bash", { command: "ls -la" }).block, true);
+  assert.equal(g.note("bash", { command: "find . -name y" }).block, true);
+});
+
+t("BLOCK6: kb_search reset clears block state", () => {
+  const g = createGuard();
+  for (let i = 0; i < 7; i++) g.note("read", {});
+  assert.equal(g.note("kb_search", {}), null);
+  assert.equal(g.note("read", {}), null); // fresh chain — no warning, no block
+});
+
+t("BLOCK7: graft/heimdall bash prefix still resets", () => {
+  const g = createGuard();
+  for (let i = 0; i < 7; i++) g.note("read", {});
+  assert.equal(g.note("bash", { command: "graft status" }), null);
+  assert.equal(g.note("bash", { command: "heimdall doctor" }), null);
+});

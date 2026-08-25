@@ -1,12 +1,14 @@
 /**
- * kb-search-guard — warn the agent when it runs 3+ consecutive grep-style
- * search actions without consulting machine knowledge (kb_search / kb_sync /
- * graft). Non-blocking: prepends a ⚠️ WARNING to the tool result, which the
- * model sees immediately. Reset on any knowledge-access action. Per-process
- * state (one closure per pi process = one agent session).
+ * kb-search-guard — police grep-style search chains without machine knowledge
+ * (kb_search / kb_sync / graft). Ladder per session:
+ *   firing 1 → ⚠️ WARNING prepended to result (tool_result patch)
+ *   firing 2 → 🛑 ESCALATION prepended
+ *   firing 3+ → tool_call BLOCKED for search actions (grep/find/ls/read tools;
+ *   bash only when search-headed — npm test etc. always pass).
+ * Reset on any knowledge-access action. Per-process state.
  *
  * Degrades silently: guard-core is plain JS, zero deps; any failure here
- * leaves tool results untouched (warn-only, never block).
+ * leaves tool results untouched.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createGuard, GREP_TOOLS, RESET_TOOLS } from "./lib/kb-guard-core.mjs";
@@ -18,10 +20,14 @@ export default function kbSearchGuardExtension(pi: ExtensionAPI): void {
   pi.on("tool_call", (event) => {
     if (typeof event.toolName !== "string") return;
     // Feed exactly once per tool invocation (tool_result also fires, but
-    // feeding there would double-count). Warning text is stashed here and
-    // delivered on tool_result, which is the hook that can patch content.
-    const w = guard.note(event.toolName, event.input as Record<string, unknown>);
-    if (w) pending = w;
+    // feeding there would double-count). String verdicts = warn/escalate,
+    // stashed and delivered on tool_result. Object verdicts = block, acted
+    // on here — tool_call is the only hook that can block.
+    const v = guard.note(event.toolName, event.input as Record<string, unknown>);
+    if (v && typeof v === "object" && v.block === true) {
+      return { block: true, reason: v.reason };
+    }
+    if (typeof v === "string") pending = v;
   });
 
   pi.on("tool_result", (event) => {

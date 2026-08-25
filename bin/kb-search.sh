@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # kb-search.sh — ranked knowledge search across per-repo graft graphs.
 #
-# The current @nanonets/graft product is a per-repo code-graph builder: each
-# repo gets `graft build`, and retrieval is `graft ask --json`. This script
-# iterates the configured repo roots, runs `graft ask` on each, merges the
-# JSON hits, and feeds the merged shape to kb_search_verify.py for trust
-# verdicts.
+# Backends (resolution: $HEIMDALL_BACKEND > ~/.heimdall/config.json "backend"
+# > default "graft"):
+#   graft      — per-repo @nanonets/graft code graphs (`graft ask --json`),
+#                merged with the global bge-m3 semantic layer. Zero-config
+#                default.
+#   mnemosyne  — mnemosyne-oss CLI memory store (`mnemosyne recall <q> <k>
+#                --json`). Set MNEMOSYNE=/path/to/bin to pin the binary;
+#                results map into the same ranked/verified output.
 #
 # Usage:
 #   kb-search "<query>" [-n N] [--scope S] [--no-explore]
@@ -30,6 +33,62 @@ VERIFY="$SCRIPT_DIR/kb_search_verify.py"
 [ -f "$VERIFY" ] || VERIFY="$HOME/knowledge-base/kb_search_verify.py"
 
 export GRAFT="${GRAFT:-$(command -v graft 2>/dev/null || echo "$HOME/.local/bin/graft")}"
+MNEMOSYNE="${MNEMOSYNE:-$(command -v mnemosyne 2>/dev/null || echo "$HOME/.local/bin/mnemosyne")}"
+BACKEND="${HEIMDALL_BACKEND:-}"
+if [ -z "$BACKEND" ] && [ -f "$HOME/.heimdall/config.json" ]; then
+	BACKEND=$(python3 -c 'import json,os,sys;
+try: print(json.load(open(os.path.expanduser("~/.heimdall/config.json"))).get("backend","graft"))
+except Exception: print("graft")' 2>/dev/null || echo graft)
+fi
+BACKEND="${BACKEND:-graft}"
+
+run_mnemosyne() {
+	if [ ! -x "$MNEMOSYNE" ]; then
+		echo "Mnemosyne backend selected but binary not found at $MNEMOSYNE. Install: pip install mnemosyne-memory (or uv pip install mnemosyne-memory), or set MNEMOSYNE=/path/to/mnemosyne. Falling back would need graft — set HEIMDALL_BACKEND=graft for the default code-graph search."
+		exit 0
+	fi
+	python3 - "$Q" "$N" "$MNEMOSYNE" <<'PYEOF'
+import json, os, subprocess, sys
+
+q = sys.argv[1]
+n = int(sys.argv[2])
+mnemo = sys.argv[3]
+results = []
+try:
+    out = subprocess.run([mnemo, "recall", q, str(n), "--json"],
+                         capture_output=True, text=True, timeout=90).stdout
+    data = json.loads(out)
+    for r in data.get("results", []):
+        content = str(r.get("content", ""))
+        # Home-anchored paths in the content drive the same verdict logic as
+        # graft hits; memories without paths still rank via title coverage.
+        path = next((tok for tok in content.replace('"', ' ').split()
+                     if tok.startswith("~/") or tok.startswith("/Users/") or tok.startswith("/home/")), "")
+        results.append({
+            "id_hex": f"mnemo-{r.get('id', '?')}",
+            "title": content[:120],
+            "score": float(r.get("score", 0)),
+            "body": f"memory [{path or 'no-path'}] {content}",
+            "path": os.path.expanduser(path) if path else "/nonexistent-mnemosyne-memory",
+        })
+except Exception as e:
+    print(f"WARN: mnemosyne recall failed: {e}", file=sys.stderr)
+q_toks = set(q.lower().split())
+for i, r in enumerate(sorted(results, key=lambda x: -x["score"])[:n], 1):
+    p = r["path"]
+    exists = os.path.exists(p)
+    blob = (r["title"] + " " + r["body"] + " " + p).lower()
+    cov = round(sum(1 for t in q_toks if t in blob) / len(q_toks), 2) if q_toks else 0.0
+    verdict = "STRONG" if exists and cov >= 0.5 else ("WEAK" if exists else "NOPATH")
+    print(f"{i:>2}. [{verdict:<6}] cov{int(cov*100):02d}%  {p}")
+    print(f"      {r['title']}")
+PYEOF
+	exit 0
+}
+
+if [ "$BACKEND" = "mnemosyne" ]; then
+	run_mnemosyne
+fi
 
 print_results() {
 	[ -f "$VERIFY" ] || { echo "ERROR: verify script missing: $VERIFY"; exit 1; }

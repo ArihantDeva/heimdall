@@ -21,7 +21,7 @@ daemon:
   # is fine because of the mode bits, but prefer $XDG_RUNTIME_DIR ($HOME/.run)
   # on multi-user systems. On Windows this string is currently unused — the
   # daemon talks over a named pipe derived from the user profile.
-  socket_path: "/tmp/graft.sock"
+  socket_path: "/tmp/graft-default.sock"
 
   # [security] SQLite database file. Contains EVERYTHING you have stored: node
   # titles, bodies, embeddings, edges, FTS5 indexes, usage history. Treat as
@@ -37,7 +37,7 @@ daemon:
   # vanilla sqlite the PRAGMA is silently ignored and the daemon logs a loud
   # warning so you don't get false confidence. Unset the env var to keep the
   # legacy unencrypted behaviour.
-  db_path: "./graft.db"
+  db_path: "/Users/arihantdeva/.graft/profiles/default/graft.db"
 
 
 # -----------------------------------------------------------------------------
@@ -47,13 +47,13 @@ embedding:
   # Path to the GGUF embedding model. bge-m3 (1024-dim, multilingual, 8192-tok)
   # is the reference choice. Swapping models REQUIRES wiping the db: existing
   # embeddings cannot be compared against vectors from a different model.
-  model_path: "./models/bge-m3.gguf"
+  model_path: "/Users/arihantdeva/Repos/heimdall/vendor/graft/models/bge-m3.gguf"
 
   # [perf] CPU threads for the llama backend. [range] 1..physical-cores.
   # Higher = lower embed latency until you saturate memory bandwidth (typical
   # sweet spot: physical cores, NOT logical/SMT). Ignored when hardware_accel
   # is true and the GPU offload covers all layers.
-  threads: 4
+  threads: 8
 
   # [perf][quality] Max tokens passed to the embedder per call. [range]
   # 512..8192 for bge-m3. Lower = less RAM/VRAM and faster; longer inputs get
@@ -64,12 +64,12 @@ embedding:
   # [perf] Independent llama contexts sharing one model. >1 lets concurrent
   # requests (thread-per-connection) embed in parallel; each instance costs
   # ~ctx memory + one decode slot. 2-4 typical on multi-core hosts.
-  instances: 1
+  instances: 4
 
   # [perf] Offload all layers to the GPU. Requires llama.cpp built with
   # -DGGML_CUDA=ON (NVIDIA) or -DGGML_HIP=ON (ROCm 6/7). 5-30x speedup on
   # embed-heavy workloads; falls back to CPU if no compatible GPU is found.
-  hardware_accel: false
+  hardware_accel: true
 
 
 # -----------------------------------------------------------------------------

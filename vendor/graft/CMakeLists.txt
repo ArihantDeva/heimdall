@@ -23,8 +23,10 @@ pkg_check_modules(YAML REQUIRED yaml-0.1)
 
 # llama.cpp (deve essere stato compilato in third_party/llama.cpp/build)
 set(LLAMA_DIR ${CMAKE_SOURCE_DIR}/third_party/llama.cpp)
+# pkg-config -L paths are not searched by default on macOS (no /opt/homebrew/lib in default search)
+link_directories(${YAML_LIBRARY_DIRS} ${SQLITE_LIBRARY_DIRS})
 include_directories(${LLAMA_DIR}/include ${LLAMA_DIR}/ggml/include)
-link_directories(${LLAMA_DIR}/build/bin ${LLAMA_DIR}/build/src ${LLAMA_DIR}/build/ggml/src)
+link_directories(${LLAMA_DIR}/build/bin ${LLAMA_DIR}/build/src ${LLAMA_DIR}/build/ggml/src ${LLAMA_DIR}/build/ggml/src/ggml-blas ${LLAMA_DIR}/build/ggml/src/ggml-metal)
 
 # mpack
 set(MPACK_DIR ${CMAKE_SOURCE_DIR}/third_party/mpack/src/mpack)
@@ -116,6 +118,8 @@ add_library(graft_core STATIC ${GRAFT_SRC})
 set(MG_PLATFORM_LIBS "")
 if(WIN32)
   list(APPEND MG_PLATFORM_LIBS ws2_32 bcrypt)
+elseif(APPLE)
+  list(APPEND MG_PLATFORM_LIBS "-framework Accelerate" "-framework Metal" "-framework MetalKit" "-framework Foundation")
 endif()
 target_link_libraries(graft_core
   sqlite_vec
@@ -126,6 +130,9 @@ target_link_libraries(graft_core
   llama
   ggml
   ggml-base
+  ggml-cpu
+  ggml-blas
+  ggml-metal
   m
   pthread
   ${MG_PLATFORM_LIBS}
@@ -134,6 +141,8 @@ target_link_libraries(graft_core
 # === Binari ===
 add_executable(graftd src/daemon/main.c)
 target_link_libraries(graftd graft_core)
+# llama is C++; graftd consumes libllama/ggml symbols → link libc++
+target_link_libraries(graftd c++)
 
 add_executable(graft
   src/cli/main.c

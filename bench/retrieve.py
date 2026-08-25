@@ -14,7 +14,7 @@ import pathlib
 import subprocess
 from dataclasses import dataclass
 
-GRAFT = pathlib.Path.home() / ".local/bin/graft"
+GRAFT = pathlib.Path("/Users/arihantdeva/Repos/heimdall/vendor/graft/build/graft")
 RRF_K = 60  # retrieval.rrf_k_const in ~/.graft/config.yaml
 
 

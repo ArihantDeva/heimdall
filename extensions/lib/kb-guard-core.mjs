@@ -1,9 +1,13 @@
 // kb-guard-core — pure state machine for the kb_search-before-search-chain guard.
-// grep-style actions are counted per-session; at the 3rd consecutive one (and
-// every one after), the agent receives a warning to run kb_search first.
-// Reset: kb_search, kb_sync, or a bash command whose argv starts with `graft`
-// (user-level=false so we never fire inside subagents). Interleaved read tool
-// call / edit / write do NOT reset — only knowledge-access actions do.
+// grep-style actions are counted per-session; ladder of consequences:
+//   firing 1 (chain hits 3): ⚠️ WARNING prepended to result
+//   firing 2:               🛑 ESCALATION prepended
+//   firing 3+:              {block:true, reason} — pi blocks the tool call.
+// Blocks apply to search actions only: grep/find/ls/read TOOL calls always;
+// bash only when its first token is a search binary (rg/grep/find/ls/fd).
+// Non-search bash (tests, builds, echo) is never blockable.
+// Reset: kb_search, kb_sync, or a bash command touching graft/heimdall.
+// Interleaved edit/write do NOT reset — only knowledge-access actions do.
 //
 // Exported alone so impl-review-loop + node --test can exercise it without the
 // pi ExtensionAPI runtime; the extension (kb-search-guard.ts) owns the hook.
@@ -22,11 +26,32 @@ export const ESCALATION =
   "MANDATORY next action: call kb_search for what you're looking for. " +
   "If Heimdall is genuinely irrelevant to this exact step, state why in one line, then proceed.";
 
+export const BLOCK_REASON =
+  "🛑 kb-guard BLOCKED: three+ search-chain warnings ignored — rg/grep/find/ls/read spam " +
+  "without a single kb_search. Call kb_search for what you're looking for FIRST " +
+  "(it resets this guard), then retry the search.";
+
+/** Bash command where ANY pipe/chain segment leads with a file-search binary.
+ * Covers `rg x .`, `cat f | grep x`, `echo hi && ls`. Path prefixes ok. */
+export function isSearchHead(command) {
+  const segs = String(command ?? "").split(/\|\||\||&&|;|\n/);
+  return segs.some((s) => {
+    const head = s.trim().split(/\s+/)[0] ?? "";
+    return /^(.*\/)?(rg|(ba|e|f)?grep|ggrep|find|ls|fd)$/.test(head);
+  });
+}
+
+function consequence(firings) {
+  if (firings <= 1) return WARNING;
+  if (firings === 2) return ESCALATION;
+  return { block: true, reason: BLOCK_REASON };
+}
+
 export function createGuard() {
   let chain = 0;
   let firings = 0; // total warnings fired this session — drives escalation
   return {
-    /** Feed one tool call. Returns warning string when the chain fires, else null. */
+    /** Feed one tool call. Returns warning string, block verdict {block,reason}, else null. */
     note(toolName, input) {
       if (RESET_TOOLS.has(toolName)) {
         chain = 0;
@@ -38,12 +63,12 @@ export function createGuard() {
           chain = 0;
           return null;
         }
-        // bash counts as a grep-style action (it's how most searches run); graft/heimdall
-        // commands above reset instead. Everything else that searches lives here.
+        // bash counts as a grep-style action (it's how most searches run), but only
+        // search-headed bash is ever BLOCKABLE — npm test / echo must pass through.
         chain += 1;
-        if (chain >= 3) {
+        if (chain >= 3 && (firings < 2 || isSearchHead(cmd))) {
           firings += 1;
-          return firings >= 2 ? ESCALATION : WARNING;
+          return consequence(firings);
         }
         return null;
       }
@@ -51,7 +76,7 @@ export function createGuard() {
         chain += 1;
         if (chain >= 3) {
           firings += 1;
-          return firings >= 2 ? ESCALATION : WARNING;
+          return consequence(firings);
         }
         return null;
       }

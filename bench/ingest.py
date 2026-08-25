@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import json
 import os
+import concurrent.futures
 import pathlib
 import re
 import subprocess
 import time
 
-GRAFT = pathlib.Path.home() / ".local/bin/graft"
+GRAFT = pathlib.Path("/Users/arihantdeva/Repos/heimdall/vendor/graft/build/graft")
 HERE = pathlib.Path(__file__).resolve().parent
 FACTS_CLI = HERE.parent / "bin" / "lib" / "facts-cli.mjs"
 NODE = os.environ.get("NODE", "node")
@@ -208,28 +209,43 @@ def ingest_question(question: dict, root: pathlib.Path,
         raise
 
 
+_INSERT_WORKERS = 8  # daemon pools embed instances; inserts are CPU-embed bound
+
+
 def _insert_all(question: dict, root: pathlib.Path, profile: str,
                 inserted: list[str], chunk_size: int = 0,
                 chunk_stride: int = 2, facts: bool = False) -> list[str]:
     dates = question.get("haystack_dates") or []
     env = dict(os.environ, GRAFT_PROFILE=profile)
+    tasks: list[tuple[str, pathlib.Path, str]] = []
     for path, idx in materialize(question, root, chunk_size, chunk_stride):
         date = dates[idx] if idx < len(dates) else ""
         title = session_title(session_id_at(question, idx), date)
+        tasks.append((title, path, date))
+
+    def run_one(task: tuple[str, pathlib.Path, str]) -> list[str]:
+        title, path, date = task
+        body = path.read_text(encoding="utf-8")
         cmd = [
             str(GRAFT), "insert",
             "--title", title,
-            "--body", path.read_text(encoding="utf-8"),
+            "--body", body,
             "--keyword", _iso(date),
             "--keyword", question["question_id"],
             "--keyword", BENCH_MARKER,
         ]
-        inserted.append(_insert_one(cmd, env))
+        ids = [_insert_one(cmd, env)]
         if facts:
             for fact in shim_facts(path):
-                inserted.append(_insert_one(
+                ids.append(_insert_one(
                     fact_insert_cmd(fact, title, question["question_id"]),
                     env))
+        return ids
+
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=_INSERT_WORKERS) as pool:
+        for ids in pool.map(run_one, tasks):
+            inserted.extend(ids)
     return inserted
 
 
