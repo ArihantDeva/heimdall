@@ -58,7 +58,11 @@ try:
     out = subprocess.run([mnemo, "recall", q, str(n), "--json"],
                          capture_output=True, text=True, timeout=90).stdout
     data = json.loads(out)
-    for r in data.get("results", []):
+except Exception as e:
+    print(f"WARN: mnemosyne recall failed: {e}", file=sys.stderr)
+    data = {}
+for r in (data.get("results") or []):
+    try:
         content = str(r.get("content", ""))
         # Home-anchored paths in the content drive the same verdict logic as
         # graft hits; memories without paths still rank via title coverage.
@@ -71,8 +75,8 @@ try:
             "body": f"memory [{path or 'no-path'}] {content}",
             "path": os.path.expanduser(path) if path else "/nonexistent-mnemosyne-memory",
         })
-except Exception as e:
-    print(f"WARN: mnemosyne recall failed: {e}", file=sys.stderr)
+    except (TypeError, ValueError) as e:
+        print(f"WARN: skipping malformed memory result: {e}", file=sys.stderr)
 q_toks = set(q.lower().split())
 for i, r in enumerate(sorted(results, key=lambda x: -x["score"])[:n], 1):
     p = r["path"]

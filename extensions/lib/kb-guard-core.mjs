@@ -32,7 +32,9 @@ export const BLOCK_REASON =
   "(it resets this guard), then retry the search.";
 
 /** Bash command where ANY pipe/chain segment leads with a file-search binary.
- * Covers `rg x .`, `cat f | grep x`, `echo hi && ls`. Path prefixes ok. */
+ * Covers `rg x .`, `cat f | grep x`, `echo hi && ls`. Path prefixes ok.
+ * ponytail: misses env-prefix (`FOO=1 rg`) and wrappers (`timeout 60 rg`);
+ * nudge guard, not adversarial security — extend regex if that matters. */
 export function isSearchHead(command) {
   const segs = String(command ?? "").split(/\|\||\||&&|;|\n/);
   return segs.some((s) => {
@@ -51,20 +53,25 @@ export function createGuard() {
   let chain = 0;
   let firings = 0; // total warnings fired this session — drives escalation
   return {
-    /** Feed one tool call. Returns warning string, block verdict {block,reason}, else null. */
+    /** Feed one tool call. Returns warning string, block verdict {block,reason}, else null.
+     * Resets are clean-slate: chain AND firings cleared — consulting knowledge
+     * de-escalates fully; a stale bad stretch can't prime later blocks. */
     note(toolName, input) {
       if (RESET_TOOLS.has(toolName)) {
         chain = 0;
+        firings = 0;
         return null;
       }
       if (toolName === "bash") {
         const cmd = String(input?.command ?? "");
         if (/(^|[;&\s])\s*(graft|heimdall)\b/.test(cmd)) {
           chain = 0;
+          firings = 0;
           return null;
         }
-        // bash counts as a grep-style action (it's how most searches run), but only
-        // search-headed bash is ever BLOCKABLE — npm test / echo must pass through.
+        // Past escalation, only SEARCH-headed bash matters: other bash neither
+        // fires nor advances the chain (stays "search actions since reset").
+        if (firings >= 2 && !isSearchHead(cmd)) return null;
         chain += 1;
         if (chain >= 3 && (firings < 2 || isSearchHead(cmd))) {
           firings += 1;
