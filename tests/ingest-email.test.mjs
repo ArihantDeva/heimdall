@@ -102,6 +102,21 @@ test("ingestEmail: second identical run is a no-op (idempotent)", async () => {
   }
 });
 
+test("ingestEmail: show payload account:null falls back to listing account", async () => {
+  const root = mkdtempSync(join(tmpdir(), "heimdall-ingest-acct-"));
+  try {
+    const run = (sub) =>
+      sub === "list"
+        ? JSON.stringify({ results: [{ ...MSG, account: "a2" }], _meta: {} })
+        : JSON.stringify([{ ...MSG, account: null, body: "b" }]); // live cli-email behavior
+    const summary = await ingestEmail({ accounts: ["a2"], limit: 5, root, run });
+    assert.equal(summary.written, 1);
+    assert.ok(readFileSync(join(root, "graft", "mail", "a2", "15958.md"), "utf8").includes("Account: a2"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("ingestEmail: empty mailbox writes nothing, reports zeros", async () => {
   const root = mkdtempSync(join(tmpdir(), "heimdall-ingest-empty-"));
   try {

@@ -13,7 +13,7 @@
 // tests never touch a real mailbox and business logic never constructs the
 // CLI inline. Idempotent by content: a card is rewritten only when its bytes
 // change, so re-runs are cheap no-ops.
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -85,14 +85,16 @@ export async function ingestEmail({ accounts = [], limit = 50, root, run }) {
     for (const meta of listed) {
       fetched++;
       const full = toMessages(parseEmailJson(run("show", [String(meta.uid), "-a", account, "--format", "json"])));
-      const msg = { ...meta, ...full.find((m) => String(m.uid) === String(meta.uid)) };
+      const found = full.find((m) => String(m.uid) === String(meta.uid)) ?? {};
+      // show responses may carry account:null — the listing's account wins.
+      const msg = { ...meta, ...found, account: found.account ?? meta.account ?? account };
       const { relPath, markdown } = renderEmailCard(msg);
       const file = join(graftDir, relPath);
-      mkdirSync(join(graftDir, "mail", account), { recursive: true });
+      mkdirSync(join(graftDir, "mail", String(msg.account)), { recursive: true });
       // Byte-compare before writing: unchanged messages must not bump mtime,
       // so downstream embed/reconcile layers see a stable tree.
       try {
-        if (readCard(file) === markdown) continue;
+        if (readFileSync(file, "utf8") === markdown) continue;
       } catch {
         // absent → fall through to write
       }
@@ -102,6 +104,3 @@ export async function ingestEmail({ accounts = [], limit = 50, root, run }) {
   }
   return { fetched, written };
 }
-
-import { readFileSync } from "node:fs";
-const readCard = (file) => readFileSync(file, "utf8");
