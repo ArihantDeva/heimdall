@@ -18,18 +18,25 @@ import json
 import os
 import pathlib
 import sqlite3
+import subprocess
 import sys
+import fcntl
 
 import sqlite_vec
 from sentence_transformers import SentenceTransformer
 
 DB = pathlib.Path.home() / ".heimdall" / "global.db"
 REPOS = pathlib.Path.home() / "Repos"
-# bge-m3 weights are ~2.3GB; on a 16GB machine a query-time load can OOM the
-# system when several run in parallel. bge-small is 30x lighter and plenty for
-# card-title recall. Flip back to bge-m3 if recall quality measurably drops.
-MODEL = os.environ.get("HEIMDALL_EMBED_MODEL", "BAAI/bge-small-en-v1.5")
+# Heavy model is fine again — safeguards below stop parallel stacking:
+# single-flight lock + free-RAM gate. Set HEIMDALL_EMBED_MODEL=BAAI/bge-small-en-v1.5
+# (and rebuild) to drop query RSS from ~2.1GB to ~0.5GB.
+MODEL = os.environ.get("HEIMDALL_EMBED_MODEL", "BAAI/bge-m3")
 DIM = 384 if "bge-small" in MODEL else 1024
+
+# Safeguards (2026-08-25 halt): every invocation loads model weights fresh.
+# N parallel callers used to stack N × ~2GB and halt a 16GB machine.
+MIN_FREE_GB = float(os.environ.get("HEIMDALL_MIN_FREE_GB", "2"))
+BUILD_HEADROOM_GB = 4.0  # batch encode activations on top of weights
 
 MODEL_CACHE: SentenceTransformer | None = None
 
@@ -46,6 +53,55 @@ def conn() -> sqlite3.Connection:
     c.enable_load_extension(True)
     sqlite_vec.load(c)
     return c
+
+
+class Busy(Exception):
+    """Another embed-index process already holds the single-flight lock."""
+
+
+LOCK_PATH = pathlib.Path.home() / ".heimdall" / "embed-index.lock"
+
+
+def _acquire_lock():
+    """Nonblocking exclusive flock; raises Busy if someone else is mid-flight.
+    ponytail: handle intentionally never closed/released — this is a one-shot
+    CLI, the OS drops the lock at process exit."""
+    fh = open(LOCK_PATH, "w")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        raise Busy() from None
+    return fh
+
+
+def _free_ram_gb() -> float:
+    out = subprocess.run(["vm_stat"], capture_output=True, text=True).stdout
+    pages = {}
+    for line in out.splitlines():
+        key, _, val = line.partition(":")
+        val = val.strip().rstrip(".")
+        if val.isdigit():
+            pages[key.strip()] = int(val)
+    page = 16384 if "16384" in out.splitlines()[0] else 4096
+    free = (
+        pages.get("Pages free", 0)
+        + pages.get("Pages purgeable", 0)
+        + pages.get("Pages speculative", 0)
+    ) * page / 1e9
+    return free
+
+
+def _ram_ok(min_gb: float, what: str) -> bool:
+    free = _free_ram_gb()
+    if free >= min_gb:
+        return True
+    print(
+        f"embed-index: skipping {what} — {free:.1f}GB free RAM < {min_gb}GB "
+        "required for the heavy embed model. Retry when memory frees up.",
+        file=sys.stderr,
+    )
+    return False
 
 
 def init(c: sqlite3.Connection) -> None:
@@ -79,6 +135,13 @@ def cards_for(repo: pathlib.Path) -> list[tuple[str, str, str, str]]:
 
 
 def build() -> int:
+    try:
+        _acquire_lock()
+    except Busy:
+        print("embed-index: another instance is running; skipping build.", file=sys.stderr)
+        raise SystemExit(1)
+    if not _ram_ok(MIN_FREE_GB + BUILD_HEADROOM_GB, "build"):
+        raise SystemExit(1)
     c = conn()
     init(c)
     model_inst = model()
@@ -132,9 +195,26 @@ def build() -> int:
 
 
 def query(q: str, n: int = 5, related: bool = False) -> list[dict]:
+    global MODEL, DIM
     c = conn()
-    if DIM != _db_dim(c):
-        print("[]")  # ponytail: index still at old dim; rebuild (embed-index.py build) before semantic search works again
+    db_d = _db_dim(c)
+    if DIM != db_d:
+        # Index was built with another model (e.g. heavy rebuild gated on RAM
+        # while a lighter index exists). Adapt to the index so search keeps
+        # working; `build` is the only path that changes dims.
+        DIM = db_d
+        MODEL = "BAAI/bge-small-en-v1.5" if db_d == 384 else "BAAI/bge-m3"
+        if db_d < 0:
+            print("[]")  # ponytail: no vec table yet; run embed-index.py build
+            return []
+    try:
+        _acquire_lock()
+    except Busy:
+        # Degrade gracefully: kb-search.sh still has lexical hits. Only lines
+        # starting with '[' are consumed, so stderr notes are safe here.
+        print("embed-index: another instance holds the model; semantic layer skipped this call.", file=sys.stderr)
+        return []
+    if not _ram_ok(MIN_FREE_GB, "query"):
         return []
     vec = model().encode(q, normalize_embeddings=True).tolist()
     rows = c.execute(
