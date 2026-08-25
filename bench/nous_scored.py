@@ -144,7 +144,10 @@ def _reader(item: dict) -> str:
     else:
         parts.append("No sessions were retrieved.")
     parts += ["", f"Question: {item['question']}", "", "Answer:"]
-    return _call([{"role": "user", "content": "\n".join(parts)}])
+    # 512 hit finish_reason=length on long prompts (reasoning consumed the
+    # budget before any content was emitted) — 31/490 questions stranded as
+    # empty-content. 4096 leaves room for reasoning + the answer itself.
+    return _call([{"role": "user", "content": "\n".join(parts)}], max_tokens=4096)
 
 
 def _grade(item: dict, response: str) -> bool:
