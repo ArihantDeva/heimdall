@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 // Protocol: MCP 2024-11-05, newline-delimited JSON over stdin/stdout.
@@ -58,16 +58,29 @@ test("mcp: tools/list exposes search, insert, sync", async () => {
 });
 
 test("mcp: tools/call kb_search returns text content", async () => {
-	const CALL = { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "kb_search", arguments: { query: "reconcile graph convergence" } } };
-	const res = await rpc([INIT, LIST, CALL], { timeout: 120_000 });
-	const call = res.find((r) => r.id === 3);
-	assert.ok(call, "no response for call");
-	assert.equal(call.result.isError ?? false, false);
-	assert.ok(Array.isArray(call.result.content));
-	// Contract: non-empty text content. (Bracketed hit lines are env-dependent —
-	// a machine with zero indexed repos validly returns guidance text.)
-	assert.ok(typeof call.result.content[0]?.text === "string" && call.result.content[0].text.length > 0);
-}, { timeout: 150_000 });
+	// Hermetic HOME with a fake graft binary + one indexed repo: same contract
+	// (non-empty text) without loading the real semantic layer (bge-m3 model
+	// load exceeds bun's 5s default test timeout; sibling tests use this pattern).
+	const home = mkdtempSync(join(tmpdir(), "heimdall-mcp-kbs-"));
+	try {
+		const graft = join(home, ".local", "bin", "graft");
+		mkdirSync(dirname(graft), { recursive: true });
+		copyFileSync(join(repo, "tests", "fixtures", "fake-graft.sh"), graft);
+		chmodSync(graft, 0o755);
+		mkdirSync(join(home, "Repos", "example", "graft"), { recursive: true });
+		const CALL = { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "kb_search", arguments: { query: "reconcile graph convergence" } } };
+		const res = await rpc([INIT, LIST, CALL], { env: { ...process.env, HOME: home, GRAFT: undefined, HEIMDALL_REPOS: undefined }, timeout: 30_000 });
+		const call = res.find((r) => r.id === 3);
+		assert.ok(call, "no response for call");
+		assert.equal(call.result.isError ?? false, false);
+		assert.ok(Array.isArray(call.result.content));
+		// Contract: non-empty text content. (Bracketed hit lines are env-dependent —
+		// a machine with zero indexed repos validly returns guidance text.)
+		assert.ok(typeof call.result.content[0]?.text === "string" && call.result.content[0].text.length > 0);
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
+});
 
 test("mcp: kb_search on fresh machine (no graft, no ~/.heimdall) still returns content, not an error", async () => {
 	const fresh = mkdtempSync(join(tmpdir(), "heimdall-fresh-"));

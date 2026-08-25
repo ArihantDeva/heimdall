@@ -238,7 +238,9 @@ ec("mtime-only touch flagged by cheap screen, converges on reconcile", () => {
   const s = sb(); try {
     const p = s.file("m.py", "stable\n");
     s.journal.enqueue(p, "t"); drainAll(s.ctx);
-    const now = new Date();
+    // Future-dated touch: guaranteed mtime delta regardless of FS timestamp
+    // quantization under parallel load (bun runs files concurrently).
+    const now = new Date(Date.now() + 10_000);
     utimesSync(p, now, now);
     // Conservative screen: mtime drift is flagged, then reconcile re-hashes,
     // finds content identical, and CONVERGES — audit must be clean after.
