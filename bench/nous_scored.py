@@ -24,19 +24,17 @@ import urllib.request
 HERE = pathlib.Path(__file__).resolve().parent
 RUNS = HERE / "runs"
 
-BASE = "https://inference-api.nousresearch.com/v1/chat/completions"
-# Three independent ox-alpha gateways: direct Nous API, CommandCode, OpenRouter.
-# Each is a separate upstream pool, so a 429 on one doesn't block the others.
+BASE = "https://api.mistral.ai/v1/chat/completions"
+# Reader/judge model. stealth/ox-alpha retired (2026-08-26). Default is the
+# live mistral-large (131k ctx, 8k max). Set READER_MODEL env to A/B another
+# backend (deepseek-v4-flash via crof worked but credits are exhausted).
+_READER_MODEL = __import__("os").environ.get("READER_MODEL", "mistral-large-latest")
 GATEWAYS = [
-    {"url": BASE, "key": "nous-a1"},
-    {"url": BASE, "key": "nous-a2"},
-    {"url": BASE, "key": "nous-a3"},
-    {"url": "https://api.commandcode.ai/provider/v1/chat/completions",
-     "key": "command-code"},
-    {"url": "https://openrouter.ai/api/v1/chat/completions",
-     "key": "openrouter-a1"},
+    {"url": BASE, "key": "mistral-a1"},
+    {"url": BASE, "key": "mistral-a3"},
+    {"url": BASE, "key": "mistral-a2"},
 ]
-MODELS = ["stealth/ox-alpha"]  # only model these keys can call; others 404/403
+MODELS = [_READER_MODEL]
 
 SYSTEM = """You answer questions from a user's own chat history.
 Rules:
