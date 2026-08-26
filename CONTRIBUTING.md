@@ -1,6 +1,6 @@
 # Contributing to Heimdall
 
-Thanks for helping build persistent memory for AI coding agents.
+Thank you for any ideas you may have. Please do not open any PRs that go against the core philosophy of Heimdall or introduce new token costs.
 
 ## Quick start
 
