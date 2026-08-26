@@ -26,7 +26,7 @@ If a PR breaks one of these invariants, the concurrency tests will go red — th
 
 ## Before opening a PR
 
-- `npm test` green (166+ tests)
+- `npm test` green (262 tests)
 - `npm run typecheck` clean
 - New behavior has a test
 - README updated if you changed user-facing behavior

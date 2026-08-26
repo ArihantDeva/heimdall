@@ -1,4 +1,7 @@
-import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import {
+	chmodSync, copyFileSync, existsSync, mkdtempSync, mkdirSync,
+	readFileSync, writeFileSync, rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 // Protocol: MCP 2024-11-05, newline-delimited JSON over stdin/stdout.
@@ -117,4 +120,64 @@ test("mcp: unknown tool → isError with message", async () => {
 	const call = res.find((r) => r.id === 4);
 	assert.equal(call.result.isError, true);
 	assert.match(call.result.content[0].text, /unknown tool/i);
+});
+
+test("mcp: kb_insert survives server restart and is immediately searchable", async () => {
+	const home = mkdtempSync(join(tmpdir(), "heimdall-mcp-insert-"));
+	try {
+		const env = {
+			...process.env, HOME: home, GRAFT: "/nonexistent/graft", HEIMDALL_REPOS: "",
+		};
+		const body = "Occurrence-scoped steps require a durable zircon precedence constraint.\n";
+		const INSERT = {
+			jsonrpc: "2.0", id: 20, method: "tools/call",
+			params: {
+				name: "kb_insert",
+				arguments: { title: "Zircon procedure memory", body, keywords: "zircon,precedence,durable" },
+			},
+		};
+		const first = await rpc([INIT, INSERT], { env });
+		const inserted = first.find((r) => r.id === 20);
+		assert.equal(inserted.result.isError, false);
+		const receipt = JSON.parse(inserted.result.content[0].text);
+		assert.equal(receipt.searchable, true);
+		assert.equal(existsSync(receipt.path), true);
+		const record = JSON.parse(readFileSync(receipt.path, "utf8"));
+		assert.equal(record.body, body);
+		assert.deepEqual(record.keywords, ["zircon", "precedence", "durable"]);
+
+		// rpc() starts a new MCP server, proving persistence beyond process state.
+		const SEARCH = {
+			jsonrpc: "2.0", id: 21, method: "tools/call",
+			params: { name: "kb_search", arguments: { query: "zircon precedence", n: 3 } },
+		};
+		const second = await rpc([INIT, SEARCH], { env });
+		const searched = second.find((r) => r.id === 21);
+		assert.equal(searched.result.isError, false);
+		assert.match(searched.result.content[0].text, /Zircon procedure memory/);
+		assert.match(searched.result.content[0].text, new RegExp(receipt.id));
+		assert.equal(existsSync(join(home, ".heimdall", "hints.jsonl")), false);
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
+});
+
+test("mcp: kb_insert returns the CLI failure reason without leaking content", async () => {
+	const home = mkdtempSync(join(tmpdir(), "heimdall-mcp-insert-error-"));
+	try {
+		const CALL = {
+			jsonrpc: "2.0", id: 22, method: "tools/call",
+			params: {
+				name: "kb_insert",
+				arguments: { title: "Credential", body: "password=do-not-store" },
+			},
+		};
+		const res = await rpc([INIT, CALL], { env: { ...process.env, HOME: home } });
+		const call = res.find((r) => r.id === 22);
+		assert.equal(call.result.isError, true);
+		assert.match(call.result.content[0].text, /secret-shaped content/i);
+		assert.doesNotMatch(call.result.content[0].text, /do-not-store/);
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
 });

@@ -6,6 +6,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import { insertMemory } from "../bin/lib/manual-memory.mjs";
+
 const shellTest = process.platform === "win32" ? test.skip : test;
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -45,6 +47,34 @@ shellTest("kb-search defaults to the graft backend with zero config", () => {
 
     assert.match(stdout, /GraftRan/);
     assert.doesNotMatch(stdout, /Mnemo hit/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+shellTest("kb-search finds manual title, body, and keyword without any backend", async () => {
+  const home = mkdtempSync(join(tmpdir(), "heimdall-manual-search-"));
+  try {
+    const stored = await insertMemory({
+      title: "Zircon-title procedure",
+      body: "Use occurrence-scoped steps with acyclic-body ordering.",
+      keywords: ["precedence-keyword"],
+      cwd: "/work/modeling",
+      home,
+    });
+    for (const query of ["zircon-title", "acyclic-body", "precedence-keyword"]) {
+      const result = spawnSync("bash", [join(repoRoot, "bin", "kb-search.sh"), query], {
+        encoding: "utf8",
+        env: {
+          ...process.env, HOME: home, PATH: "/usr/bin:/bin",
+          GRAFT: "/nonexistent/graft", HEIMDALL_REPOS: "",
+        },
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /Zircon-title procedure/);
+      assert.match(result.stdout, /\[STRONG\]/);
+      assert.match(result.stdout, new RegExp(stored.id));
+    }
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

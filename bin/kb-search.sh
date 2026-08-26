@@ -98,12 +98,12 @@ print_results() {
 	[ -f "$VERIFY" ] || { echo "ERROR: verify script missing: $VERIFY"; exit 1; }
 	python3 "$VERIFY" "$1" "$2" "$SCOPE" "$N" "$Q"
 }
-echo "== retrieve (per-repo graft + global semantic): $Q"
+echo "== retrieve (manual memory + per-repo graft + global semantic): $Q"
 if [ ! -x "$GRAFT" ]; then
-	# Not a tool failure: a fresh/unconfigured machine has validly zero results.
-	# Exit 0 so callers (MCP kb_search) get an answer, not isError.
-	echo "WARN: graft binary not found at $GRAFT (set GRAFT=/path/to/graft). Install: npm i -g @nanonets/graft. Search unavailable until indexed — this is an empty result, not an error."
-	exit 0
+	echo "WARN: graft binary not found at $GRAFT (set GRAFT=/path/to/graft). Code-graph search is unavailable; manual-memory search remains active."
+	export HEIMDALL_GRAFT_AVAILABLE=0
+else
+	export HEIMDALL_GRAFT_AVAILABLE=1
 fi
 
 # Global semantic layer (bge-m3 embeddings over repo source).
@@ -125,13 +125,6 @@ else
 	fi
 fi
 
-if [ ${#REPO_LIST[@]} -eq 0 ]; then
-	# Fresh install / no indexed repos yet: valid empty answer (exit 0), with
-	# setup guidance in-band. Exit 1 here broke MCP kb_search (isError) on CI.
-	echo "No repos with a graft graph found under ~/Repos yet. Index one: cd <repo> && heimdall index (or graft build). Search returns no hits until then."
-	exit 0
-fi
-
 # Merge JSON hits from every repo into one JSON array shaped like graft
 # retrieve results: {result:{results:[{title,score,id_hex}]}} with paths.
 # PLUS global semantic hits from embed-index.py.
@@ -144,7 +137,7 @@ script_dir = sys.argv[3]
 repos = sys.argv[4:]
 graft = os.environ.get("GRAFT", "graft")
 results = []
-for repo in repos:
+for repo in (repos if os.environ.get("HEIMDALL_GRAFT_AVAILABLE") == "1" else []):
     try:
         out = subprocess.run([graft, "ask", q, repo, "--json", "-n", str(n)],
                              capture_output=True, text=True, timeout=60).stdout
@@ -163,6 +156,27 @@ for repo in repos:
             })
     except Exception:
         continue
+# Immediate machine-global memory lane. This reads canonical JSON records and
+# needs neither Graft nor the optional embedding environment.
+manual = os.path.join(script_dir, "manual-memory.js")
+try:
+    out = subprocess.run(["node", manual, "search", q, str(n)],
+                         capture_output=True, text=True, timeout=10).stdout
+    for h in json.loads(out).get("hits", []):
+        results.append({
+            "id_hex": h.get("id", "manual-?"),
+            "title": h.get("title", ""),
+            "score": 3.0 + min(float(h.get("score", 0)) / 10.0, 1.0),
+            "body": "\n".join([
+                h.get("body", ""),
+                "keywords: " + " ".join(h.get("keywords", [])),
+                "cwd: " + h.get("cwd", ""),
+            ]),
+            "path": h.get("path", ""),
+            "manual": True,
+        })
+except Exception as e:
+    print(f"WARN: manual-memory lane failed: {e}", file=sys.stderr)
 # Global semantic hits (bge-m3): append as top-ranked candidates.
 # embed-index.py lives next to kb-search.sh; the shell passes SCRIPT_DIR in
 # argv[3] because sys.argv[0] is "-" for stdin-invoked python.
@@ -209,6 +223,9 @@ seen = {}
 for r in sorted(results, key=lambda x: -x["score"]):
     seen.setdefault(r["title"], r)
 merged = sorted(seen.values(), key=lambda x: -x["score"])[:n]
+
+if not merged:
+    print("No knowledge hits. Manual memories are searched immediately; index a repo with `graft build` for code-graph results.")
 
 # Verdict pass: STRONG if path exists on disk + lexical coverage of query,
 # WEAK if path exists, NOPATH/STALE otherwise. (Replaces kb_search_verify.py,

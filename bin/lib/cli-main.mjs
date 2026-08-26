@@ -49,25 +49,21 @@ async function runInsert(args) {
     const i = args.indexOf(f);
     return i >= 0 ? args[i + 1] : "";
   };
+  const getAll = (f) => args.flatMap((arg, i) =>
+    arg === f && i + 1 < args.length ? [args[i + 1]] : []);
   const title = get("--title");
   const body = get("--body");
-  const kws = (get("--keywords") || "").split(",").filter(Boolean);
+  const kws = getAll("--keywords");
   if (!title || !body) {
     console.error("usage: heimdall insert --title T --body B [--keywords k1,k2]");
     return 1;
   }
-  // @nanonets/graft has no `insert` — the journal is authoritative and the
-  // per-repo graph is rebuilt by `graft build`. Record the intent in the
-  // journal (hint queue) so the reconciler picks it up. (No graft binary
-  // required for insert — journal-only.)
   try {
-    const { emitHint } = await import("./hints.mjs");
-    const { queueHintPath } = await import("./depth.mjs");
-    const hintFile = queueHintPath();
-    const target = join(process.cwd(), title.replace(/[^a-zA-Z0-9_.-]/g, "_") + ".fact.md");
-    emitHint(hintFile, target, "insert:" + title);
+    const { insertMemory } = await import("./manual-memory.mjs");
+    const stored = await insertMemory({ title, body, keywords: kws });
+    console.log(JSON.stringify(stored));
   } catch (e) {
-    console.error(`ERROR: hint failed: ${e.message?.split("\n")[0] ?? e}`);
+    console.error(`ERROR: insert failed: ${e.message?.split("\n")[0] ?? e}`);
     return 1;
   }
   return 0;

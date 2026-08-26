@@ -6,7 +6,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import {
+  existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -58,6 +60,34 @@ test("F3: hint on nonexistent path warns but still exits 0 (hint is advisory)", 
   assert.equal(r.status, 0, "hint stays advisory — absent is reconciled later");
   assert.match((r.stderr ?? "") + (r.stdout ?? ""), /does not exist|not found/i,
     "user must be told the path is missing");
+});
+
+test("insert persists exact content and normalizes comma/repeated keywords", () => {
+  const home = mkdtempSync(join(tmpdir(), "heimdall-cli-insert-"));
+  const cwd = mkdtempSync(join(tmpdir(), "heimdall-cli-cwd-"));
+  try {
+    const body = "Exact first line.\nExact second line: café λ.\n";
+    const r = spawnSync(process.execPath, [
+      CLI, "insert", "--title", "CLI durable memory", "--body", body,
+      "--keywords", "zircon,precedence", "--keywords", "Precedence", "--keywords", "durable",
+    ], {
+      cwd, encoding: "utf8", timeout: 30_000,
+      env: { ...process.env, HOME: home },
+    });
+    assert.equal(r.status, 0, r.stderr);
+    const result = JSON.parse(r.stdout);
+    assert.equal(result.searchable, true);
+    assert.ok(result.id.startsWith("mem-"));
+    assert.equal(existsSync(result.path), true);
+    const record = JSON.parse(readFileSync(result.path, "utf8"));
+    assert.equal(record.body, body);
+    assert.deepEqual(record.keywords, ["zircon", "precedence", "durable"]);
+    assert.equal(record.cwd, cwd);
+    assert.equal(existsSync(join(home, ".heimdall", "hints.jsonl")), false);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 // ── facts-cli.mjs: bench ingest contract (spec D3/D6) ────────────────────────

@@ -72,12 +72,16 @@ function cli(args, { timeoutMs = 120_000 } = {}) {
 	return new Promise((resolve) => {
 		const child = spawn(process.execPath, [HEIMDALL_JS, ...args], { stdio: ["ignore", "pipe", "pipe"] });
 		let out = "";
+		let stderr = "";
 		const timer = setTimeout(() => child.kill(), timeoutMs);
 		child.stdout.on("data", (d) => { out += d; });
-		child.stderr.on("data", () => {});
+		child.stderr.on("data", (d) => { stderr += d; });
 		child.on("close", (code) => {
 			clearTimeout(timer);
-			resolve({ code: code ?? 1, text: out.trim() || "(no output)" });
+			const text = code === 0
+				? out.trim() || stderr.trim() || "(no output)"
+				: [out.trim(), stderr.trim()].filter(Boolean).join("\n") || "(no output)";
+			resolve({ code: code ?? 1, text });
 		});
 		child.on("error", (err) => {
 			clearTimeout(timer);

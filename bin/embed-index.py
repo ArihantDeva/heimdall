@@ -24,6 +24,7 @@ import fcntl
 
 import sqlite_vec
 from sentence_transformers import SentenceTransformer
+from manual_memory_cards import memory_cards
 
 DB = pathlib.Path.home() / ".heimdall" / "global.db"
 REPOS = pathlib.Path.home() / "Repos"
@@ -76,20 +77,32 @@ def _acquire_lock():
 
 
 def _free_ram_gb() -> float:
-    out = subprocess.run(["vm_stat"], capture_output=True, text=True).stdout
-    pages = {}
-    for line in out.splitlines():
-        key, _, val = line.partition(":")
-        val = val.strip().rstrip(".")
-        if val.isdigit():
-            pages[key.strip()] = int(val)
-    page = 16384 if "16384" in out.splitlines()[0] else 4096
-    free = (
-        pages.get("Pages free", 0)
-        + pages.get("Pages purgeable", 0)
-        + pages.get("Pages speculative", 0)
-    ) * page / 1e9
-    return free
+    if sys.platform == "darwin":
+        out = subprocess.run(["vm_stat"], capture_output=True, text=True).stdout
+        lines = out.splitlines()
+        pages = {}
+        for line in lines:
+            key, _, val = line.partition(":")
+            val = val.strip().rstrip(".")
+            if val.isdigit():
+                pages[key.strip()] = int(val)
+        page = 16384 if lines and "16384" in lines[0] else 4096
+        return (
+            pages.get("Pages free", 0)
+            + pages.get("Pages purgeable", 0)
+            + pages.get("Pages speculative", 0)
+        ) * page / 1e9
+
+    meminfo = pathlib.Path("/proc/meminfo")
+    if meminfo.is_file():
+        fields = {}
+        for line in meminfo.read_text().splitlines():
+            key, _, value = line.partition(":")
+            fields[key] = value.strip().split()[0]
+        available_kib = int(fields.get("MemAvailable", fields.get("MemFree", "0")))
+        return available_kib * 1024 / 1e9
+
+    return 0.0
 
 
 def _ram_ok(min_gb: float, what: str) -> bool:
@@ -152,6 +165,7 @@ def build() -> int:
         if not repo.is_dir():
             continue
         all_cards.extend(cards_for(repo))
+    all_cards.extend(memory_cards())
     # Prune stale rows BEFORE embedding: cards removed from disk (e.g. mailbox
     # roll-off past the ingest limit, or a graft build regenerating graft/)
     # otherwise linger as vec orphans that pollute k-NN results with dead paths.

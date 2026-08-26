@@ -91,7 +91,7 @@ Heimdall is the only one built for the actual workflow: many repos, many months,
 
 **Does it work with my agent?** One command wires it into pi, Claude Code, Codex, Cursor, or Windsurf. Anything that can run a CLI can use `search`/`insert` directly.
 
-**Is it production-ready?** It runs daily on this author's machine across ~12,800 live nodes with a 166-test suite guarding the concurrency invariants. v0.2.0. LongMemEval benchmark harness is in `bench/` (in progress).
+**Is it production-ready?** It runs daily on this author's machine across ~12,800 live nodes with a 262-test suite guarding the concurrency invariants. v0.2.0. LongMemEval benchmark harness is in `bench/` (in progress).
 
 ## Roadmap
 
@@ -113,9 +113,10 @@ npm i -g @arihantdeva/heimdall
 heimdall init --harness claude-code   # or pi | codex | cursor | windsurf | all
 ```
 
-That's it for install + harness wiring (`init`, `insert` work immediately).
+That's it for install + harness wiring. `init`, `insert`, and searches over
+explicitly inserted memories work immediately.
 
-Ranked search and `doctor` need the [graft backend](https://github.com/NanoNets/Graft) — one extra step:
+Code-graph search and `doctor` need the [graft backend](https://github.com/NanoNets/Graft) — one extra step:
 
 ```bash
 # build graft from source, put the binary on PATH, then:
@@ -199,9 +200,13 @@ If Heimdall saved you a rebuild, a star helps other agents' humans find it.
                  ▼
         ~/.graft daemon (vendor/graft, built from source) — sqlite + bge-m3 embeddings + graph edges
 
+   EXPLICIT MEMORY WRITE (separate short-lived lock):
+   kb_insert / heimdall insert → atomic JSON record → ~/.heimdall/memories/mem-<uuid>.json
+
    SEARCH PATH (read side, no lock):
-   kb-search.sh → graft retrieve (hybrid ranked) → kb_search_verify.py (verdicts + stale heal)
-                → graft explore (graph walk of related work) → printed, ranked, verified
+   kb-search.sh → live manual-memory lexical search (always available)
+                + graft retrieval + optional global semantic index
+                → merged, ranked, filesystem-verified results
 ```
 
 **Core invariants** (each has a test):
@@ -248,6 +253,8 @@ Extraction is tree-sitter AST parsing via a Python bridge, **not an LLM call**: 
 | **Hints** | `bin/lib/hints.mjs` | the one channel a non-writer may use (append-only, atomic, torn-line tolerant) |
 | **Sink** | `bin/lib/sink.mjs` | projection targets: `GraftSink` (CLI) and `MemorySink` (tests/dry-run) |
 | **Ranked search** | `bin/kb-search.sh` | top-k hybrid ranked + graph walk, `--scope` filter |
+| **Explicit memory** | `bin/lib/manual-memory.mjs` | append-only atomic records + immediate lexical retrieval under `~/.heimdall/memories/` |
+| **Semantic index** | `bin/embed-index.py`, `bin/manual_memory_cards.py` | optional local embedding projection of Graft cards and explicit memories |
 | **Trust verification** | `bin/kb_search_verify.py` | content-aware STRONG/WEAK/STALE/REBUILT/REMOVED verdicts; stale self-heal |
 | **Stale pruning** | `bin/kb-stale-scan.py`, `bin/kb-rehome.sh` | full-graph sweep: deterministic rehome or log+delete |
 | **Health & telemetry** | `bin/kb-health.sh`, `bin/telemetry.sh` | daemon health, index freshness, usage stats (kb_* calls/24h, hit rate, est. time saved) |
@@ -294,10 +301,33 @@ Every adapter merges into existing config files (never clobbers your keys), is i
 heimdall search "excel tracker portfolio optimization"   # ranked + verified knowledge search
 heimdall insert --title "portfolio optimizer" \
   --body "~/work/quant-bot/src — EV-optimizer entry point" \
-  --keywords portfolio,optimize                              # record reusable work
+  --keywords portfolio,optimize --keywords decision          # record reusable work
 heimdall init --harness claude-code                      # wire into your harness (idempotent)
 heimdall doctor                                          # daemon + index health
 ```
+
+Successful insertion returns one JSON object suitable for CLI or MCP callers:
+
+```json
+{"id":"mem-5ab90a01-49a2-4e67-99aa-5365d912d984","path":"/home/me/.heimdall/memories/mem-5ab90a01-49a2-4e67-99aa-5365d912d984.json","title":"portfolio optimizer","searchable":true}
+```
+
+### Explicit memories
+
+`heimdall insert` preserves the supplied body verbatim in an immutable,
+machine-global JSON record at `~/.heimdall/memories/<mem-uuid>.json`. The
+originating absolute working directory is stored as provenance, not scope.
+Each record is written through a same-directory temporary file, flushed,
+atomically renamed, read back, and validated before success is returned. The
+memory directory is mode `0700` and records are mode `0600` on POSIX systems.
+Secret-shaped input is rejected without echoing the matched content.
+
+`heimdall search` reads these live files on every query and ranks matches in
+title, keywords, body, then originating path. This lexical lane works without
+Graft, repositories, Python embeddings, or `~/.heimdall/global.db`. A later
+`heimdall index` adds valid explicit memories to the local semantic index;
+insertion itself never waits for an embedding model. Records are append-only:
+this release intentionally provides no update or delete operation.
 
 Self-healing surface:
 
@@ -331,7 +361,7 @@ the card tree lives.
 ## Testing
 
 ```bash
-npm test            # full suite (166 tests)
+npm test            # full suite (262 tests)
 npm run typecheck   # extensions typecheck
 ```
 
@@ -349,7 +379,7 @@ The concurrency tests are the point: if the single-writer or idempotency propert
 - macOS today (launchd daemon management); Linux works with a manual daemon
 - tree-sitter-capable python for L2/L3 (`HEIMDALL_PYTHON` env, or `~/.heimdall/venv/bin/python3`, or `python3` in PATH)
 - Runtime npm deps: **zero** — `typebox`/`typescript`/`@types/node` are dev-only
-- Graft backend for `search`/`doctor` (built from `vendor/graft/`)
+- Graft backend for code-graph search and `doctor` (explicit-memory search needs no backend)
 
 ## Operations
 
@@ -376,7 +406,7 @@ MIT. Independent project — not affiliated with Graft or its authors.
 
 ## Runtime state
 
-- `~/.heimdall/` — journal, lock, hint queue, `config.json` (harness selection), adapter install records.
+- `~/.heimdall/` — journal, locks, hint queue, `config.json`, optional semantic index, and private append-only records under `memories/`.
 - `~/.graft/` — backend config (`config.yaml`), sqlite profile DB, `graftd.log`, `.last-sync` (sync-edits watermark).
 
 These are data, not build artifacts — never `rm`/`mv` over them blindly.

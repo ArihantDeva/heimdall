@@ -24,7 +24,7 @@ const SECRET_RES = [
   /\b[A-Za-z0-9+/]{40,}={0,2}\b/,
 ];
 
-const isSecret = (s) => SECRET_RES.some((re) => re.test(s));
+export const containsSecret = (s) => SECRET_RES.some((re) => re.test(s));
 
 // Ordered fact patterns over one normalized utterance. First match wins kind,
 // so the order below IS the precedence: preferences outrank generic
@@ -62,8 +62,8 @@ function makeFact(kind, rawUtterance, path, line) {
 function extractFromLine(lineText, path, line, out, meta) {
   // Secret screen runs BEFORE pattern matching and before anything is pushed:
   // a secret-shaped line can never become a fact body (FC-09/FC-10).
-  if (!lineText.trim() || isSecret(lineText)) {
-    if (isSecret(lineText)) meta.skippedSecrets++;
+  if (!lineText.trim() || containsSecret(lineText)) {
+    if (containsSecret(lineText)) meta.skippedSecrets++;
     return;
   }
   const text = nfkc(lineText); // fold compat codepoints before matching
