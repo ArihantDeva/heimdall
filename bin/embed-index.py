@@ -1,44 +1,52 @@
 #!/usr/bin/env python3
-"""embed-index.py — global semantic graph over per-repo graft cards.
-
-One sqlite-vec store (~/.heimdall/global.db) embedding every graft card
-(INDEX.md + per-file .md) across ~/Repos. Query = cosine ANN against the same
-bge-m3 embeddings. This restores the original C daemon's semantic recall
-(cross-repo, meaning-based) on top of the per-repo lexical graphs.
-
-CPU-only: bge-m3 via sentence-transformers. No LLM calls.
-Usage:
-  embed-index.py build   # (re)embed all repo cards into the global store
-  embed-index.py query "text" -n 5   # semantic search
-  embed-index.py status  # node count, freshness
-"""
+"""embed-index.py — semantic index over the whole $HOME text corpus.
+  build   : walk $HOME (junk-pruned), embed previews incrementally, upsert vec
+  query   : k-NN over vec (+ structural siblings via --related)
+  status  : JSON {files, repos, dim, dimension_ok}
+Safeguards: single-flight lock + free-RAM gates (2026-08-25 halt lesson).
+Default model BAAI/bge-small-en-v1.5 (384d): measured 34.6 files/s CPU vs
+bge-m3 4.3 files/s — m3 projected 52h at 810k scale, infeasible. Override:
+HEIMDALL_EMBED_MODEL."""
 from __future__ import annotations
 
+import contextlib
+import fcntl
+import hashlib
 import json
 import os
 import pathlib
+import re
 import sqlite3
 import subprocess
 import sys
-import fcntl
 
-import sqlite_vec
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
+try:
+    import sqlite_vec
+except ImportError:
+    sys.exit("pip install sqlite-vec into ~/.heimdall/venv first")
+
 from sentence_transformers import SentenceTransformer
 
-DB = pathlib.Path.home() / ".heimdall" / "global.db"
-REPOS = pathlib.Path.home() / "Repos"
-# Heavy model is fine again — safeguards below stop parallel stacking:
-# single-flight lock + free-RAM gate. Set HEIMDALL_EMBED_MODEL=BAAI/bge-small-en-v1.5
-# (and rebuild) to drop query RSS from ~2.1GB to ~0.5GB.
-MODEL = os.environ.get("HEIMDALL_EMBED_MODEL", "BAAI/bge-m3")
+import embed_walker
+
+discover_files = embed_walker.discover_files  # re-exported for callers/tests
+
+DB = pathlib.Path(os.environ.get("HEIMDALL_DB", str(pathlib.Path.home() / ".heimdall" / "global.db")))
+HOME_ROOT = pathlib.Path(os.environ.get("HEIMDALL_HOME", str(pathlib.Path.home())))
+REPOS = HOME_ROOT / "Repos"  # attribution only; discovery covers all of HOME_ROOT
+MODEL = os.environ.get("HEIMDALL_EMBED_MODEL", "BAAI/bge-small-en-v1.5")
 DIM = 384 if "bge-small" in MODEL else 1024
-
-# Safeguards (2026-08-25 halt): every invocation loads model weights fresh.
-# N parallel callers used to stack N × ~2GB and halt a 16GB machine.
 MIN_FREE_GB = float(os.environ.get("HEIMDALL_MIN_FREE_GB", "2"))
-BUILD_HEADROOM_GB = 4.0  # batch encode activations on top of weights
-
+BUILD_HEADROOM_GB = 4.0
+BATCH = 128
+LOCK_PATH = DB.parent / "embed-index.lock"
 MODEL_CACHE: SentenceTransformer | None = None
+
+
+class Busy(Exception):
+    """Another embed-index process holds the single-flight lock."""
 
 
 def model() -> SentenceTransformer:
@@ -55,245 +63,340 @@ def conn() -> sqlite3.Connection:
     return c
 
 
-class Busy(Exception):
-    """Another embed-index process already holds the single-flight lock."""
-
-
-LOCK_PATH = pathlib.Path.home() / ".heimdall" / "embed-index.lock"
-
-
 def _acquire_lock():
-    """Nonblocking exclusive flock; raises Busy if someone else is mid-flight.
-    ponytail: handle intentionally never closed/released — this is a one-shot
-    CLI, the OS drops the lock at process exit."""
     fh = open(LOCK_PATH, "w")
     try:
-        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         fh.close()
-        raise Busy() from None
+        raise Busy()
     return fh
 
 
 def _free_ram_gb() -> float:
-    out = subprocess.run(["vm_stat"], capture_output=True, text=True).stdout
-    pages = {}
-    for line in out.splitlines():
-        key, _, val = line.partition(":")
-        val = val.strip().rstrip(".")
-        if val.isdigit():
-            pages[key.strip()] = int(val)
-    page = 16384 if "16384" in out.splitlines()[0] else 4096
-    free = (
-        pages.get("Pages free", 0)
-        + pages.get("Pages purgeable", 0)
-        + pages.get("Pages speculative", 0)
-    ) * page / 1e9
-    return free
+    """Usable-RAM estimate via memory_pressure's free percentage × total RAM.
+    vm_stat 'Pages free' is chronically ~0 on macOS (everything is cache) and
+    false-blocked builds on an otherwise idle 16GB machine."""
+    try:
+        total = int(subprocess.run(["sysctl", "-n", "hw.memsize"],
+                                   capture_output=True, text=True).stdout.strip()) / 1e9
+        out = subprocess.run(["memory_pressure"], capture_output=True, text=True).stdout
+        m = re.search(r"free percentage:\s*(\d+)", out)
+        return total * int(m.group(1)) / 100 if m else 0.0
+    except (OSError, ValueError):
+        return 0.0
 
 
 def _ram_ok(min_gb: float, what: str) -> bool:
     free = _free_ram_gb()
-    if free >= min_gb:
-        return True
-    print(
-        f"embed-index: skipping {what} — {free:.1f}GB free RAM < {min_gb}GB "
-        "required for the heavy embed model. Retry when memory frees up.",
-        file=sys.stderr,
-    )
-    return False
+    if free < min_gb:
+        print(f"embed-index: only {free:.1f}GB free (<{min_gb}GB), skipping {what}.", file=sys.stderr)
+        return False
+    return True
+
+
+def _db_dim(c: sqlite3.Connection) -> int:
+    row = c.execute("SELECT sql FROM sqlite_master WHERE name='vec'").fetchone()
+    m = re.search(r"float\[(\d+)\]", row[0]) if row else None
+    return int(m.group(1)) if m else -1
 
 
 def init(c: sqlite3.Connection) -> None:
-    c.execute("CREATE TABLE IF NOT EXISTS cards (id TEXT PRIMARY KEY, repo TEXT, path TEXT, title TEXT, body TEXT)")
-    # distance_metric=cosine: vec0's default is L2, whose distance (sqrt(2-2cos))
-    # exceeds 1 and made `1 - distance` scores go negative while ranking stayed
-    # correct. v0.1.9 syntax: column-level `distance_metric=cosine` (no comma).
-    c.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS vec USING vec0(embedding float[{DIM}] distance_metric=cosine)")
-
-
-def cards_for(repo: pathlib.Path) -> list[tuple[str, str, str, str]]:
-    """(id, relpath, title, body) for every graft card + the source it
-    summarizes. Card bodies are symbol signatures only — embedding them loses
-    semantics — so we embed the real source text (first 3000 chars) for each
-    indexed file, which is what carries meaning."""
-    out = []
-    graft = repo / "graft"
-    if not graft.is_dir():
-        return out
-    for md in graft.rglob("*.md"):
-        if md.name == "INDEX.md":
-            continue
-        rel = md.relative_to(graft).as_posix()
-        # card body = signatures; source = real text
-        card_text = md.read_text(errors="replace")
-        src = repo / rel
-        src_text = src.read_text(errors="replace")[:3000] if src.is_file() else card_text
-        title = f"{repo.name}/{rel}"
-        out.append((f"{repo.name}:{rel}", repo.as_posix(), rel, title, src_text))
-    return out
-
-
-def build() -> int:
-    try:
-        _acquire_lock()
-    except Busy:
-        print("embed-index: another instance is running; skipping build.", file=sys.stderr)
-        raise SystemExit(1)
-    if not _ram_ok(MIN_FREE_GB + BUILD_HEADROOM_GB, "build"):
-        raise SystemExit(1)
-    c = conn()
-    init(c)
-    model_inst = model()
-    # Collect all cards first, then encode in batches — one-by-one encoding
-    # costs ~0.65s/card on CPU (23 min for 2k cards); batching cuts it ~10×.
-    all_cards: list[tuple[str, str, str, str, str]] = []
-    for repo in sorted(REPOS.glob("*")):
-        if not repo.is_dir():
-            continue
-        all_cards.extend(cards_for(repo))
-    # Prune stale rows BEFORE embedding: cards removed from disk (e.g. mailbox
-    # roll-off past the ingest limit, or a graft build regenerating graft/)
-    # otherwise linger as vec orphans that pollute k-NN results with dead paths.
-    # This sqlite-vec build keeps tombstones on rowid DELETE, so the only clean
-    # way out is dropping + recreating the whole vec table. Trigger on EITHER
-    # stale cards OR existing orphans; embeddings are rebuilt for all cards below.
-    keep = {cid for cid, *_ in all_cards}
-    stale = [(cid, rid) for (cid, rid) in c.execute("SELECT id, rowid FROM cards").fetchall() if cid not in keep]
-    orphan_vec = sum(
-        1
-        for (rid,) in c.execute("SELECT rowid FROM vec")
-        if not c.execute("SELECT id FROM cards WHERE rowid=?", (rid,)).fetchone()
-    )
-    if stale:
-        for cid, rid in stale:
-            c.execute("DELETE FROM cards WHERE rowid=?", (rid,))
-    if stale or orphan_vec or _db_dim(c) != DIM:
-        c.execute("DROP TABLE vec")
+    cols = [r[1] for r in c.execute("PRAGMA table_info(cards)")]
+    if cols and "sha1" not in cols:
+        c.execute("DROP TABLE cards")  # legacy graft-card schema: derivable, re-embedded below
+        c.execute("DROP TABLE IF EXISTS vec")
+        cols = []
+    rebuilt = False
+    if _db_dim(c) != DIM:
+        c.execute("DROP TABLE IF EXISTS vec")
         c.execute(f"CREATE VIRTUAL TABLE vec USING vec0(embedding float[{DIM}] distance_metric=cosine)")
-    B = 32
-    total = 0
-    for i in range(0, len(all_cards), B):
-        batch = all_cards[i : i + B]
-        vecs = model_inst.encode(
-            [title + " " + body[:1500] for _, _, _, title, body in batch],
-            normalize_embeddings=True,
-        )
-        for (cid, repo_path, rel, title, body), vec in zip(batch, vecs):
-            # INSERT OR REPLACE moves the row (delete+insert) → NEW rowid when
-            # the id already existed; delete any vec rows for this card id's
-            # old rowids first so no orphan shadows k-NN with a dead vector.
-            c.execute("DELETE FROM vec WHERE rowid IN "
-                      "(SELECT rowid FROM cards WHERE id=?)", (cid,))
-            c.execute("INSERT OR REPLACE INTO cards VALUES (?,?,?,?,?)", (cid, repo_path, rel, title, body))
-            row = c.execute("SELECT rowid FROM cards WHERE id=?", (cid,)).fetchone()
+        if cols:
+            c.execute("DROP TABLE cards")  # vectors gone → card bookkeeping invalid
+            rebuilt = True
+            cols = []
+    if not cols:
+        c.execute("""CREATE TABLE IF NOT EXISTS cards (
+            id TEXT PRIMARY KEY, path TEXT UNIQUE NOT NULL, title TEXT NOT NULL,
+            body TEXT NOT NULL, sha1 TEXT NOT NULL, root TEXT NOT NULL,
+            mtime REAL NOT NULL, size INTEGER NOT NULL)""")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_cards_sha1 ON cards(sha1)")
+    c.commit()
+
+
+_git_roots: dict[str, str] = {}  # ancestor dir -> enclosing project root
+
+
+def _project_root(abs_path: str) -> str:
+    """Enclosing git repo root, else first-two-segments dir. Cached per ancestor."""
+    d = os.path.dirname(abs_path)
+    hit = _git_roots.get(d)
+    if hit:
+        return hit
+    cur = d
+    root = None
+    while cur.startswith(str(HOME_ROOT)):
+        if os.path.isdir(os.path.join(cur, ".git")):
+            root = cur
+            break
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    if not root:
+        rel = pathlib.PurePosixPath(os.path.relpath(abs_path, HOME_ROOT)).parts
+        root = str(HOME_ROOT / rel[0]) if len(rel) > 1 else str(HOME_ROOT)
+    for anc in list(pathlib.PurePath(d).parents)[:8]:
+        _git_roots[str(anc)] = root
+    return root
+
+
+def _flat_vec(v: object) -> list[float]:
+    """Coerce encoder output (ndarray / nested list / list) to flat floats."""
+    if hasattr(v, "tolist"):
+        v = v.tolist()
+    if v and isinstance(v[0], (list, tuple)):
+        v = v[0]
+    return [float(x) for x in v]
+
+
+def _upsert(c: sqlite3.Connection, m, batch: list[tuple]) -> int:
+    texts = [t + "\n" + b for _, t, b, *_ in batch]
+    vecs = m.encode(texts, normalize_embeddings=True, show_progress_bar=False)
+    for (cid, rel, body, sha, mt, size), vec in zip(batch, vecs):
+        # Point-delete via indexed card lookup. The old
+        # `DELETE FROM vec WHERE rowid IN (subquery)` forced vec0Filter_fullscan
+        # per card — O(n²) across a 40k+ batch (sample()-verified stall).
+        row = c.execute("SELECT rowid FROM cards WHERE id=?", (cid,)).fetchone()
+        if row:
             c.execute("DELETE FROM vec WHERE rowid=?", (row[0],))
-            c.execute("INSERT INTO vec (rowid, embedding) VALUES (?, ?)", (row[0], json.dumps(vec.tolist())))
-            total += 1
-        c.commit()
+            c.execute("DELETE FROM cards WHERE id=?", (cid,))
+        cur = c.execute("INSERT INTO cards VALUES (?,?,?,?,?,?,?,?)",
+                        (cid, str(HOME_ROOT / rel), rel, body, sha,
+                         _project_root(str(HOME_ROOT / rel)), mt, size))
+        c.execute("INSERT INTO vec(rowid, embedding) VALUES (?,?)",
+                  (cur.lastrowid, json.dumps(_flat_vec(vec))))
+    c.commit()
+    return len(batch)
+
+
+def _persist_search_roots(graft_dirs: list[pathlib.Path]) -> None:
+    """Write every graft-bearing dir as a searchable root for kb-search.sh.
+    This is how non-Repos projects (Desktop/Documents/home-root) join lexical
+    retrieval — the old glob only ever saw ~/Repos/*/graft."""
+    # Derived from DB at call time so tests patching DB never touch prod state.
+    out_path = DB.parent / "search-roots.json"
+    roots = sorted(str(d) for d in graft_dirs if (d / "graft").is_dir())
+    out_path.write_text(json.dumps({"roots": roots}, indent=0))
+    print(f"embed-index: {len(roots)} search roots persisted -> {out_path}", flush=True)
+
+
+def _prune_stale(c: sqlite3.Connection, known: dict[str, str], seen: set[str]) -> None:
+    """Remove cards whose files vanished. sqlite-vec keeps delete-tombstones;
+    mass prunes are rare enough that per-row deletes stay correct in practice.
+    ponytail: if k-NN ever surfaces dead rows again, trigger full vec rebuild here."""
+    stale = [cid for cid in known if cid not in seen]
+    for cid in stale:
+        row = c.execute("SELECT rowid FROM cards WHERE id=?", (cid,)).fetchone()
+        if row:
+            c.execute("DELETE FROM vec WHERE rowid=?", (row[0],))
+            c.execute("DELETE FROM cards WHERE id=?", (cid,))
+    c.commit()
+
+
+def build(progress_every: int = 5000) -> int:
+    fh = _acquire_lock_or_exit()
+    try:
+        if not _ram_ok(MIN_FREE_GB + BUILD_HEADROOM_GB, "build"):
+            raise SystemExit(1)
+        c = conn()
+        try:
+            return _build_inner(c, progress_every)
+        finally:
+            c.close()
+    finally:
+        with contextlib.suppress(Exception):
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            fh.close()
+
+
+def _build_inner(c: sqlite3.Connection, progress_every: int) -> int:
+    init(c)
+    m = model()
+    graft_dirs: list[pathlib.Path] = []
+    text_paths, dataless = embed_walker.discover_files(HOME_ROOT, graft_dirs_out=graft_dirs)
+    total = 0
+    # (sha1, mtime, size) per existing card: mtime+size fast-path avoids
+    # re-reading/hashing ~700k unchanged files every incremental build.
+    known = {r[0]: (r[1], r[2], r[3]) for r in c.execute("SELECT id, sha1, mtime, size FROM cards")}
+    claimed: set[str] = set(known.values())  # sha1 dedupe across whole corpus
+    seen: set[str] = set()
+
+    # Dataless iCloud placeholders: name-only card, no read → no download.
+    # A later materialized file gets real content + content-sha and replaces
+    # the name-only card naturally on the next incremental pass.
+    batch: list[tuple] = []
+    for p in dataless:
+        cid = "f:" + str(p)
+        rel = str(p.relative_to(HOME_ROOT))
+        seen.add(cid)
+        prev = known.get(cid)
+        if prev and prev[0].startswith("dataless:"):
+            claimed.add(prev[0])
+            continue  # name-only card already present
+        body = f"[dataless placeholder — filename only, content in iCloud]\n{p.name}"
+        sha = "dataless:" + hashlib.sha1(str(p).encode()).hexdigest()
+        claimed.add(sha)
+        batch.append((cid, rel, body, sha, 0.0, 0))
+        if len(batch) >= BATCH:
+            total += _upsert(c, m, batch)
+            batch = []
+
+    milestone = 0
+    for p in text_paths:
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        cid = "f:" + str(p)
+        rel = str(p.relative_to(HOME_ROOT))
+        prev = known.get(cid)
+        if prev and prev[1] == st.st_mtime and prev[2] == st.st_size:
+            claimed.add(prev[0])
+            seen.add(cid)
+            continue  # mtime+size unchanged since last build — no re-read
+        body = embed_walker.read_preview(p)
+        if not body.strip():
+            continue
+        sha = hashlib.sha1(body.encode()).hexdigest()
+        if sha in claimed and (not prev or prev != sha):
+            continue  # identical content already indexed elsewhere
+        claimed.add(sha)
+        seen.add(cid)
+        if prev == sha:
+            continue  # unchanged since last build
+        batch.append((cid, rel, body[:3000], sha, st.st_mtime, st.st_size))
+        if len(batch) >= BATCH:
+            total += _upsert(c, m, batch)
+            batch = []
+            if total // progress_every > milestone:
+                milestone = total // progress_every
+                print(f"embed-index: {total}/{len(text_paths)} embedded", flush=True)
+    total += _upsert(c, m, batch)
+    _prune_stale(c, known, seen)
+    _persist_search_roots(graft_dirs)
+    print(f"embed-index: done — {total} embedded ({len(dataless)} name-only), "
+          f"{len(seen)} tracked, {len(text_paths) + len(dataless)} discovered", flush=True)
     return total
+
+
+def _acquire_lock_or_exit():
+    try:
+        return _acquire_lock()
+    except Busy:
+        print("embed-index: another instance is running; skipping.", file=sys.stderr)
+        raise SystemExit(1)
+
+
+def _siblings(c: sqlite3.Connection, top_path: str, out: list[dict]) -> None:
+    """Structural second pass: same-directory neighbors of the top hit."""
+    parent = pathlib.Path(top_path).parent
+    if not parent.is_dir():
+        return
+    have = {o["path"] for o in out}
+    for sib in sorted(parent.iterdir())[:20]:
+        if sib.is_file() and str(sib) not in have:
+            out.append({"path": str(sib), "title": sib.name, "score": 0.0, "related": True})
 
 
 def query(q: str, n: int = 5, related: bool = False) -> list[dict]:
     global MODEL, DIM
     c = conn()
     db_d = _db_dim(c)
-    if DIM != db_d:
-        # Index was built with another model (e.g. heavy rebuild gated on RAM
-        # while a lighter index exists). Adapt to the index so search keeps
-        # working; `build` is the only path that changes dims.
-        DIM = db_d
+    if db_d < 0:
+        return []
+    if DIM != db_d:  # adapt to index; build is the only path that changes dims
         MODEL = "BAAI/bge-small-en-v1.5" if db_d == 384 else "BAAI/bge-m3"
-        if db_d < 0:
-            print("[]")  # ponytail: no vec table yet; run embed-index.py build
-            return []
+        DIM = db_d
     try:
         _acquire_lock()
     except Busy:
-        # Degrade gracefully: kb-search.sh still has lexical hits. Only lines
-        # starting with '[' are consumed, so stderr notes are safe here.
-        print("embed-index: another instance holds the model; semantic layer skipped this call.", file=sys.stderr)
-        return []
-    if not _ram_ok(MIN_FREE_GB, "query"):
-        return []
-    vec = model().encode(q, normalize_embeddings=True).tolist()
-    rows = c.execute(
-        "SELECT rowid, distance FROM vec WHERE embedding MATCH ? AND k = ?",
-        (json.dumps(vec), n),
-    ).fetchall()
-    out = []
-    for rowid, dist in rows:
-        card = c.execute("SELECT id, repo, path, title FROM cards WHERE rowid=?", (rowid,)).fetchone()
-        if card:
-            # card path is graft/<file>.md → map back to the real source file.
-            # graft/<x>.md with no sibling <x>.<ext> means the card IS the source
-            # (email ingestion cards live at graft/mail/...) — keep graft/ prefix.
-            src = pathlib.Path(card[2])
-            if src.suffix == ".md":
-                base = src.with_suffix("")
-                repo_dir = pathlib.Path(card[1])
-                found = None
-                for ext in (".js", ".mjs", ".ts", ".py", ".sh", ".c", ".cpp", ""):
-                    cand = repo_dir / (str(base) + ext)
-                    if cand.is_file():
-                        found = cand
-                        break
-                if found:
-                    src = pathlib.Path(os.path.relpath(found, repo_dir))
-                else:
-                    # No sibling source: the card IS the content (email ingestion
-                    # cards live at graft/mail/...) — point at the card itself.
-                    src = pathlib.Path("graft") / src
-            out.append({"id": card[0], "repo": card[1], "path": str(src), "title": card[3], "score": 1.0 - dist})
-    # Structural second pass (issue #1): siblings of top hits in the same
-    # repo directory — same module, same feature area — regardless of score.
-    # Score-cutoff false-negatives get rescued by file structure.
-    if related and out:
-        seen = {o["path"] for o in out}
-        top = out[0]
-        parent = pathlib.Path(top["repo"]) / pathlib.Path(top["path"]).parent
-        if parent.is_dir():
-            for sibling in sorted(parent.iterdir()):
-                if sibling.is_file() and sibling.suffix in (".py", ".js", ".mjs", ".ts", ".sh", ".c", ".cpp"):
-                    rel = sibling.relative_to(top["repo"]).as_posix()
-                    if rel not in seen:
-                        out.append({"id": f"sib-{rel}", "repo": top["repo"], "path": rel,
-                                    "title": sibling.name, "score": 0.0, "related": True})
-    c.close()
-    return out
-
-
-def _db_dim(c: sqlite3.Connection) -> int:
-    row = c.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='vec'"
-    ).fetchone()
-    if not row or not row[0]:
-        return -1
-    import re
-
-    m = re.search(r"float\[(\d+)\]", row[0])
-    return int(m.group(1)) if m else -1
+        print("embed-index: busy; semantic skipped this call.", file=sys.stderr)
+        sys.exit(3)  # loud: caller banners lexical-only degradation
+    try:
+        if not _ram_ok(MIN_FREE_GB, "query"):
+            sys.exit(3)  # loud: rc!=0 makes kb-search.sh banner the degradation
+        vec = _flat_vec(model().encode(q, normalize_embeddings=True))
+        rows = c.execute("SELECT rowid, distance FROM vec WHERE embedding MATCH ? AND k = ?",
+                         (json.dumps(vec), n)).fetchall()
+        out = []
+        for rowid, dist in rows:
+            card = c.execute("SELECT title, path, root FROM cards WHERE rowid=?", (rowid,)).fetchone()
+            if card:
+                out.append({"title": card[0], "path": card[1], "repo": card[2],
+                            "score": round(1.0 - dist, 4)})
+        if related and out:
+            _siblings(c, out[0]["path"], out)
+        return out
+    finally:
+        c.close()
 
 
 def status() -> dict:
     c = conn()
-    n = c.execute("SELECT COUNT(*) FROM cards").fetchone()[0]
-    repos = c.execute("SELECT COUNT(DISTINCT repo) FROM cards").fetchone()[0]
+    init(c)
+    files = c.execute("SELECT COUNT(*) FROM cards").fetchone()[0]
+    repos = sorted({r[0] for r in c.execute("SELECT DISTINCT root FROM cards")})
+    d = _db_dim(c)
     c.close()
-    return {"cards": n, "repos": repos}
+    return {"files": files, "repos": repos, "dim": d, "dimension_ok": d == DIM}
+
+
+def insert_card(card_path: str) -> int:
+    """Upsert one markdown card (from `heimdall insert`) into the live index.
+    Single encode, immediate k-NN visibility; no full walk."""
+    p = pathlib.Path(card_path).resolve()
+    home_root = HOME_ROOT.resolve()  # macOS /tmp → /private/tmp symlink safety
+    if not p.is_file():
+        print(f"embed-index: no such card: {p}", file=sys.stderr)
+        return 1
+    fh = _acquire_lock_or_exit()
+    try:
+        if not _ram_ok(MIN_FREE_GB, "insert-card"):
+            return 1
+        c = conn()
+        init(c)
+        body = embed_walker.read_preview(p)
+        rel = str(p.relative_to(home_root))
+        sha = hashlib.sha1(body.encode()).hexdigest()
+        st = p.stat()
+        n = _upsert(c, model(), [("f:" + str(p), rel, body[:3000], sha, st.st_mtime, st.st_size)])
+        print(f"embed-index: card indexed ({n})")
+        return 0
+    finally:
+        with contextlib.suppress(Exception):
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            fh.close()
+
+
+def main(argv: list[str]) -> int:
+    cmd = argv[0] if argv else "status"
+    if cmd == "build":
+        build()
+    elif cmd == "insert-card":
+        raise SystemExit(insert_card(argv[1]))
+    elif cmd == "query":
+        args = argv[1:]
+        n = int(args[args.index("-n") + 1]) if "-n" in args else 5
+        q = next(a for a in args if not a.startswith("-") and a != str(n))
+        hits = query(q, n=n, related="--related" in args)
+        for h in hits:
+            t = h["title"] + (" ·related" if h.get("related") else "")
+            print(f'[{h["score"]}] {t} — {h["path"]}')
+    else:
+        print(json.dumps(status()))
+    return 0
 
 
 if __name__ == "__main__":
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
-    if cmd == "build":
-        n = build()
-        print(f"embedded {n} cards")
-    elif cmd == "query":
-        q = sys.argv[2]
-        n = int(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[3] == "-n" else 5
-        related = "--related" in sys.argv
-        for r in query(q, n, related):
-            tag = " ·related" if r.get("related") else ""
-            print(f"  [{r['score']:.2f}] {r['title']}{tag} — {os.path.join(r['repo'], r['path'])}")
-    elif cmd == "status":
-        print(json.dumps(status()))
+    raise SystemExit(main(sys.argv[1:]))

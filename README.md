@@ -98,6 +98,7 @@ Heimdall is the only one built for the actual workflow: many repos, many months,
 - [x] v0.1 — packaged CLI, five harness adapters, trust verdicts
 - [x] v0.2 — single-writer reconciler, depth-ladder indexing (symbols + call edges)
 - [ ] LongMemEval-S score ≥ 0.90 published from `bench/` (baseline S 0.740 reproduced)
+- [ ] LongMemEval-M full reader/judge run published (S subset is token-free recall only — not end-to-end)
 - [ ] One-command graft backend install (`heimdall init --backend`)
 - [ ] Linux daemon packaging
 - [ ] MCP server mode
@@ -200,8 +201,10 @@ If Heimdall saved you a rebuild, a star helps other agents' humans find it.
         ~/.graft daemon (vendor/graft, built from source) — sqlite + bge-m3 embeddings + graph edges
 
    SEARCH PATH (read side, no lock):
-   kb-search.sh → graft retrieve (hybrid ranked) → kb_search_verify.py (verdicts + stale heal)
-                → graft explore (graph walk of related work) → printed, ranked, verified
+   kb-search.sh → graft ask per repo (per-repo code graphs, --json) + embed-index.py query (global semantic)
+                → merged, deduped → verdict pass in-process (STRONG / WEAK / NOPATH)
+                → optional graft explore (graph walk of related work) → printed, ranked
+   (kb_search_verify.py targets the retired global `graft retrieve` daemon API; kept for history.)
 ```
 
 **Core invariants** (each has a test):
@@ -247,8 +250,8 @@ Extraction is tree-sitter AST parsing via a Python bridge, **not an LLM call**: 
 | **Single-writer lock** | `bin/lib/lock.mjs` | `O_EXCL` lock every graph mutation passes through |
 | **Hints** | `bin/lib/hints.mjs` | the one channel a non-writer may use (append-only, atomic, torn-line tolerant) |
 | **Sink** | `bin/lib/sink.mjs` | projection targets: `GraftSink` (CLI) and `MemorySink` (tests/dry-run) |
-| **Ranked search** | `bin/kb-search.sh` | top-k hybrid ranked + graph walk, `--scope` filter |
-| **Trust verification** | `bin/kb_search_verify.py` | content-aware STRONG/WEAK/STALE/REBUILT/REMOVED verdicts; stale self-heal |
+| **Ranked search** | `bin/kb-search.sh` | top-k hybrid (per-repo `graft ask` + global semantic) merged + verdict pass in-process, `--scope` filter |
+| **Trust verification** | `bin/kb_search_verify.py` | legacy verifier retained for the mnemosyne backend path; the graft backend's verdicts are computed in kb-search.sh |
 | **Stale pruning** | `bin/kb-stale-scan.py`, `bin/kb-rehome.sh` | full-graph sweep: deterministic rehome or log+delete |
 | **Health & telemetry** | `bin/kb-health.sh`, `bin/telemetry.sh` | daemon health, index freshness, usage stats (kb_* calls/24h, hit rate, est. time saved) |
 | **Bootstrap** | `bin/sync-edits.sh`, `bin/seed-graft.sh` | replay session edit logs → hints; seed inventory TSV into Graft |
@@ -261,6 +264,17 @@ Extraction is tree-sitter AST parsing via a Python bridge, **not an LLM call**: 
 | **Backends** | `vendor/graft/` (Apache 2.0), `vendor/graphify/` (MIT) | Graft = semantic-memory daemon; graphify = code-graph extractors |
 
 **Backends are pluggable.** Any store speaking the graft CLI contract works; Graft is the vendored reference. See `docs/heimdall_compare.dot/png` for the graphify vs Graft vs Heimdall positioning (graphify answers *codebase* questions, Graft persists *notes/facts* across projects, Heimdall ties them together with trust verdicts and self-healing).
+
+## Fact layer (experimental)
+
+The `heimdall insert` fact cards and the runtime extractor (`bin/lib/facts.mjs`) are **experimental**:
+
+- English-pattern extraction only — non-English utterances yield zero facts (deliberate ceiling, marked in source).
+- Extracted facts can contradict each other; no contradiction resolution yet.
+- The prompt-capture adapter named in the design spec is not part of the published package.
+- Secret filtering and per-source ownership are solid; the *interpretation* layer is what's young.
+
+Treat fact output as leads to verify, not verified memory. The reconciled code-graph layer carries the trust guarantees.
 
 ## Harness integration
 

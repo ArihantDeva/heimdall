@@ -275,7 +275,14 @@ static mg_err_t embed_instance_text(struct mg_embed_instance *inst,
 
   vocab = llama_model_get_vocab(model);
   n_tokens = llama_tokenize(vocab, text, text_len, tokens, inst->n_ctx, true, false);
-  if (n_tokens < 0 || n_tokens > inst->n_ctx) {
+  if (n_tokens > inst->n_ctx) {
+    /* Config documents longer inputs as truncated ("longer inputs get
+     * truncated, hurting recall"). Honor that: clamp to the context
+     * window instead of failing the whole insert — a truncated embedding
+     * beats a lost node. */
+    n_tokens = inst->n_ctx;
+  }
+  if (n_tokens < 0) {
     err = MG_ERR_EMBED;
     goto done;
   }

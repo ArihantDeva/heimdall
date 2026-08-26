@@ -32,11 +32,14 @@ export class MemorySink {
 
 /** Graft-backed sink (NanoNets per-repo graph).
  *
- * The current @nanonets/graft product is a per-repo code-graph builder:
- * `graft build` (ingest) and `graft ask --json` (retrieval). There is no
- * global daemon API anymore. So the sink keeps the journal as the
- * authoritative index and uses `graft build` as the projection target for
- * each watched repo; retrieval runs `graft ask` per repo (see kb-search.sh).
+ * WRITE/RETRIEVE SPLIT (intentional; end-to-end proof lives in
+ * tests/e2e-fixture.test.mjs): the journal is the authoritative index of what
+ * should exist; `graft build` is a separate idempotent projection step that
+ * regenerates each watched repo's graph from disk (run by `index-bootstrap`
+ * / `heimdall index`, not per insert). Retrieval runs `graft ask --json` per
+ * repo (see kb-search.sh). Consequence: insert() returns a deterministic
+ * content-hash id and performs no I/O — durability comes from the journal,
+ * visibility comes from the next build.
  */
 export class GraftSink {
   constructor(bin = process.env.GRAFT || join(homedir(), ".local", "bin", "graft")) {

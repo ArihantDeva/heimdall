@@ -56,16 +56,40 @@ async function runInsert(args) {
     console.error("usage: heimdall insert --title T --body B [--keywords k1,k2]");
     return 1;
   }
-  // @nanonets/graft has no `insert` — the journal is authoritative and the
-  // per-repo graph is rebuilt by `graft build`. Record the intent in the
-  // journal (hint queue) so the reconciler picks it up. (No graft binary
-  // required for insert — journal-only.)
+  // Materialize the fact where retrieval can see it: a markdown card under
+  // ~/heimdall-notes/facts/ (inside $HOME, outside any repo source tree, so
+  // graft builds and the embed walker both pick it up). The journal hint is
+  // still emitted for reconciliation, but the file IS the durable record —
+  // the old cwd-relative .fact.md target was never written by anything.
+  const FACTS_DIR = join(os.homedir(), "heimdall-notes", "facts");
+  let factPath = "";
+  try {
+    mkdirSync(FACTS_DIR, { recursive: true });
+    const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 80);
+    const stamp = new Date().toISOString().slice(0, 10);
+    factPath = join(FACTS_DIR, `${stamp}-${slug || "fact"}.md`);
+    const kw = kws.length ? `keywords: ${kws.join(", ")}\n` : "";
+    const card = `# ${title}\n\n${kw}\n${body}\n\n(recorded ${new Date().toISOString()})\n`;
+    writeFileSync(factPath, card, "utf8");
+    console.log(`fact recorded: ${factPath}`);
+    // Immediate semantic visibility: upsert just this card into the live
+    // index (cheap single encode; skips waiting for the next full build).
+    try {
+      spawnSync(join(os.homedir(), ".heimdall", "venv", "bin", "python3"),
+                [BIN("embed-index.py"), "insert-card", factPath], { stdio: "ignore", timeout: 120_000 });
+    } catch (e) {
+      console.error(`WARN: semantic indexing of fact deferred (lands on next embed build): ${e.message?.split("\n")[0] ?? e}`);
+    }
+  } catch (e) {
+    console.error(`ERROR: could not write fact: ${e.message?.split("\n")[0] ?? e}`);
+    return 1;
+  }
+  // Journal intent for the reconciler (unchanged contract).
   try {
     const { emitHint } = await import("./hints.mjs");
     const { queueHintPath } = await import("./depth.mjs");
     const hintFile = queueHintPath();
-    const target = join(process.cwd(), title.replace(/[^a-zA-Z0-9_.-]/g, "_") + ".fact.md");
-    emitHint(hintFile, target, "insert:" + title);
+    emitHint(hintFile, factPath, "insert:" + title);
   } catch (e) {
     console.error(`ERROR: hint failed: ${e.message?.split("\n")[0] ?? e}`);
     return 1;

@@ -125,7 +125,7 @@ else
 	fi
 fi
 
-if [ ${#REPO_LIST[@]} -eq 0 ]; then
+if [ ${#REPO_LIST[@]} -eq 0 ] && [ -z "${SCOPE:-}" ]; then
 	# Fresh install / no indexed repos yet: valid empty answer (exit 0), with
 	# setup guidance in-band. Exit 1 here broke MCP kb_search (isError) on CI.
 	echo "No repos with a graft graph found under ~/Repos yet. Index one: cd <repo> && heimdall index (or graft build). Search returns no hits until then."
@@ -135,7 +135,43 @@ fi
 # Merge JSON hits from every repo into one JSON array shaped like graft
 # retrieve results: {result:{results:[{title,score,id_hex}]}} with paths.
 # PLUS global semantic hits from embed-index.py.
-python3 - "$Q" "$N" "$SCRIPT_DIR" "${REPO_LIST[@]}" <<'PYEOF'
+# SCOPE-AWARE ROOT EXPANSION: --scope poker must also search non-Repos roots
+# whose path contains 'poker' (e.g. ~/poker-bot). Roots persisted by
+# embed-index.py build in ~/.heimdall/search-roots.json enumerate every
+# graft-bearing project on the volume — not just ~/Repos/*/graft.
+ALL_ROOTS=$(mktemp)
+{
+	# bash 3.2 + set -u: "${ARR[@]}" on an empty array aborts as unbound —
+	# guard with length check (reviewer finding, empirically confirmed).
+	[ ${#REPO_LIST[@]} -gt 0 ] && printf '%s\n' "${REPO_LIST[@]}"
+	[ -f "$HOME/.heimdall/search-roots.json" ] && \
+		python3 -c 'import json,sys; [print(r) for r in json.load(open(sys.argv[1]))["roots"]]' \
+			"$HOME/.heimdall/search-roots.json"
+} | sort -u > "$ALL_ROOTS"
+
+if [ -n "${SCOPE:-}" ]; then
+	SCOPE_ROOTS=$(rg -i -- "${SCOPE}" "$ALL_ROOTS" || true)
+else
+	SCOPE_ROOTS="$(cat "$ALL_ROOTS")"
+fi
+rm -f "$ALL_ROOTS"
+# SCOPE_ROOTS may be unset when the scope branch produced nothing; default it.
+SCOPE_ROOTS="${SCOPE_ROOTS:-}"
+if [ -z "$SCOPE_ROOTS" ]; then
+	echo "No indexed roots match scope '${SCOPE}'. Known scopes include path substrings of any graft-bearing project (try: heimdall search '<q>' without --scope)."
+	exit 0
+fi
+
+# Paths may contain spaces (~/My Projects/app) — expand newline-separated
+# entries to an argv array, with globbing off. bash 3.2 compatible; the
+# empty case already exited above so "${ROOT_ARGS[@]}" is never unbound.
+set -f
+ROOT_ARGS=()
+while IFS= read -r root; do
+	[ -n "$root" ] && ROOT_ARGS+=("$root")
+done <<< "$SCOPE_ROOTS"
+
+python3 - "$Q" "$N" "$SCRIPT_DIR" "${ROOT_ARGS[@]}" <<'PYEOF'
 import json, os, subprocess, sys
 
 q = sys.argv[1]
@@ -161,7 +197,10 @@ for repo in repos:
                 "body": f"{h.get('snippet','')} [{full}]",
                 "path": full,
             })
-    except Exception:
+    except Exception as e:
+        # Per-repo graft failure must not kill the whole search, but must be
+        # visible (2026-08-25 silent-swallow lesson).
+        print(f"WARN: graft ask failed for {repo}: {e}", file=sys.stderr)
         continue
 # Global semantic hits (bge-m3): append as top-ranked candidates.
 # embed-index.py lives next to kb-search.sh; the shell passes SCRIPT_DIR in
@@ -174,8 +213,16 @@ venv_py = os.path.expanduser("~/.heimdall/venv/bin/python3")
 if os.path.exists(venv_py) and os.path.exists(os.path.expanduser("~/.heimdall/global.db")) and os.path.exists(sem):
     try:
         out = subprocess.run([venv_py, sem, "query", q, "-n", str(n), "--related"],
-                             capture_output=True, text=True, timeout=90).stdout
-        for line in out.splitlines():
+                             capture_output=True, text=True, timeout=90)
+        if out.returncode != 0:
+            # LOUD by design (2026-08-25 dim-mismatch lesson): a dead semantic
+            # layer must be visible to the caller, not a stderr whisper. The
+            # lexical hits still print below, but the banner rides with them.
+            tail_lines = [ln for ln in out.stderr.splitlines() if ln.strip()][-3:]
+            print("ERROR: semantic layer failed — results are LEXICAL-ONLY:")
+            for ln in tail_lines:
+                print(f"  {ln}")
+        for line in out.stdout.splitlines():
             line = line.strip()
             if not line.startswith("[") or "—" not in line:
                 continue
@@ -227,8 +274,12 @@ for i, r in enumerate(merged, 1):
                 matched += 1
         cov = round(matched / len(q_toks), 2)
     verdict = "STRONG" if exists and cov >= 0.5 else ("WEAK" if exists else "NOPATH")
-    if r.get("semantic") and exists:
-        verdict = "STRONG"  # semantic similarity already proves relevance
+    if r.get("semantic") and exists and verdict == "WEAK" and cov > 0:
+        # Semantic similarity proves relevance, not liveness: an existing path
+        # whose content matches NO query token stays WEAK; any (>0) lexical
+        # corroboration lets the semantic signal carry it to STRONG. Never
+        # upgrades NOPATH — a dead anchor must not look trustworthy.
+        verdict = "STRONG"
     print(f"{i:>2}. [{verdict:<6}] cov{int(cov*100):02d}%  {p}")
     print(f"      {r['title']}")
 PYEOF

@@ -30,6 +30,11 @@ sys.path.insert(0, VENDOR)
 DISPATCH = {
     ".py": "extract_python",
     ".js": "extract_js", ".jsx": "extract_js",
+    # .mts/.cts deliberately absent: vendored extract_js only selects the TS
+    # grammar for .ts/.tsx — routing here would parse TS lossily under the JS
+    # grammar (plausible-but-wrong symbols beat an honest L1 degrade). Add
+    # them when the vendored extractor learns the suffix split.
+    ".mjs": "extract_js", ".cjs": "extract_js",
     ".ts": "extract_js", ".tsx": "extract_js",
     ".go": "extract_go",
     ".rs": "extract_rust",
