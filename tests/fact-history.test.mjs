@@ -143,11 +143,14 @@ test("deleting the source archives its facts with NULL superseded_by", () => {
     assert.equal(hist[0].superseded_by, null, "no successor exists — no invented causality");
     assert.ok(hist[0].label?.length || hist[0].symbol?.length || hist[0].node_id, "row carries identity");
 
-    // Re-adding the file must not resurrect or duplicate history rows.
+    // Re-adding identical content resurrects the same fact id — its archived
+    // row MUST be purged (C3 review H1): the belief is live again, so keeping
+    // an [INVALIDATED] row would make the "not advice" footer a lie.
     writeFileSync(p, JSON.stringify({ text: "I favor small modules." }) + "\n");
     s.journal.enqueue(p, "t");
     drain(s.ctx);
-    assert.equal(s.journal.factHistory(p).length, 1, "re-index does not grow the trail");
+    assert.equal(s.journal.ownedNodes(p).filter((n) => n.kind === "fact").length, 1, "fact live again");
+    assert.equal(s.journal.factHistory(p).length, 0, "resurrection purges stale archive rows");
   } finally { s.cleanup(); }
 });
 
@@ -304,4 +307,78 @@ test("`heimdall history PATH` prints newest-first [INVALIDATED] rows + not-advic
     assert.notEqual(bad.status, 0);
     assert.match(bad.stderr, /unknown option.*--bogus/i);
   } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+// C3 review M3: the deliberate-semantics branches must be pinned by tests.
+
+test("noisy churn (2 out, 1 in) archives rows with superseded_by NULL", () => {
+  const s = sandbox();
+  s.ctx.config.facts = true;
+  try {
+    const p = factsFile(s, "churn.jsonl", [
+      "I always use vim keybindings.",
+      "I prefer tea over coffee.",
+    ]);
+    s.journal.enqueue(p, "t");
+    drain(s.ctx);
+    assert.equal(s.journal.ownedNodes(p).filter((n) => n.kind === "fact").length, 2);
+
+    // Replace both with one different fact: 2-out-1-in → replacement must be
+    // NULL (no provable 1:1 causality).
+    writeFileSync(p, [JSON.stringify({ text: "I never skip code review." })].join("\n") + "\n");
+    s.journal.enqueue(p, "t");
+    drain(s.ctx);
+
+    const hist = s.journal.factHistory(p);
+    assert.equal(hist.length, 2, "both outgoing facts archived");
+    for (const r of hist) {
+      assert.equal(r.superseded_by, null, `noisy churn must NOT link a replacement (got ${r.superseded_by})`);
+    }
+  } finally { s.cleanup(); }
+});
+
+test("archived rows carry the fact text (v3 columns)", () => {
+  const s = sandbox();
+  s.ctx.config.facts = true;
+  try {
+    const p = factsFile(s, "text.jsonl", ["I always deploy on Fridays only."]);
+    s.journal.enqueue(p, "t");
+    drain(s.ctx);
+
+    rmSync(p);
+    s.journal.enqueue(p, "t");
+    drain(s.ctx);
+
+    const hist = s.journal.factHistory(p);
+    assert.equal(hist.length, 1);
+    // B1: history without text cannot answer "what did we believe".
+    assert.match(String(hist[0].fact_title), /deploy on Fridays/i,
+      "fact_title must be archived with the row");
+    assert.ok(String(hist[0].fact_body || "").length > 0, "fact_body archived");
+  } finally { s.cleanup(); }
+});
+
+test("resurrected fact purges its stale archived rows (H1)", () => {
+  const s = sandbox();
+  s.ctx.config.facts = true;
+  try {
+    const p = factsFile(s, "res.jsonl", ["I usually review PRs within 24h."]);
+    s.journal.enqueue(p, "t");
+    drain(s.ctx);
+
+    // Delete → archive.
+    rmSync(p);
+    s.journal.enqueue(p, "t");
+    drain(s.ctx);
+    assert.equal(s.journal.factHistory(p).length, 1, "archived on delete");
+
+    // Re-create identical content → same fact id returns. The stale archive
+    // row must be purged, or history lists a LIVE belief as INVALIDATED.
+    factsFile(s, "res.jsonl", ["I usually review PRs within 24h."]);
+    s.journal.enqueue(p, "t");
+    drain(s.ctx);
+    assert.equal(s.journal.ownedNodes(p).filter((n) => n.kind === "fact").length, 1, "fact is live again");
+    assert.equal(s.journal.factHistory(p).length, 0,
+      "stale invalidated row purged on resurrection — footer stays truthful");
+  } finally { s.cleanup(); }
 });

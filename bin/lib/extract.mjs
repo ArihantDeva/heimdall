@@ -56,6 +56,10 @@ function appendFactState(nodes, edges, buf, path, fileNodeId, enabled) {
       kind: "fact",
       title: f.title,
       body: f.body,
+      // Journal columns (C3 review B1): the text must survive in the journal
+      // so the history trail can answer "what did we believe".
+      fact_title: f.title,
+      fact_body: f.body,
       keywords: f.keywords,
       line: f.line,
     });

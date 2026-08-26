@@ -50,6 +50,22 @@ def _sniff(p: pathlib.Path) -> bool:
         return False
 
 
+# Name-based skips: generated/dependency-lock noise with zero retrieval value
+# (huge, duplicated across every project, pollutes k-NN with near-identical
+# vectors). Everything here is text and would otherwise pass the sniffs.
+SKIP_NAMES = {
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock",
+    "Pipfile.lock", "Cargo.lock", "composer.lock", "Gemfile.lock",
+    "flake.lock", "bun.lockb", "deno.lock", "npm-shrinkwrap.json",
+}
+SKIP_SUFFIXES = {".min.js", ".min.css", ".map", ".d.ts"}
+MIN_PREVIEW_CHARS = 24  # near-empty previews carry no signal worth a vector
+
+
+def _name_skipped(p: pathlib.Path) -> bool:
+    return p.name in SKIP_NAMES or p.name.endswith(tuple(SKIP_SUFFIXES))
+
+
 def discover_files(root: pathlib.Path, graft_dirs_out=None):
     """Classify every regular file under root. Returns (text_files, dataless).
 
@@ -97,6 +113,8 @@ def discover_files(root: pathlib.Path, graft_dirs_out=None):
                         dataless.append(p)
                     continue
                 if st.st_size == 0:
+                    continue
+                if _name_skipped(p):
                     continue
                 if os.path.splitext(name)[1].lower() in TEXT_EXTS:
                     known.append(p)

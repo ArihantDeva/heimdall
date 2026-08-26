@@ -95,7 +95,7 @@ CREATE INDEX IF NOT EXISTS fact_history_path ON fact_history(path, invalidated_a
 // SCHEMA is CREATE .*IF NOT EXISTS / guarded ALTER, so replaying is a no-op on
 // an up-to-date database and brings an old one up to date; the version stamp
 // only records how far the file has been migrated.
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 // Retention: keep at most this many history rows per source path (newest
 // win). Fact trails are dominated by line-shift noise on actively-edited
@@ -123,11 +123,25 @@ export class Journal {
       // corruption) must surface — audit would crash later with a worse error.
       if (!/duplicate column/i.test(String(err?.message))) throw err;
     }
-    // Versioned additive migration stamp: only ever moves forward. An old
-    // binary opening a newer database must not silently downgrade the record.
+    // Versioned additive migration stamp: only ever moves forward. A NEWER
+    // database opened by an OLDER binary keeps its higher version stamp
+    // untouched (additive migrations replay as no-ops); this binary simply
+    // doesn't know about newer columns. (C3 review M2: comment previously
+    // overclaimed a downgrade guard that was never implemented.)
     const ver = Number(this.db.prepare(`PRAGMA user_version`).get()?.user_version ?? 0);
     if (ver < SCHEMA_VERSION) {
       this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    }
+    // v3 migration (C3 review B1): fact text must live in the journal so the
+    // history trail can answer "what did we believe". Additive, nullable;
+    // pre-v3 rows backfill nothing — that text is unrecoverable.
+    try {
+      this.db.exec("ALTER TABLE owned_nodes ADD COLUMN fact_title TEXT");
+      this.db.exec("ALTER TABLE owned_nodes ADD COLUMN fact_body TEXT");
+      this.db.exec("ALTER TABLE fact_history ADD COLUMN fact_title TEXT");
+      this.db.exec("ALTER TABLE fact_history ADD COLUMN fact_body TEXT");
+    } catch (err) {
+      if (!/duplicate column/i.test(String(err?.message))) throw err;
     }
   }
 
@@ -302,9 +316,16 @@ export class Journal {
       );
       const addedIds = [...incomingFactIds].filter((id) => !priorFactIds.has(id));
       const outgoingFacts = db
-        .prepare(`SELECT node_id, kind, symbol, line, label FROM owned_nodes WHERE path = ? AND kind = 'fact'`)
+        .prepare(`SELECT node_id, kind, symbol, line, label, fact_title, fact_body FROM owned_nodes WHERE path = ? AND kind = 'fact'`)
         .all(o.path)
         .filter((r) => !incomingFactIds.has(r.node_id));
+      // H1 (C3 review): a fact whose node_id REAPPEARS in incoming after being
+      // archived (delete → re-add same content) is live again — its archived
+      // row is stale and must be purged so the "not advice" footer stays
+      // truthful. Runs unconditionally: on a pure resurrection outgoing is
+      // empty, which is exactly when the stale row would otherwise survive.
+      db.prepare(`DELETE FROM fact_history WHERE path = ? AND node_id IN (
+        SELECT json_each.value FROM json_each(?))`).run(o.path, JSON.stringify([...incomingFactIds]));
       if (outgoingFacts.length) {
         // superseded_by is recorded ONLY when exactly one fact left and
         // exactly one GENUINELY NEW fact took its place on the same path.
@@ -315,14 +336,15 @@ export class Journal {
             ? addedIds[0]
             : null;
         const insHistory = db.prepare(
-          `INSERT INTO fact_history (node_id, path, kind, symbol, line, label, invalidated_at, superseded_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO fact_history (node_id, path, kind, symbol, line, label, invalidated_at, superseded_by, fact_title, fact_body)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         );
         const nowIso = new Date().toISOString();
         for (const r of outgoingFacts) {
           insHistory.run(
             r.node_id, o.path, r.kind, r.symbol ?? null,
             r.line ?? null, r.label ?? null, nowIso, replacement,
+            r.fact_title ?? null, r.fact_body ?? null,
           );
         }
         // Retention: newest FACT_HISTORY_CAP rows survive per source path.
@@ -342,13 +364,14 @@ export class Journal {
       db.prepare(`DELETE FROM pending_edges WHERE path = ?`).run(o.path);
 
       const insNode = db.prepare(
-        `INSERT INTO owned_nodes (node_id, path, kind, symbol, line, label, sink_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO owned_nodes (node_id, path, kind, symbol, line, label, sink_id, fact_title, fact_body)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       for (const n of o.nodes) {
         insNode.run(
           n.node_id, o.path, n.kind, n.symbol ?? null,
           n.line ?? null, n.label ?? null, n.sink_id ?? null,
+          n.fact_title ?? null, n.fact_body ?? null,
         );
       }
       const insEdge = db.prepare(

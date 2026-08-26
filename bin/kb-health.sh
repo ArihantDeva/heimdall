@@ -41,4 +41,33 @@ else
   fail "search smoke (graft ask) on $FIRST"
 fi
 
+# 5. semantic layer availability (C11): last transitions from semantic-state.json
+STATE="$HOME/.heimdall/semantic-state.json"
+if [ -f "$STATE" ]; then
+  python3 - "$STATE" <<'PYEOF'
+import json, sys, time
+try:
+    events = json.load(open(sys.argv[1]))[-200:]
+except Exception:
+    print("WARN: semantic-state.json unreadable"); raise SystemExit(0)
+if not events:
+    print("semantic availability: no transitions recorded yet")
+    raise SystemExit(0)
+last = events[-1]
+age_min = round((time.time() - last["t"]) / 60)
+streak = 0
+for e in reversed(events):
+    if e["state"] != last["state"]:
+        break
+    streak += 1
+busy24 = sum(1 for e in events if e["state"] == "busy" and time.time() - e["t"] < 86400)
+ok24 = sum(1 for e in events if e["state"] == "ok" and time.time() - e["t"] < 86400)
+print(f"semantic availability: {last['state']} for {streak} transitions (last {age_min}m ago); 24h busy={busy24} ok={ok24}")
+if last["state"] == "busy":
+    print("WARN: semantic layer last seen BUSY — recent searches may have degraded to lexical-only")
+PYEOF
+else
+  echo "semantic availability: no state recorded yet (embed-index.py records busy/ok transitions)"
+fi
+
 echo "HEALTHY"

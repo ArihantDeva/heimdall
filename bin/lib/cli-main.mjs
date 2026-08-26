@@ -76,12 +76,19 @@ async function runInsert(args) {
     writeFileSync(factPath, card, "utf8");
     console.log(`fact recorded: ${factPath}`);
     // Immediate semantic visibility: upsert just this card into the live
-    // index (cheap single encode; skips waiting for the next full build).
-    try {
-      spawnSync(join(os.homedir(), ".heimdall", "venv", "bin", "python3"),
-                [BIN("embed-index.py"), "insert-card", factPath], { stdio: "ignore", timeout: 120_000 });
-    } catch (e) {
-      console.error(`WARN: semantic indexing of fact deferred (lands on next embed build): ${e.message?.split("\n")[0] ?? e}`);
+    // index (cheap single encode). Venv absence (Linux/0.7.0, issue #7) must
+    // never lose the fact — the file above is already durable; this only
+    // accelerates retrieval.
+    const venvPy = join(os.homedir(), ".heimdall", "venv", "bin", "python3");
+    if (existsSync(venvPy)) {
+      try {
+        spawnSync(venvPy,
+                  [BIN("embed-index.py"), "insert-card", factPath], { stdio: "ignore", timeout: 120_000 });
+      } catch (e) {
+        console.error(`WARN: semantic indexing of fact deferred (lands on next embed build): ${e.message?.split("\n")[0] ?? e}`);
+      }
+    } else {
+      console.log("note: no ~/.heimdall venv — fact saved to disk; it will be indexed on the next embed build");
     }
   } catch (e) {
     console.error(`ERROR: could not write fact: ${e.message?.split("\n")[0] ?? e}`);
@@ -285,16 +292,22 @@ async function runScore(args) {
       { journal, sink: new MemorySink(), config: loadConfig(), cap: capability() },
       { deep: false, enqueue: false },
     );
-    const stale = countStale(args.includes("--count-only"));
+    const stale = countStale();
     const counts = classifyDrift(drift);
+    // Fail-CLOSED on sensor loss (C4 review F1): a dead stale-scan must NOT
+    // raise the score by dropping its warnings. Count the missing reading as
+    // one warning and surface it explicitly.
+    const staleWarn = stale ? stale.stale : 0;
+    const staleIssue = stale ? 0 : 1;
     const { score, band } = computeHealthScore({
       errors: counts.errors,
-      warnings: counts.warnings + (stale?.stale ?? 0),
+      warnings: counts.warnings + staleWarn + staleIssue,
       infos: counts.infos,
     });
     const out = {
       score, band,
-      issues: { ...counts, staleNodesPending: stale?.stale ?? null, staleNodesTotal: stale?.nodes ?? null },
+      issues: { ...counts, staleNodesPending: stale?.stale ?? null, staleNodesTotal: stale?.nodes ?? null,
+        staleScanFailed: !stale },
     };
     console.log(JSON.stringify(out, null, 2));
     return band === "critical" ? 1 : 0;
@@ -305,14 +318,15 @@ async function runScore(args) {
 
 // Stale-node counters via kb-stale-scan.py --count-only (read-only sweep, no
 // find/rehome/delete). Absent DB → zero stale nodes counted, daemon liveness
-// must not masquerade as graph decay.
-function countStale(verbose) {
+// must not masquerade as graph decay. Returns null when the scan itself fails
+// — caller scores that fail-closed (C4 review F1).
+function countStale() {
   const r = spawnSync(
-    "python3", [BIN("kb-stale-scan.py"), "--count-only", ...(verbose ? ["--verbose"] : [])],
+    "python3", [BIN("kb-stale-scan.py"), "--count-only"],
     { encoding: "utf8", timeout: 120_000 },
   );
   if (r.status !== 0) {
-    if (verbose) console.error(`stale scan unavailable (${(r.stderr || "").trim().split("\n")[0]}); scoring drift rows only`);
+    console.error(`WARN: stale scan unavailable (${(r.stderr || "").trim().split("\n")[0]}); scoring drift rows only (+1 warning for the dead sensor)`);
     return null;
   }
   try { return JSON.parse(r.stdout); } catch { return null; }
@@ -370,7 +384,11 @@ async function runHistory(args) {
     }
     for (const r of rows) {
       const sup = r.superseded_by ? ` (superseded by ${r.superseded_by})` : "";
-      console.log(`[INVALIDATED] ${r.invalidated_at}\t${r.node_id}\tline ${r.line ?? "?"}${sup}\t${r.label ?? r.symbol ?? r.node_id}`);
+      console.log(`[INVALIDATED] ${r.invalidated_at}\t${r.node_id}\tline ${r.line ?? "?"}${sup}`);
+      // v3 journals archive the fact text (C3 review B1); pre-v3 rows have
+      // nothing to show — the opaque id is all that survives.
+      if (r.fact_title) console.log(`  was: ${r.fact_title}`);
+      if (r.fact_body) console.log(`  ${r.fact_body.replace(/\n/g, " ⏎ ").slice(0, 300)}`);
     }
     // The output contract, stated where it cannot be skipped:
     console.log(`\n${rows.length} archived row(s) for ${path} — history is a record, not advice; none of the above is currently believed.`);
