@@ -19,6 +19,7 @@ const USAGE = `usage: heimdall <command>
   daemon [--once] [--scan] [--dry-run]                        run the single-writer reconciler
   reconcile [PATH ...] [--all]                                converge the graph now (holds the lock)
   verify [--deep] [--json]                                    report drift; exit 1 if any. read-only
+  score [--count-only]                                        graded health 0-100 from drift + stale counts; exit 1 if critical
   depth [PATH]                                                show requested/effective depth
   hint PATH ... | hint --stdin                                mark paths dirty (no lock needed)
 `;
@@ -262,6 +263,59 @@ async function runVerify(args) {
   }
 }
 
+// Graded health score (C4, scoring half): pure arithmetic over issue counts.
+// Read-only like verify — no repair gating, no deletion decisions. Exit 1 only
+// when the band is critical, so CI can alert without any auto-repair loop.
+async function runScore(args) {
+  const bad = checkFlags("score", args, ["--count-only"]);
+  if (bad) return bad;
+  const { computeHealthScore, classifyDrift } = await import("./health-score.mjs");
+  const [{ Journal }, { audit }, { MemorySink }, { capability, journalPath, loadConfig }] =
+    await Promise.all([
+      import("./journal.mjs"), import("./reconcile.mjs"),
+      import("./sink.mjs"), import("./depth.mjs"),
+    ]);
+  const journal = new Journal(journalPath());
+  try {
+    // Same read-only audit shape as `verify`: stat-only unless --deep is ever
+    // added; never enqueues, never writes the sink.
+    const drift = audit(
+      { journal, sink: new MemorySink(), config: loadConfig(), cap: capability() },
+      { deep: false, enqueue: false },
+    );
+    const stale = countStale(args.includes("--count-only"));
+    const counts = classifyDrift(drift);
+    const { score, band } = computeHealthScore({
+      errors: counts.errors,
+      warnings: counts.warnings + (stale?.stale ?? 0),
+      infos: counts.infos,
+    });
+    const out = {
+      score, band,
+      issues: { ...counts, staleNodesPending: stale?.stale ?? null, staleNodesTotal: stale?.nodes ?? null },
+    };
+    console.log(JSON.stringify(out, null, 2));
+    return band === "critical" ? 1 : 0;
+  } finally {
+    journal.close();
+  }
+}
+
+// Stale-node counters via kb-stale-scan.py --count-only (read-only sweep, no
+// find/rehome/delete). Absent DB → zero stale nodes counted, daemon liveness
+// must not masquerade as graph decay.
+function countStale(verbose) {
+  const r = spawnSync(
+    "python3", [BIN("kb-stale-scan.py"), "--count-only", ...(verbose ? ["--verbose"] : [])],
+    { encoding: "utf8", timeout: 120_000 },
+  );
+  if (r.status !== 0) {
+    if (verbose) console.error(`stale scan unavailable (${(r.stderr || "").trim().split("\n")[0]}); scoring drift rows only`);
+    return null;
+  }
+  try { return JSON.parse(r.stdout); } catch { return null; }
+}
+
 async function runIngestEmail(args) {
   const get = (f, dflt) => {
     const i = args.indexOf(f);
@@ -347,6 +401,7 @@ export async function main(argv) {
     case "daemon": return runDaemon(rest);
     case "reconcile": return runReconcile(rest);
     case "verify": return runVerify(rest);
+    case "score": return await runScore(rest);
     case "depth": return runDepth(rest);
     case "hint": return runHint(rest);
     case "search": return runSearch(rest);
