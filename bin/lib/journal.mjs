@@ -67,7 +67,40 @@ CREATE TABLE IF NOT EXISTS queue (
   enqueued_at INTEGER NOT NULL,
   reason      TEXT
 );
+-- Fact history (C3): append-only supersession trail for FACT-kind nodes.
+-- When a fact node is retracted (source edited past it, or source deleted),
+-- its owned_nodes row would otherwise vanish. This table archives the row so
+-- "what did we believe before" stays answerable. Code/symbol/file nodes are
+-- NEVER archived: their retraction is not a belief change, just a file edit.
+-- Columns mirror owned_nodes plus invalidated_at (ISO text, when it died) and
+-- superseded_by (nullable node_id of the fact that replaced it — set only on
+-- an unambiguous 1:1 swap; churn gets NULL rather than invented causality).
+-- Deliberately OUT of the live retrieval surface: nothing projects this table.
+CREATE TABLE IF NOT EXISTS fact_history (
+  history_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+  node_id        TEXT NOT NULL,
+  path           TEXT NOT NULL,
+  kind           TEXT NOT NULL,
+  symbol         TEXT,
+  line           INTEGER,
+  label          TEXT,
+  invalidated_at TEXT NOT NULL,
+  superseded_by  TEXT
+);
+CREATE INDEX IF NOT EXISTS fact_history_path ON fact_history(path, invalidated_at);
 `;
+
+// Schema revision of this build. Bump whenever SCHEMA changes additively
+// (v1: base tables + cap_max ALTER; v2: fact_history, C3). Every statement in
+// SCHEMA is CREATE .*IF NOT EXISTS / guarded ALTER, so replaying is a no-op on
+// an up-to-date database and brings an old one up to date; the version stamp
+// only records how far the file has been migrated.
+const SCHEMA_VERSION = 2;
+
+// Retention: keep at most this many history rows per source path (newest
+// win). Fact trails are dominated by line-shift noise on actively-edited
+// logs; without a cap the table grows forever while answering less and less.
+export const FACT_HISTORY_CAP = 50;
 
 export class Journal {
   /** @param {string} file path to journal.db */
@@ -89,6 +122,12 @@ export class Journal {
       // Only "already there" is fine to swallow; anything else (disk, schema
       // corruption) must surface — audit would crash later with a worse error.
       if (!/duplicate column/i.test(String(err?.message))) throw err;
+    }
+    // Versioned additive migration stamp: only ever moves forward. An old
+    // binary opening a newer database must not silently downgrade the record.
+    const ver = Number(this.db.prepare(`PRAGMA user_version`).get()?.user_version ?? 0);
+    if (ver < SCHEMA_VERSION) {
+      this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     }
   }
 
@@ -180,6 +219,21 @@ export class Journal {
       .all(path);
   }
 
+  /**
+   * Archived (retracted) fact rows for one path, newest invalidation first.
+   * Read-only audit surface — see the `heimdall history` verb. Timestamp ties
+   * break on history_id (insertion order), because two retractions can land
+   * inside the same millisecond.
+   */
+  factHistory(path) {
+    return this.db
+      .prepare(
+        `SELECT * FROM fact_history WHERE path = ?
+         ORDER BY invalidated_at DESC, history_id DESC`,
+      )
+      .all(path);
+  }
+
   /** Pending edges anywhere in the graph that point at these symbols. */
   pendingFor(symbols) {
     if (!symbols.length) return [];
@@ -226,6 +280,58 @@ export class Journal {
       if (now !== o.startGeneration) {
         db.exec("ROLLBACK");
         return false; // stale result — caller re-queues
+      }
+
+      // ── fact-history snapshot (C3) ──
+      // Runs AFTER the generation guard and BEFORE the delete, inside this
+      // BEGIN IMMEDIATE transaction — so a stale reconcile that is about to
+      // roll back can never write a phantom history row, and BOTH retraction
+      // shapes are covered by this one choke point: the update path
+      // (reconcilePath's delete-and-reproject lands here) and the absent path
+      // (file vanished → commit with nodes=[]).
+      // Set arithmetic, not presence: outgoing = prior facts \ incoming.
+      // A pure swap (one out, one genuinely NEW in) is a supersession; a
+      // hot-path re-commit (same ids re-added) produces an empty diff and
+      // stays silent. Facts that merely survive are neither in nor out.
+      const incomingFactIds = new Set(
+        o.nodes.filter((n) => n.kind === "fact").map((n) => n.node_id),
+      );
+      const priorFactIds = new Set(
+        db.prepare(`SELECT node_id FROM owned_nodes WHERE path = ? AND kind = 'fact'`)
+          .all(o.path).map((r) => r.node_id),
+      );
+      const addedIds = [...incomingFactIds].filter((id) => !priorFactIds.has(id));
+      const outgoingFacts = db
+        .prepare(`SELECT node_id, kind, symbol, line, label FROM owned_nodes WHERE path = ? AND kind = 'fact'`)
+        .all(o.path)
+        .filter((r) => !incomingFactIds.has(r.node_id));
+      if (outgoingFacts.length) {
+        // superseded_by is recorded ONLY when exactly one fact left and
+        // exactly one GENUINELY NEW fact took its place on the same path.
+        // Any noisier churn gets NULL: linking line-shifted duplicates would
+        // manufacture causality the extractor cannot prove (adversarial C3).
+        const replacement =
+          outgoingFacts.length === 1 && addedIds.length === 1
+            ? addedIds[0]
+            : null;
+        const insHistory = db.prepare(
+          `INSERT INTO fact_history (node_id, path, kind, symbol, line, label, invalidated_at, superseded_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        );
+        const nowIso = new Date().toISOString();
+        for (const r of outgoingFacts) {
+          insHistory.run(
+            r.node_id, o.path, r.kind, r.symbol ?? null,
+            r.line ?? null, r.label ?? null, nowIso, replacement,
+          );
+        }
+        // Retention: newest FACT_HISTORY_CAP rows survive per source path.
+        // history_id is monotonic, so "newest" is plain descending order.
+        db.prepare(
+          `DELETE FROM fact_history WHERE path = ? AND history_id NOT IN
+             (SELECT history_id FROM fact_history WHERE path = ?
+              ORDER BY history_id DESC LIMIT ?)`,
+        ).run(o.path, o.path, FACT_HISTORY_CAP);
       }
 
       // Ownership is exact: drop everything this path owned, then re-add.

@@ -19,6 +19,8 @@ const USAGE = `usage: heimdall <command>
   daemon [--once] [--scan] [--dry-run]                        run the single-writer reconciler
   reconcile [PATH ...] [--all]                                converge the graph now (holds the lock)
   verify [--deep] [--json]                                    report drift; exit 1 if any. read-only
+  history PATH                                                archived fact rows for PATH, newest first. READ-ONLY
+                                                              record: not advice — every row is already invalidated
   score [--count-only]                                        graded health 0-100 from drift + stale counts; exit 1 if critical
   depth [PATH]                                                show requested/effective depth
   hint PATH ... | hint --stdin                                mark paths dirty (no lock needed)
@@ -343,6 +345,41 @@ async function runIngestEmail(args) {
   }
 }
 
+// ── fact history (C3) ──────────────────────────────────────────────────────
+// Read-only audit surface over the journal's fact_history table. This is a
+// RECORD of invalidated beliefs, not advice: every row printed here has been
+// retracted from the live graph. The [INVALIDATED] prefix and the footer make
+// that output contract unmissable — never act on these as current state.
+async function runHistory(args) {
+  const bad = checkFlags("history", args, []);
+  if (bad) return bad;
+  const target = args.find((a) => !a.startsWith("--"));
+  if (!target) {
+    console.error("usage: heimdall history PATH");
+    return 1;
+  }
+  const path = resolve(process.cwd(), expandPath(target));
+  const { Journal } = await import("./journal.mjs");
+  const { journalPath } = await import("./depth.mjs");
+  const journal = new Journal(journalPath());
+  try {
+    const rows = journal.factHistory(path);
+    if (!rows.length) {
+      console.log(`no fact history for ${path}`);
+      return 0;
+    }
+    for (const r of rows) {
+      const sup = r.superseded_by ? ` (superseded by ${r.superseded_by})` : "";
+      console.log(`[INVALIDATED] ${r.invalidated_at}\t${r.node_id}\tline ${r.line ?? "?"}${sup}\t${r.label ?? r.symbol ?? r.node_id}`);
+    }
+    // The output contract, stated where it cannot be skipped:
+    console.log(`\n${rows.length} archived row(s) for ${path} — history is a record, not advice; none of the above is currently believed.`);
+    return 0;
+  } finally {
+    journal.close();
+  }
+}
+
 async function runDepth(args) {
   const bad = checkFlags("depth", args, []);
   if (bad) return bad;
@@ -401,6 +438,7 @@ export async function main(argv) {
     case "daemon": return runDaemon(rest);
     case "reconcile": return runReconcile(rest);
     case "verify": return runVerify(rest);
+    case "history": return await runHistory(rest);
     case "score": return await runScore(rest);
     case "depth": return runDepth(rest);
     case "hint": return runHint(rest);
