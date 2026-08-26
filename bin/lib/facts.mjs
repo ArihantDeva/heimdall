@@ -39,9 +39,31 @@ const PATTERNS = [
   { kind: "negation", re: /\b((?:i\s+)?(?:do\s+not|don't|dont|won't|wont|will\s+not|can't|cant|cannot|never)\b[^.!?\n]*)/i },
 ];
 
+// ponytail: threshold lifted verbatim from Vault write_gate.rs DUP=0.97;
+// plain Set<char trigram> instead of Vault's packed-u64 machinery — that
+// exists for 50k-row synchronous scans, Heimdall per-file volumes are tiny.
+const DEDUP_JACCARD = 0.97;
+
 const nfkc = (s) => s.normalize("NFKC");
 const norm = (s) => nfkc(s).replace(/\s+/g, " ").trim();
 const factId = (body) => "fact-" + createHash("sha256").update(body).digest("hex").slice(0, 12);
+
+// Dedup keys are lowercase + whitespace-collapsed; provenance ([path:line])
+// never enters the comparison, so line shifts can't dodge or skew the gate.
+const dedupKey = (utterance) => norm(utterance).toLowerCase();
+
+function trigrams(s) {
+  const set = new Set();
+  for (let i = 0; i <= s.length - 3; i++) set.add(s.slice(i, i + 3));
+  return set;
+}
+
+function jaccard(a, b) {
+  if (!a.size || !b.size) return 0; // degenerate (<3 chars): never a dupe
+  let inter = 0;
+  for (const g of a) if (b.has(g)) inter++;
+  return inter / (a.size + b.size - inter);
+}
 
 function keywordsFor(kind, utterance) {
   const words = utterance.toLowerCase().match(/[a-z][a-z0-9_-]{2,}/g) ?? [];
@@ -70,7 +92,8 @@ function extractFromLine(lineText, path, line, out, meta) {
   for (const { kind, re } of PATTERNS) {
     const m = text.match(re);
     if (m) {
-      out.push(makeFact(kind, m[1] ?? m[0], path, line));
+      const raw = m[1] ?? m[0];
+      out.push({ fact: makeFact(kind, raw, path, line), key: dedupKey(raw) });
       return;
     }
   }
@@ -104,11 +127,13 @@ function parsePlain(buf, path, out, meta) {
  * extractFacts(buf, meta) — desired state for one path, same contract shape
  * as extract.mjs desiredState: deterministic per bytes, safe to re-run.
  * @param {Buffer} buf file bytes
- * @param {{path: string}} meta source path (mutated: gains skippedSecrets)
+ * @param {{path: string}} meta source path (mutated: gains skippedSecrets,
+ *   skippedDuplicates)
  * @returns {{id,title,body,keywords,line}[]}
  */
 export function extractFacts(buf, meta = { path: "" }) {
   meta.skippedSecrets = meta.skippedSecrets ?? 0;
+  meta.skippedDuplicates = meta.skippedDuplicates ?? 0;
   if (!buf || !buf.toString("utf8").trim()) return [];
   const out = [];
   if (!parseJsonl(buf, meta.path, out, meta)) parsePlain(buf, meta.path, out, meta);
@@ -116,6 +141,20 @@ export function extractFacts(buf, meta = { path: "" }) {
   // (spec D4): fact ownership is namespaced by source file, so editing one
   // file retracts exactly its own nodes and two files stating the same fact
   // coexist with independent provenance.
-  const seen = new Set();
-  return out.filter((f) => (seen.has(f.title) ? false : (seen.add(f.title), true)));
+  // Near-dup gate (C1 dedup half): char-trigram Jaccard vs facts already
+  // accepted FOR THIS FILE; first occurrence wins. O(n²) is deliberate —
+  // per-file fact counts are tiny, a shingle index would be pure ceremony.
+  const keptGrams = [];
+  const kept = [];
+  for (const { fact, key } of out) {
+    const grams = trigrams(key);
+    const isDup = keptGrams.some((g) => jaccard(grams, g) >= DEDUP_JACCARD);
+    if (isDup) {
+      meta.skippedDuplicates++;
+      continue;
+    }
+    keptGrams.push(grams);
+    kept.push(fact);
+  }
+  return kept;
 }
