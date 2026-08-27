@@ -16,7 +16,9 @@ PROFILE="${1:-longmemeval}"
 SOCK="/tmp/graft-$PROFILE.sock"
 GRAFTD="/Users/arihantdeva/Repos/heimdall/vendor/graft/build/graftd"
 GRAFT="/Users/arihantdeva/Repos/heimdall/vendor/graft/build/graft"
-CONFIG="/Users/arihantdeva/Repos/heimdall/vendor/graft/config.cpu.yaml"
+# Metal-accelerated config by default (hardware_accel: true); override with
+# GRAFT_CONFIG env for CPU fallback (config.cpu.yaml).
+CONFIG="${GRAFT_CONFIG:-/Users/arihantdeva/Repos/heimdall/vendor/graft/config.example.yaml}"
 LOCK="/tmp/graft-$PROFILE.lock"
 
 # mkdir-based lock (portable, atomic — macOS has no flock). Only one
