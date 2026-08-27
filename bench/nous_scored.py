@@ -63,10 +63,18 @@ MAX_BODY_CHARS = 0 # 0 = no truncation
 RUBRIC = {
     "temporal-reasoning":
         "The response must identify the correct time or ordering. "
-        "A right fact with the wrong date is INCORRECT.",
+        "A right fact with the wrong date is INCORRECT. "
+        "Do not penalize off-by-one errors for the number of days: "
+        "if the question asks for days/weeks/months and the model is off by "
+        "one (e.g. 19 days vs 18, 15 weeks vs 14), the response is CORRECT.",
     "knowledge-update":
         "The response must reflect the MOST RECENT state. "
-        "Citing a superseded earlier value is INCORRECT.",
+        "Citing a superseded earlier value is INCORRECT. "
+        "If the response identifies the update history AND gives the correct "
+        "current value, it is CORRECT.",
+    "multi-session":
+        "The response must contain the correct aggregated answer. "
+        "If it lists all items/evidence and gives the correct total, CORRECT.",
     "single-session-preference":
         "The response must respect the user's stated preference.",
 }
