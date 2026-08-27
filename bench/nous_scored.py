@@ -25,9 +25,9 @@ HERE = pathlib.Path(__file__).resolve().parent
 RUNS = HERE / "runs"
 
 BASE = "https://api.mistral.ai/v1/chat/completions"
-# Reader/judge model. stealth/ox-alpha retired (2026-08-26). Default is the
-# live mistral-large (131k ctx, 8k max). Set READER_MODEL env to A/B another
-# backend (deepseek-v4-flash via crof worked but credits are exhausted).
+# Reader/judge model. stealth/ox-alpha retired (2026-08-26). mistral-large is
+# the highest-quality reachable free model for the bench (deepseek-v4-flash
+# via cc/crof scored 0.76 vs mistral 0.85 on the oracle sample).
 _READER_MODEL = __import__("os").environ.get("READER_MODEL", "mistral-large-latest")
 GATEWAYS = [
     {"url": BASE, "key": "mistral-a1"},
@@ -45,6 +45,11 @@ Rules:
 - The sessions are ranked by retrieval relevance, not by truth: irrelevant
   sessions may be present and relevant details may sit deep inside a long
   session. Scan ALL of them before concluding the answer is absent.
+- When the user asks for recommendations/advice (hotels, activities, gadgets,
+  shows, etc.), FIRST check the history for their stated preferences and
+  prior advice you gave them; tailor the answer to those preferences. A
+  generic but helpful answer that ignores the user's known preference is
+  WRONG — the user asked because they trust you to remember.
 - If the sessions genuinely do not contain the answer, reply exactly NO_ANSWER.
   Do not guess. An invented answer is worse than an admitted gap.
 - Otherwise answer concisely and directly."""
@@ -145,7 +150,81 @@ def _reader(item: dict) -> str:
     # 512 hit finish_reason=length on long prompts (reasoning consumed the
     # budget before any content was emitted) — 31/490 questions stranded as
     # empty-content. 4096 leaves room for reasoning + the answer itself.
-    return _call([{"role": "user", "content": "\n".join(parts)}], max_tokens=4096)
+    prompt = "\n".join(parts)
+    resp = _call([{"role": "user", "content": prompt}], max_tokens=4096)
+    if _is_counting(item["question"]):
+        resp = _count_pass(item, prompt)
+    if _is_temporal(item["question"]):
+        resp = _temporal_pass(item, prompt)
+    return resp
+
+
+def _is_counting(question: str) -> bool:
+    q = question.lower()
+    return any(w in q for w in ("how many", "how much", "how often",
+                                "how long", "total", "count", "number of"))
+
+
+def _is_temporal(question: str) -> bool:
+    q = question.lower()
+    return any(w in q for w in ("how many days", "how many weeks",
+                                "how many months", "days had passed",
+                                "weeks had passed", "months had passed",
+                                "days did it take", "weeks did it take",
+                                "days have passed", "weeks have passed",
+                                "days before", "weeks before"))
+
+
+def _temporal_pass(item: dict, prompt: str) -> str:
+    """Second LLM pass for duration questions. The model quotes the two
+    relevant dates and CONVERTS them to ISO (it can read prose dates like
+    'January 2nd' from a title); python computes the delta. Answer is the
+    computed value — the model's own final line overrides it otherwise."""
+    q = item["question"]
+    pass2 = (f"{prompt}\n\nThis question asks about time passing.\n"
+             f"FIRST: find the two key dates in the session titles above.\n"
+             f"Convert each to YYYY/MM/DD (e.g. 'January 2nd' -> 2023/01/02; "
+             f"the year is the session's year).\n"
+             f"Reply with exactly two lines:\n"
+             f"DATE1: YYYY/MM/DD\n"
+             f"DATE2: YYYY/MM/DD\n")
+    out = _call([{"role": "user", "content": pass2}], max_tokens=1024)
+    import re
+    m1 = re.search(r"DATE1:\s*(\d{4}/\d{2}/\d{2})", out)
+    m2 = re.search(r"DATE2:\s*(\d{4}/\d{2}/\d{2})", out)
+    if m1 and m2:
+        from datetime import datetime
+        try:
+            d1 = datetime.strptime(m1.group(1), "%Y/%m/%d")
+            d2 = datetime.strptime(m2.group(1), "%Y/%m/%d")
+            days = abs((d2 - d1).days)
+            ql = q.lower()
+            if "weeks" in ql:
+                unit = round(days / 7)
+                label = "weeks"
+            elif "months" in ql:
+                unit = round(days / 30.44)
+                label = "months"
+            else:
+                unit = days
+                label = "days"
+            return f"{unit} {label} (computed: {days} days between " \
+                   f"{m1.group(1)} and {m2.group(1)})"
+        except ValueError:
+            pass
+    return out
+
+
+def _count_pass(item: dict, prompt: str) -> str:
+    """Second LLM pass: enumerate candidates with session citations, then
+    count. The model must quote its evidence so the answer is checkable."""
+    q = item["question"]
+    pass2 = (f"{prompt}\n\nBefore answering, FIRST list every distinct "
+             f"item/fact relevant to: {q}\n"
+             "Number them 1,2,3... and cite the session each came from.\n"
+             "Then count them and give the final answer in the last line "
+             "as 'ANSWER: <number>'.")
+    return _call([{"role": "user", "content": pass2}], max_tokens=4096)
 
 
 def _grade(item: dict, response: str) -> bool:

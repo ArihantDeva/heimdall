@@ -27,10 +27,24 @@ def _work(item: dict) -> dict:
             "correct": correct, "response": resp}
 
 
-def run(sample: list[dict], workers: int) -> list[dict]:
-    out = []
+def run(sample: list[dict], workers: int, out_path: str | None = None) -> list[dict]:
+    """Run reader+judge over the sample. When out_path is set, write each
+    completed result immediately (incremental) so a slow/throttled run is
+    monitorable and resumable."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    if out_path:
+        import pathlib as _pl
+        _p = _pl.Path(out_path)
+        if _p.exists():
+            try:
+                for r in json.loads(_p.read_text()):
+                    out.append(r); seen.add(r["question_id"])
+            except Exception:
+                out, seen = [], set()
+    todo = [it for it in sample if it["question_id"] not in seen]
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        futs = {pool.submit(_work, it): it for it in sample}
+        futs = {pool.submit(_work, it): it for it in todo}
         for fut in concurrent.futures.as_completed(futs):
             try:
                 out.append(fut.result())
@@ -39,6 +53,12 @@ def run(sample: list[dict], workers: int) -> list[dict]:
                 out.append({"question_id": it["question_id"],
                             "question_type": it["question_type"],
                             "correct": None, "response": f"ERROR: {e}"})
+            if out_path:
+                json.dump(out, open(out_path, "w"), indent=1)
+                import time as _t
+                graded = [r for r in out if r["correct"] is not None]
+                print(f"  {len(graded)}/{len(sample)} graded",
+                      f"({_t.strftime('%H:%M:%S')})", flush=True)
     return out
 
 
@@ -61,7 +81,7 @@ def main() -> None:
     args = ap.parse_args()
     sample = json.loads((FIXTURES / "oracle_sample_60.json").read_text())
     t0 = time.time()
-    results = run(sample, args.workers)
+    results = run(sample, args.workers, args.out)
     json.dump(results, open(args.out, "w"), indent=1)
     print(json.dumps(report(results), indent=2))
     print(f"wrote {args.out} in {time.time()-t0:.0f}s")
