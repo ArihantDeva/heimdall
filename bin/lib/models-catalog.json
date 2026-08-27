@@ -1,0 +1,35 @@
+[
+  {
+    "id": "bge-m3",
+    "default": true,
+    "url": "https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q8_0.gguf",
+    "bytes": 615542464,
+    "dims": 1024,
+    "ctx": 8192,
+    "notes": "multilingual, reference choice — matches vendored default"
+  },
+  {
+    "id": "bge-small-en-v1.5",
+    "url": "https://huggingface.co/gpustack/bge-small-en-v1.5-GGUF/resolve/main/bge-small-en-v1.5-Q8_0.gguf",
+    "bytes": 37276672,
+    "dims": 384,
+    "ctx": 512,
+    "notes": "tiny english model, low RAM"
+  },
+  {
+    "id": "snowflake-arctic-embed-s",
+    "url": "https://huggingface.co/gpustack/snowflake-arctic-embed-s-GGUF/resolve/main/snowflake-arctic-embed-s-Q8_0.gguf",
+    "bytes": 35538176,
+    "dims": 384,
+    "ctx": 512,
+    "notes": "tiny, strong retrieval quality for english"
+  },
+  {
+    "id": "nomic-embed-text-v1.5",
+    "url": "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q8_0.gguf",
+    "bytes": 89870912,
+    "dims": 768,
+    "ctx": 2048,
+    "notes": "mid-size, long-context english"
+  }
+]

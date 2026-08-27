@@ -11,6 +11,8 @@ const BIN = (n) => join(ROOT, "bin", n);
 const USAGE = `usage: heimdall <command>
 
   init [--harness pi|claude-code|codex|cursor|windsurf|all]   configure backend + harness hooks
+  setup [--model ID | --model-path F] [--threads N] [--instances N]      hardware-fit graft config + daemon
+        [--accel auto|metal|cuda|cpu] [--graftd PATH] [--skip-daemon] [--detect-only]
   search "<query>" [-n N] [--scope S] [--no-explore]          ranked + verified knowledge search
   insert --title T --body B [--keywords k1,k2]                record reusable knowledge
   ingest-email [--accounts a,b] [--limit N] [--root DIR]      index mailbox (read-only via cli-email)
@@ -453,6 +455,7 @@ export async function main(argv) {
   const [cmd, ...rest] = argv;
   switch (cmd) {
     case "init": return runInit(rest);
+    case "setup": return (await import("./setup.mjs")).runSetup(rest);
     case "daemon": return runDaemon(rest);
     case "reconcile": return runReconcile(rest);
     case "verify": return runVerify(rest);
