@@ -352,6 +352,10 @@ embedding model, installs/repairs the launchd daemon. Verify with 'heimdall doct
 
   // graftd binary: --graftd path, else freshly built vendored binary, else existing install.
   let graftdSrc = f.graftd || null;
+  if (graftdSrc && !existsSync(graftdSrc)) {
+    console.error(`--graftd not found: ${graftdSrc}`);
+    return 1;
+  }
   const buildDir = join(ROOT, "vendor", "graft", "build", "graftd");
   const dest = localBinGraftd();
   if (!graftdSrc && existsSync(buildDir)) graftdSrc = buildDir;
