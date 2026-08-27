@@ -34,7 +34,7 @@ The vendor repo lives at `/Users/arihantdeva/Repos/heimdall`; **live runtime sta
 | `extensions/kb-tools.ts` | Pi extension: exposes `kb_search`/`kb_insert`/`kb_sync` agent tools |
 | `extensions/kb-autosync.ts` | Pi extension: hook that appends path hints (never writes the graph) |
 | `extensions/kb-orient.ts` | Pi extension: injects prior-work hits into the first user prompt of a session |
-| `extensions/kb-search-guard.ts` | Pi extension: warns after 3 consecutive grep-style actions without kb_search |
+| `extensions/kb-search-guard.ts` | Pi extension: warns/escalates/blocks only on UNscoped discovery chains; agent-callable `kb_guard_pause` suspends enforcement 1–20 turns |
 | `extensions/lib/kb-guard-core.mjs` | pure guard state machine (testable without the Pi runtime) |
 | `vendor/graphify/` | vendored graphify v0.3.17 (MIT) — per-repo code-graph extractors (tree-sitter) |
 | `vendor/graft/` | vendored Graft source (Apache 2.0) — backend daemon; **not prebuilt**, build from source |

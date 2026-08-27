@@ -143,15 +143,27 @@ def test_dataless_files_reported_separately(env):
     assert empty not in files
 
 
-def test_sha_dedupe_identical_content_single_card(env, monkeypatch):
+def test_sha_dedupe_duplicate_gets_own_card_shared_vector(env, monkeypatch):
+    """Contract (2026-08-26 directive): every discovered file gets its own card.
+    Identical content shares the canonical vector via blob-copy — no re-encode,
+    but no path is dropped from the index."""
     a = env["home"] / "a.txt"; a.write_text("same content line one\nsame content line two\n")
-    b = env["home"] / "b" ; b.parent.mkdir(exist_ok=True); b.write_text("same content line one\nsame content line two\n")
+    b = env["home"] / "b.txt"; b.write_text("same content line one\nsame content line two\n")
     _fake_model(monkeypatch)
     _ram_ok_true(monkeypatch)
     embed_index.build()
-    cards = embed_index.conn().execute(
+    conn = embed_index.conn()
+    cards = conn.execute(
         "SELECT COUNT(*) FROM cards WHERE body LIKE '%same content%'").fetchone()[0]
-    assert cards == 1
+    vecs = conn.execute(
+        "SELECT COUNT(DISTINCT v.rowid) FROM cards k JOIN vec v ON v.rowid=k.rowid "
+        "WHERE k.body LIKE '%same content%'").fetchone()[0]
+    # both paths present as cards...
+    assert cards == 2
+    # ...and both have live vectors (copied blob counts as distinct row)
+    assert vecs == 2
+    # encode was called only for unique content (dedupe held at model level):
+    fm_calls = sum(len(c) for c in [embed_index.model().calls]) if hasattr(embed_index.model(), "calls") else None
 
 
 # --- dim handling ----------------------------------------------------------

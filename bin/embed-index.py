@@ -186,7 +186,13 @@ def _flat_vec(v: object) -> list[float]:
     return [float(x) for x in v]
 
 
-def _upsert(c: sqlite3.Connection, m, batch: list[tuple]) -> int:
+def _upsert(c: sqlite3.Connection, m, batch: list[tuple], allow_dupes: bool = False) -> int:
+    if allow_dupes:
+        # Duplicate batch: copy vectors from their canonical cards, no model.
+        for (cid, rel, body, sha, mt, size) in batch:
+            _dup_card(c, cid, rel, body, sha, mt, size)
+        c.commit()
+        return len(batch)
     texts = [t + "\n" + b for _, t, b, *_ in batch]
     vecs = m.encode(texts, normalize_embeddings=True, show_progress_bar=False)
     for (cid, rel, body, sha, mt, size), vec in zip(batch, vecs):
@@ -215,6 +221,25 @@ def _persist_search_roots(graft_dirs: list[pathlib.Path]) -> None:
     roots = sorted(str(d) for d in graft_dirs if (d / "graft").is_dir())
     out_path.write_text(json.dumps({"roots": roots}, indent=0))
     print(f"embed-index: {len(roots)} search roots persisted -> {out_path}", flush=True)
+
+
+def _dup_card(c: sqlite3.Connection, cid: str, rel: str, body: str,
+              sha: str, mt: float, size: int) -> None:
+    """Give a duplicate-content file its own card + vec row by copying the
+    existing vector blob — zero encode cost, so 'every possible file' holds
+    without paying re-embedding for boilerplate twins."""
+    src = c.execute("SELECT v.embedding FROM cards k JOIN vec v ON v.rowid=k.rowid "
+                    "WHERE k.sha1=? LIMIT 1", (sha,)).fetchone()
+    if not src:
+        return  # source not indexed yet; normal upsert next pass
+    row = c.execute("SELECT rowid FROM cards WHERE id=?", (cid,)).fetchone()
+    if row:
+        c.execute("DELETE FROM vec WHERE rowid=?", (row[0],))
+        c.execute("DELETE FROM cards WHERE id=?", (cid,))
+    cur = c.execute("INSERT INTO cards VALUES (?,?,?,?,?,?,?,?)",
+                    (cid, str(HOME_ROOT / rel), rel, body[:3000], sha,
+                     _project_root(str(HOME_ROOT / rel)), mt, size))
+    c.execute("INSERT INTO vec(rowid, embedding) VALUES (?,?)", (cur.lastrowid, src[0]))
 
 
 def _prune_stale(c: sqlite3.Connection, known: dict[str, str], seen: set[str]) -> None:
@@ -293,10 +318,25 @@ def _build_inner(c: sqlite3.Connection, progress_every: int) -> int:
             continue  # mtime+size unchanged since last build — no re-read
         body = embed_walker.read_preview(p)
         if len(body.strip()) < embed_walker.MIN_PREVIEW_CHARS:
-            continue  # near-empty: not worth a vector
+            # Near-empty content (tiny configs, stubs): keep as name-only card
+            # — the filename is still retrieval signal. No vector cost beyond
+            # one shared encode per unique name-body.
+            body = f"[minimal file]\n{p.name}"
+            sha = "name:" + hashlib.sha1(body.encode()).hexdigest()
         sha = hashlib.sha1(body.encode()).hexdigest()
         if sha in claimed and (not prev or prev != sha):
-            continue  # identical content already indexed elsewhere
+            # Identical content elsewhere: still give THIS path its own card
+            # (user directive: every possible file), sharing the existing
+            # vector — no re-encode.
+            seen.add(cid)
+            batch.append((cid, rel, body[:3000], sha, st.st_mtime, st.st_size))
+            if len(batch) >= BATCH:
+                total += _upsert(c, m, batch, allow_dupes=True)
+                batch = []
+                if total // progress_every > milestone:
+                    milestone = total // progress_every
+                    print(f"embed-index: {total}/{len(text_paths)} embedded", flush=True)
+            continue
         claimed.add(sha)
         seen.add(cid)
         if prev == sha:

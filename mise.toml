@@ -9,5 +9,8 @@ run = "npx tsc --noEmit"
 [tasks.bench-test]
 run = "~/.heimdall/venv/bin/python3 -m pytest bench/tests -q"
 
+[tasks.embed-index-test]
+run = "~/.heimdall/venv/bin/python3 -m pytest bench/tests/test_embed_index.py -q"
+
 [tools]
 bun = "1.4.0"
