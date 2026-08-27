@@ -1,0 +1,13 @@
+# build artifacts
+build/
+*.o
+*.d
+
+# models — large GGUF files, downloaded at setup time
+models/*.gguf
+
+# databases — runtime state, never commit
+*.db
+*.db-shm
+*.db-wal
+*.sqlite3
