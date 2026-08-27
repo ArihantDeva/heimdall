@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`heimdall setup`** — hardware-fitted configuration: detects accelerator
+  (Metal/CUDA/CPU) + physical cores, generates annotated `~/.graft/config.yaml`
+  (existing file backed up, never clobbered), downloads an embedding model
+  from a built-in catalog (bge-m3 default; bge-small-en-v1.5,
+  snowflake-arctic-embed-s, nomic-embed-text-v1.5) or accepts BYO `--model-path`,
+  and installs/repairs the launchd daemon (`com.graft.daemon`). Flags:
+  `--model --model-path --threads --instances --accel --graftd --skip-daemon
+  --detect-only`. See `docs/setup.md`.
+- **Doctor expansion** — `heimdall doctor` now also validates: config present,
+  `graftd --check-config` passes, embedding model file present + sane size,
+  plist valid, daemon running — each with SETUP NEEDED guidance.
+- **graft-cpp fork + subtree** — `vendor/graft/` is now a git subtree of the
+  `graft-cpp` fork (pinned `v0.1.0-heimdall.2`). Fork delta: daemon config
+  fallback chain (`--config` > `$GRAFT_CONFIG` > `~/.graft/config.yaml` >
+  defaults, source logged) and `graftd --check-config [PATH]` (side-effect-free
+  resolved-config dump). Update via `git subtree pull` — see
+  `vendor/graft/VENDORED.md`.
+
+### Changed
+
+- bge-m3.gguf relocated from `vendor/graft/models/` to `~/.graft/models/`
+  (models no longer live inside the source tree; setup downloads on demand).
+
 ## 0.8.0 — 2026-08-26
 
 Community-feedback release: five additions adopted from u/perseus-computing's

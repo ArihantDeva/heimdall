@@ -116,16 +116,25 @@ heimdall init --harness claude-code   # or pi | codex | cursor | windsurf | all
 
 That's it for install + harness wiring (`init`, `insert` work immediately).
 
-Ranked search and `doctor` need the [graft backend](https://github.com/NanoNets/Graft) — one extra step:
+Ranked search and `doctor` need the graft backend. `heimdall setup` fits it to
+your hardware automatically — detects accelerator (Metal on Apple Silicon,
+CUDA on NVIDIA), cores, downloads an embedding model if needed, generates
+`~/.graft/config.yaml`, and installs the launchd daemon:
 
 ```bash
-# build graft from source, put the binary on PATH, then:
-cp "$(npm root -g)/@arihantdeva/heimdall/config/heimdall.yaml.example" ~/.graft/config.yaml
+heimdall setup                         # detect + config + model + daemon
+heimdall setup --model bge-small-en-v1.5   # smaller model (~36MB, low RAM)
+heimdall setup --detect-only           # just print the hardware profile
 heimdall doctor                        # should print HEALTHY
 heimdall search "excel tracker portfolio optimization"
 ```
 
-On macOS the backend runs as the launchd job `com.graft.daemon` (template: `launchd/com.heimdall.backend.plist.example`).
+Full flags + hardware matrix + model catalog: [docs/setup.md](docs/setup.md).
+Prefer hand-rolling? Copy
+`config/heimdall.yaml.example` to `~/.graft/config.yaml` and edit
+(`/PATH/TO/` placeholders). On macOS the backend runs as the launchd job
+`com.graft.daemon` (setup writes the plist; template:
+`launchd/com.heimdall.backend.plist.example`).
 
 ### Alternative backend: Mnemosyne
 
