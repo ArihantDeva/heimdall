@@ -60,3 +60,25 @@ Simulated proper BM25 over full session bodies (idf-weighted, single-term OR sem
 - No LLM, no embedding call at ingest. Extraction = regex/heuristic (`bin/lib/facts.mjs`), retrieval = graft (BM25 + local BGE-M3 embedding, CPU).
 - Bench uses the isolated `longmemeval` graft profile only; `default` profile never touched.
 - M dataset fetch is the consciously-lifted disk-budget gate (bench/README.md).
+
+## Omega-memory cannibalization (2026-08-27)
+
+Source: github.com/omega-memory/omega-memory (cloned to /tmp/omega-recon).
+
+### Adopted (committed)
+| Element | Heimdall landing | Commit | Evidence |
+|---|---|---|---|
+| `_expand_query` (temporal/entity/counting cues) | `bench/retrieval_levers.py` → `retrieve.search()` | 46e4ba4 | unit tests (test_retrieval_levers) |
+| `_boost_recency` (knowledge-update recency boost 1.0-1.5x) | `bench/retrieval_levers.py` → `retrieve.search()` | 46e4ba4 | unit tests |
+| Question-type-aware grading (temporal off-by-one, KU history, multi-session aggregation) | `bench/nous_scored.py` `RUBRIC` | ee246dc | A/B: temporal 0.7→0.9 (deepseek), overall 0.842 |
+| MemoryStress metrics (recall@age, degradation curve, contradiction) | `bench/metrics.py` | efb9412 | unit tests (test_metrics) |
+
+### Rejected (doesn't fit)
+- **OMEGA SQLiteStore** — displaced by graft (C daemon, per-repo graphs)
+- **MS-MARCO cross-encoder reranker** — omega itself disabled it (hurts conversational recall); no GPU
+- **Compression** — omega disabled (proven harmful)
+- **GPT-4o grading** — Heimdall uses free fleet (mistral/deepseek) via bench/nous_scored.py
+- **Query-augment (LLM-generated queries)** — violates CPU-only retrieval; heuristic expansion kept
+
+### Blocker on full rerun
+Graft daemon (Metal-free rebuild) crashes after ~5 embeds ("cannot decode batches with this context" — llama batch/context bug in CPU-only build). Reader/rubric levers validated on oracle sample; full 490q run deferred until graft daemon is stable.
