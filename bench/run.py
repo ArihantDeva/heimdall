@@ -92,7 +92,8 @@ def main() -> None:
             continue
         try:
             cands = search(question["question"], top_k=args.top_k,
-                           with_bodies=not args.recall_only)
+                           with_bodies=not args.recall_only,
+                           question_type=question["question_type"])
             # Agent tier retrieves THROUGH the fact→session link: fact hits
             # are rewritten to their parent session title before scoring, so
             # fact precision converts into session recall (cycle-2 lever).
