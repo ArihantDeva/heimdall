@@ -27,7 +27,8 @@ if ! mkdir "$LOCK" 2>/dev/null; then
 fi
 trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
 
-# Kill stray daemons bound to THIS profile's socket (not others').
+# Kill stray daemons bound to THIS profile's socket only (a default-profile
+# daemon must keep serving kb_search — one daemon PER PROFILE is the rule).
 for pid in $(pgrep -f "graftd" || true); do
   if lsof -p "$pid" 2>/dev/null | grep -q "$SOCK"; then
     echo "graft-single: killing stray graftd pid $pid on $SOCK" >&2
