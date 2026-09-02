@@ -1,0 +1,9 @@
+[package]
+name = "heimdall-embed"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ort = "2.0.0-rc.13"
+tokenizers = "0.20"
+ndarray = "0.17"

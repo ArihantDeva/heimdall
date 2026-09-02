@@ -1,0 +1,8 @@
+[package]
+name = "heimdall-search"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled", "load_extension"] }
+heimdall-embed = { path = "../heimdall-embed" }

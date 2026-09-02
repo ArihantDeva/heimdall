@@ -24,3 +24,9 @@ vendor/graft/graft.db*
 vendor/graft/build/
 vendor/graft/models/
 vendor/graft/third_party/
+
+# rust build artifacts
+target/
+
+# exported ONNX model — regenerate with rs/heimdall-embed/export_onnx.py
+rs/heimdall-embed/model/
