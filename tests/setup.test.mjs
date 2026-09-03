@@ -11,8 +11,11 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	CATALOG, detectHardware, renderConfig, defaultChoices,
-	parseSetupArgs, validateModelPath,
+	parseSetupArgs, validateModelPath, physicalCoresFromCpuinfo, resolveAccel,
+	writeProbeConfig,
 } from "../bin/lib/setup.mjs";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, chmodSync } from "node:fs";
 
 const repo = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -142,6 +145,129 @@ test("rendered config passes graftd --check-config", () => {
 		const out = execFileSync(graftd, ["--check-config", cfg], { encoding: "utf8" });
 		assert.match(out, /model_path: \/models\/bge-m3\.gguf/);
 		assert.match(out, /hardware_accel: true/);
+	} finally {
+		cleanup();
+	}
+});
+
+// ---------------------------------------------------------------------------
+// New tests for 0.9.0 additions
+// ---------------------------------------------------------------------------
+
+// detectHardware instances default
+test("detectHardware: instances default is 2", () => {
+	const hw = detectHardware();
+	assert.equal(hw.instances, 2, `instances should be 2, got ${hw.instances}`);
+});
+
+// resolveAccel table
+test("resolveAccel: darwin+arm → metal", () => {
+	assert.equal(resolveAccel({ platform: "darwin", arm: true, hasNvidia: false }), "metal");
+});
+test("resolveAccel: darwin+!arm → cpu", () => {
+	assert.equal(resolveAccel({ platform: "darwin", arm: false, hasNvidia: false }), "cpu");
+});
+test("resolveAccel: linux+nvidia → cuda", () => {
+	assert.equal(resolveAccel({ platform: "linux", arm: false, hasNvidia: true }), "cuda");
+});
+test("resolveAccel: linux+no nvidia → cpu", () => {
+	assert.equal(resolveAccel({ platform: "linux", arm: false, hasNvidia: false }), "cpu");
+});
+
+// physicalCoresFromCpuinfo
+test("physicalCoresFromCpuinfo: 2 sockets × 2 cores × 2 threads = 4 physical cores", () => {
+	// Two sockets (physical id 0 and 1), each with 2 cores (core id 0 and 1),
+	// each core with 2 threads (4 blocks per socket = 8 total processor blocks).
+	const blocks = [];
+	for (let sock = 0; sock < 2; sock++) {
+		for (let core = 0; core < 2; core++) {
+			for (let thread = 0; thread < 2; thread++) {
+				blocks.push(
+					`processor\t: ${sock * 4 + core * 2 + thread}`,
+					`physical id\t: ${sock}`,
+					`core id\t\t: ${core}`,
+					``,
+				);
+			}
+		}
+	}
+	const text = blocks.join("\n");
+	assert.equal(physicalCoresFromCpuinfo(text), 4);
+});
+test("physicalCoresFromCpuinfo: returns 0 for text without the fields", () => {
+	assert.equal(physicalCoresFromCpuinfo("processor\t: 0\nflags\t: fpu vme\n"), 0);
+	assert.equal(physicalCoresFromCpuinfo(""), 0);
+});
+
+// parseSetupArgs defaults
+test("parseSetupArgs: defaults — model bge-m3 not set unless specified", () => {
+	const p = parseSetupArgs([]);
+	assert.deepEqual(p.flags, {});
+	assert.equal(p.error, undefined);
+});
+test("parseSetupArgs: --model and --instances override", () => {
+	const p = parseSetupArgs(["--model", "bge-m3", "--instances", "4"]);
+	assert.equal(p.flags.model, "bge-m3");
+	assert.equal(p.flags.instances, "4");
+});
+
+// CLI run with broken graftd
+test("CLI setup --graftd <broken> exits non-zero with clean message (no stack), binary not copied", () => {
+	const { home, cleanup } = tmpHome();
+	try {
+		// Create fake model file ≥ 10MB
+		const fakeModel = join(home, "model.gguf");
+		writeFileSync(fakeModel, Buffer.alloc(11 * 1024 * 1024));
+		// Create broken fake graftd
+		const fakeBin = join(home, "fake-graftd");
+		writeFileSync(fakeBin, "#!/bin/sh\nexit 1\n");
+		chmodSync(fakeBin, 0o755);
+		// Create probe config
+		const { configPath } = writeProbeConfig(home);
+
+		const r = spawnSync(process.execPath, [
+			join(repo, "bin", "heimdall.js"), "setup",
+			"--graftd", fakeBin,
+			"--skip-daemon",
+			"--model-path", fakeModel,
+		], {
+			encoding: "utf8",
+			env: { ...process.env, HOME: home },
+			timeout: 30_000,
+		});
+		// Should exit non-zero
+		assert.notEqual(r.status, 0, `should have non-zero exit, got 0`);
+		// Output should not contain stack traces
+		assert.ok(!/(at .*\.mjs:\d+)|(Error:.*\n.*at )/.test(r.stderr ?? ""), `stack trace in stderr: ${r.stderr}`);
+		// graftd should NOT be installed
+		assert.ok(!existsSync(join(home, ".local", "bin", "graftd")), "graftd should not be installed");
+	} finally {
+		cleanup();
+	}
+});
+
+test("CLI setup --graftd <working> → installed at ~/.local/bin/graftd", () => {
+	const { home, cleanup } = tmpHome();
+	try {
+		const fakeModel = join(home, "model.gguf");
+		writeFileSync(fakeModel, Buffer.alloc(11 * 1024 * 1024));
+		// Create working fake graftd
+		const fakeBin = join(home, "fake-graftd");
+		writeFileSync(fakeBin, "#!/bin/sh\necho 'model_path: /nonexistent/probe.gguf'\necho 'hardware_accel: false'\nexit 0\n");
+		chmodSync(fakeBin, 0o755);
+
+		const r = spawnSync(process.execPath, [
+			join(repo, "bin", "heimdall.js"), "setup",
+			"--graftd", fakeBin,
+			"--skip-daemon",
+			"--model-path", fakeModel,
+		], {
+			encoding: "utf8",
+			env: { ...process.env, HOME: home },
+			timeout: 30_000,
+		});
+		assert.equal(r.status, 0, `stderr: ${r.stderr}\nstdout: ${r.stdout}`);
+		assert.ok(existsSync(join(home, ".local", "bin", "graftd")), "graftd should be installed");
 	} finally {
 		cleanup();
 	}

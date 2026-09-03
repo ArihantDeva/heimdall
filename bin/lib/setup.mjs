@@ -7,7 +7,7 @@
 // runSetup() is the CLI entry.
 import { execFileSync } from "node:child_process";
 import {
-  existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, statSync, renameSync, chmodSync, unlinkSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, copyFileSync, statSync, renameSync, chmodSync, unlinkSync, rmdirSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 import os from "node:os";
@@ -31,27 +31,89 @@ const sh = (cmd, args) => {
 };
 
 // ---------------------------------------------------------------------------
+// Hardware detection helpers (exported for tests)
+// ---------------------------------------------------------------------------
+
+// Count unique (physical id, core id) pairs in /proc/cpuinfo text.
+// Returns 0 when the required fields are absent.
+export function physicalCoresFromCpuinfo(text) {
+  const pairs = new Set();
+  let physId = null;
+  let coreId = null;
+  for (const line of text.split("\n")) {
+    const m = line.match(/^(\S[^:]+?)\s*:\s*(.+)/);
+    if (!m) {
+      // Blank line = processor block separator; commit what we have
+      if (physId !== null && coreId !== null) {
+        pairs.add(`${physId}:${coreId}`);
+        physId = null;
+        coreId = null;
+      }
+      continue;
+    }
+    const key = m[1].trim().toLowerCase();
+    const val = m[2].trim();
+    if (key === "physical id") physId = val;
+    else if (key === "core id") coreId = val;
+  }
+  // Commit last block if no trailing newline
+  if (physId !== null && coreId !== null) pairs.add(`${physId}:${coreId}`);
+  return pairs.size;
+}
+
+// Resolve accelerator from hardware profile.
+export function resolveAccel({ platform, arm, hasNvidia }) {
+  if (platform === "darwin" && arm) return "metal";
+  if (platform === "darwin" && !arm) return "cpu";
+  if (hasNvidia) return "cuda";
+  return "cpu";
+}
+
+// ---------------------------------------------------------------------------
 // Hardware detection
 // ---------------------------------------------------------------------------
 export function detectHardware() {
   const platform = process.platform;
   let cores = os.cpus().length;
   let arm = false;
-  let accel = "cpu";
+  let hasNvidia = false;
 
   if (platform === "darwin") {
     const pc = sh("sysctl", ["-n", "hw.physicalcpu"]);
     if (pc.ok) cores = parseInt(pc.out, 10) || cores;
     const a = sh("sysctl", ["-n", "hw.optional.arm64"]);
     arm = a.ok && a.out.trim() === "1";
-    if (arm) accel = "metal"; // Apple Silicon → llama.cpp Metal backend
   } else if (platform === "linux") {
-    const n = sh("nproc", []);
-    if (n.ok) cores = parseInt(n.out.trim().split("\n")[0], 10) || cores;
-    if (sh("nvidia-smi", ["-L"]).ok) accel = "cuda";
+    // Physical cores: /proc/cpuinfo → lscpu → nproc → os.cpus()
+    let physCores = 0;
+    try {
+      const cpuinfo = readFileSync("/proc/cpuinfo", "utf8");
+      physCores = physicalCoresFromCpuinfo(cpuinfo);
+    } catch { /* best effort */ }
+    if (!physCores) {
+      // Try lscpu -p=CORE,SOCKET
+      const lscpu = sh("lscpu", ["-p=CORE,SOCKET"]);
+      if (lscpu.ok) {
+        const uniq = new Set(
+          lscpu.out.split("\n")
+            .filter((l) => l && !l.startsWith("#"))
+            .map((l) => l.trim()),
+        );
+        physCores = uniq.size;
+      }
+    }
+    if (!physCores) {
+      const n = sh("nproc", []);
+      if (n.ok) physCores = parseInt(n.out.trim().split("\n")[0], 10) || 0;
+    }
+    if (!physCores) physCores = os.cpus().length;
+    cores = physCores;
+    hasNvidia = sh("nvidia-smi", ["-L"]).ok;
   }
 
-  return { platform, cores, arm, accel, instances: cores >= 8 ? 2 : 1 };
+  const accel = resolveAccel({ platform, arm, hasNvidia });
+  // Default instances: flat 2 (overridable by --instances flag in runSetup)
+  return { platform, cores, arm, accel, instances: 2 };
 }
 
 // ---------------------------------------------------------------------------
@@ -344,33 +406,81 @@ embedding model, installs/repairs the launchd daemon. Verify with 'heimdall doct
     console.log("warning: if a previous model was in use, existing embeddings are invalid — re-embed or rebuild affected profiles (see docs/setup.md)");
   }
 
+  // --- graftd binary install (before daemon management) ---
+  const { probeGraftd, ensureGraftd } = await import("./graft-build.mjs");
+  const { configPath: probeCfgPath, cleanup: cleanupProbe } = writeProbeConfig();
+  const dest = localBinGraftd();
+  let graftdBinPath = null;
+
+  try {
+    if (f.graftd) {
+      // Explicit --graftd path: probe before copying
+      if (!existsSync(f.graftd)) {
+        console.error(`--graftd not found: ${f.graftd}`);
+        return 1;
+      }
+      const probe = probeGraftd(f.graftd, { configPath: probeCfgPath });
+      if (!probe.ok) {
+        console.error(`--graftd binary failed probe (exit ${probe.code ?? "ENOENT"}): ${f.graftd}`);
+        return 1;
+      }
+      // Copy to dest
+      mkdirSync(dirname(dest), { recursive: true });
+      copyFileSync(f.graftd, dest);
+      chmodSync(dest, 0o755);
+      console.log(`daemon: installed ${f.graftd} → ${dest}`);
+      graftdBinPath = dest;
+    } else {
+      // Auto: find or build graftd
+      const allowBuild = process.env.HEIMDALL_NO_BUILD !== "1";
+      const result = await ensureGraftd({
+        configPath: probeCfgPath,
+        accel: hw.accel,
+        allowBuild,
+        log: (msg) => console.log(msg),
+        env: process.env,
+        home: os.homedir(),
+        pkgRoot: ROOT,
+      });
+      if (!result.ok) {
+        console.error(result.message ?? "daemon: graftd not available");
+        return 1;
+      }
+      graftdBinPath = result.path;
+    }
+  } finally {
+    cleanupProbe();
+  }
+
   // --- daemon ---
   if (f.skipDaemon) {
-    console.log(`daemon: skipped (--skip-daemon). Start manually: ${localBinGraftd()} --config ${cfgPath}`);
+    console.log(`daemon: skipped (--skip-daemon). Start manually: ${graftdBinPath ?? dest} --config ${cfgPath}`);
     return 0;
   }
 
-  // graftd binary: --graftd path, else freshly built vendored binary, else existing install.
-  let graftdSrc = f.graftd || null;
-  if (graftdSrc && !existsSync(graftdSrc)) {
-    console.error(`--graftd not found: ${graftdSrc}`);
-    return 1;
-  }
-  const buildDir = join(ROOT, "vendor", "graft", "build", "graftd");
-  const dest = localBinGraftd();
-  if (!graftdSrc && existsSync(buildDir)) graftdSrc = buildDir;
-  if (!graftdSrc && existsSync(dest)) graftdSrc = dest;
-  if (!graftdSrc) {
-    console.error(`daemon: no graftd found — pass --graftd /path/to/graftd or build: cmake -S ${join(ROOT, "vendor", "graft")} -B ${join(ROOT, "vendor", "graft", "build")} && cmake --build ${join(ROOT, "vendor", "graft", "build")}`);
-    return 1;
-  }
-  mkdirSync(dirname(dest), { recursive: true });
-  if (graftdSrc !== dest) {
-    copyFileSync(graftdSrc, dest);
-    chmodSync(dest, 0o755);
-    console.log(`daemon: installed ${graftdSrc} → ${dest}`);
-  }
-  const okDaemon = await installDaemon(dest, cfgPath);
+  const okDaemon = await installDaemon(graftdBinPath ?? dest, cfgPath);
   console.log(okDaemon ? "done: run 'heimdall doctor' to verify" : "done with errors: see messages above");
   return okDaemon ? 0 : 1;
+}
+
+// ---------------------------------------------------------------------------
+// writeProbeConfig — writes a probe config into a temp dir for probeGraftd.
+// Exported for use in graft-build.mjs tests and postinstall.mjs.
+// ---------------------------------------------------------------------------
+export function writeProbeConfig(dir) {
+  const tmpDir = dir ?? mkdtempSync(join(os.tmpdir(), "heimdall-probe-"));
+  const ownDir = !dir; // we created it, so we clean it up
+  const probeHw = { platform: process.platform, cores: 2, arm: false, accel: "cpu", instances: 1 };
+  const choices = defaultChoices(probeHw, "/nonexistent/probe.gguf");
+  const configPath = join(tmpDir, "probe-config.yaml");
+  writeFileSync(configPath, renderConfig(probeHw, choices));
+  return {
+    configPath,
+    cleanup: () => {
+      if (ownDir) {
+        try { unlinkSync(configPath); } catch { /* best effort */ }
+        try { rmdirSync(tmpDir); } catch { /* best effort */ }
+      }
+    },
+  };
 }
