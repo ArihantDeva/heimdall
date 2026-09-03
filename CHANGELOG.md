@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.0 — 2026-09-02
 
 ### Added
 
@@ -21,11 +21,63 @@
   defaults, source logged) and `graftd --check-config [PATH]` (side-effect-free
   resolved-config dump). Update via `git subtree pull` — see
   `vendor/graft/VENDORED.md`.
+- **Self-contained `graftd` build** — llama.cpp fetched via CMake
+  `FetchContent` at pinned tag `b10760` and compiled as static libraries.
+  `graftd` has no dynamic `libllama`/`libggml` dependency and no
+  RPATH/LC_RPATH. Metal shader library embedded on Apple
+  (`GGML_METAL_EMBED_LIBRARY`). CUDA passthrough: `-DGGML_CUDA=ON`.
+- **npm postinstall auto-build** — `npm i -g` builds `graftd` when the
+  toolchain is present; prints a SETUP NEEDED block (what failed + log path
+  + retry instructions) on any failure and exits 0 — install never breaks.
+  `HEIMDALL_NO_BUILD=1` skips the build in postinstall and `heimdall setup`.
+- **`bin/lib/graft-build.mjs`** — probe (`graftd --check-config`, exit 0 +
+  `model_path:` in stdout; missing `configPath` returns error immediately),
+  canonical-first find/install (`~/.local/bin/graftd` probed first; if
+  broken/absent and another candidate works — build cache or
+  `~/Repos/graft-cpp/build/graftd` — it is copied atomically into
+  `~/.local/bin/graftd`, broken canonical kept as `graftd.bak-<timestamp>`;
+  only if no candidate works does it fall through to build), build (cmake
+  configure + incremental build, timeout-bounded), install (atomic copy to
+  `~/.local/bin/graftd`; `graft` CLI copied to `~/.local/bin/graft` only if
+  absent).
+- **`heimdall setup` binary handling** — finds a working `graftd` or builds
+  and installs one when none exists; `--graftd PATH` probed before copying
+  (broken binary = one-line error, nothing written).
+- **`tests/graftd-binary.test.mjs`** — asserts the built `graftd` has no
+  dynamic llama/ggml deps, no RPATH/LC_RPATH, and runs after being copied
+  elsewhere.
 
 ### Changed
 
 - bge-m3.gguf relocated from `vendor/graft/models/` to `~/.graft/models/`
   (models no longer live inside the source tree; setup downloads on demand).
+- **Setup default instances** — always 2 (was 2 only when cores ≥ 8, else 1).
+- **Linux thread detection** — physical cores counted from `/proc/cpuinfo`
+  (unique physical-id × core-id pairs), falling back to `lscpu -p=CORE,SOCKET`,
+  `nproc`, then `os.cpus()`.
+- **`vendor/graft/` in the npm tarball** — `vendor/graft/` source, CMake, and
+  `third_party/{BLAKE3,mpack,sqlite-vec}` are shipped; `third_party/llama.cpp/`,
+  `build/`, `models/`, `*.db` are excluded; llama.cpp is fetched at first build
+  (network needed once).
+- **C++ runtime linkage** — `graftd` links `stdc++` on Linux, `c++` on Apple
+  (was `c++` unconditionally, which fails to link on Linux/gcc).
+
+### Fixed
+
+- **`dyld: Library not loaded: @rpath/libllama.0.dylib`** — pre-0.9.0 `graftd`
+  linked llama.cpp dynamically with build-tree RPATHs; the binary broke when
+  moved out of the build tree. The static build has no RPATH/LC_RPATH and no
+  dynamic llama/ggml dependency.
+- **Hardcoded `third_party/llama.cpp/build` dependency** — replaced by CMake
+  `FetchContent`; llama.cpp is fetched at configure time from the pinned tag
+  and built in place.
+- **`vendor/graft` subtree missing 61 source files** (`src/**`,
+  `include/graft/*.h`, `VERSION`): commit b7845ef's conflict resolution
+  deleted them; restored verbatim from the v0.1.0-heimdall.2 squash
+  (b4a51de). `src/daemon/main.c` keeps the heimdall fork delta.
+- **Tracked dangling symlink removed** — `vendor/graft/third_party/llama.cpp`
+  → `/tmp/llama-master` was tracked in git; removed. The path is now the
+  gitignored FetchContent checkout.
 
 ## 0.8.0 — 2026-08-26
 
