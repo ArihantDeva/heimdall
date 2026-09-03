@@ -8,6 +8,7 @@ telemetry.tsv
 # node
 node_modules/
 *.tsbuildinfo
+*.tgz  # npm pack output
 
 # subagent artifacts
 .pi-subagents/
