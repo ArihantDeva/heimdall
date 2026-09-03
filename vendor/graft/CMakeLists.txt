@@ -21,12 +21,43 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(SQLITE REQUIRED sqlite3)
 pkg_check_modules(YAML REQUIRED yaml-0.1)
 
-# llama.cpp (deve essere stato compilato in third_party/llama.cpp/build)
-set(LLAMA_DIR ${CMAKE_SOURCE_DIR}/third_party/llama.cpp)
+# llama.cpp — fetched and built as STATIC libraries; graftd has no dynamic
+# llama/ggml dependency and needs no RPATH/RUNPATH (binary is self-contained).
+include(FetchContent)
+set(GRAFT_LLAMA_CPP_REPO "https://github.com/ggml-org/llama.cpp"
+    CACHE STRING "llama.cpp git repository URL")
+set(GRAFT_LLAMA_CPP_TAG "b10760"
+    CACHE STRING "llama.cpp git tag to build against")
+set(GRAFT_LLAMA_CPP_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/llama.cpp"
+    CACHE PATH "Local llama.cpp source dir; reused without network when already present")
+
+# Reuse an already-present checkout without re-cloning
+set(FETCHCONTENT_UPDATES_DISCONNECTED_LLAMA ON CACHE BOOL "" FORCE)
+
+FetchContent_Declare(llama
+  GIT_REPOSITORY ${GRAFT_LLAMA_CPP_REPO}
+  GIT_TAG        ${GRAFT_LLAMA_CPP_TAG}
+  GIT_SHALLOW    TRUE
+  SOURCE_DIR     ${GRAFT_LLAMA_CPP_SOURCE_DIR}
+)
+
+# Force static build; skip everything not needed (tests, examples, server, tools, app)
+set(BUILD_SHARED_LIBS    OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_SERVER   OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_TOOLS    OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_APP      OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_COMMON   OFF CACHE BOOL "" FORCE)
+if(APPLE)
+  # Embed Metal shader library so graftd has no default.metallib file dependency
+  set(GGML_METAL_EMBED_LIBRARY ON CACHE BOOL "" FORCE)
+endif()
+
+FetchContent_MakeAvailable(llama)
+
 # pkg-config -L paths are not searched by default on macOS (no /opt/homebrew/lib in default search)
 link_directories(${YAML_LIBRARY_DIRS} ${SQLITE_LIBRARY_DIRS})
-include_directories(${LLAMA_DIR}/include ${LLAMA_DIR}/ggml/include)
-link_directories(${LLAMA_DIR}/build/bin ${LLAMA_DIR}/build/src ${LLAMA_DIR}/build/ggml/src ${LLAMA_DIR}/build/ggml/src/ggml-blas ${LLAMA_DIR}/build/ggml/src/ggml-metal)
 
 # mpack
 set(MPACK_DIR ${CMAKE_SOURCE_DIR}/third_party/mpack/src/mpack)
@@ -128,11 +159,6 @@ target_link_libraries(graft_core
   mpack
   blake3
   llama
-  ggml
-  ggml-base
-  ggml-cpu
-  ggml-blas
-  ggml-metal
   m
   pthread
   ${MG_PLATFORM_LIBS}
@@ -141,8 +167,12 @@ target_link_libraries(graft_core
 # === Binari ===
 add_executable(graftd src/daemon/main.c)
 target_link_libraries(graftd graft_core)
-# llama is C++; graftd consumes libllama/ggml symbols → link libc++
-target_link_libraries(graftd c++)
+# llama is C++; graftd consumes libllama/ggml symbols → link C++ runtime
+if(APPLE)
+  target_link_libraries(graftd c++)
+else()
+  target_link_libraries(graftd stdc++)
+endif()
 
 add_executable(graft
   src/cli/main.c
