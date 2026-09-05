@@ -9,24 +9,24 @@
 
 **Your agent keeps rebuilding work you already did. Heimdall makes it stop.**
 
-Heimdall gives AI coding agents **persistent memory across every repository and project you work on** — so the question *"did I already solve this in another project?"* gets answered by one verified search instead of twenty minutes of grep, `find`, and `ls` loops.
+Heimdall gives AI coding agents **persistent memory across every repository and project you work on** so the question *"did I already solve this in another project?"* gets answered by one verified search instead of twenty minutes of grep, `find`, and `ls` loops.
 
 ## The problem it solves
 
-**1. Memory that doesn't live in one repo.** Every other memory tool is per-project. But your work isn't: the Excel tracker pattern you built last month solves the CSV-parsing problem in today's repo. Heimdall indexes *everything you touch* into one semantic graph, so knowledge follows you across repositories, languages, and months.
+**1. Memory that doesn't live in one repository.** Every other memory tool is per-project. But your work isn't: the optimized functions you built in one project could be useful somewhere else. Heimdall indexes *everything you touch* into one semantic graph, so knowledge follows you across repositories, languages, and months.
 
 **2. Orientation time, cut to seconds.** A fresh agent session burns dozens of bash commands just figuring out the lay of the land — `ls`, `grep`, re-reading files it read last week. Heimdall injects the relevant prior work into the session's first prompt and backs a single `kb_search` call: ranked, scoped, verified. Fewer commands, fewer tokens, faster first useful action.
 
-**3. Zero token spend, zero GPU.** Memory maintenance is a local daemon: file watching, tree-sitter AST parsing, sqlite. Indexing a file costs **CPU only — never an LLM call**. Retrieval is hybrid ranked search (lexical + semantic + graph walk) over locally-computed embeddings. Your context window stays for your actual work.
+**3. Zero token spend.** Memory maintenance is a local daemon: file watching, tree-sitter AST parsing, sqlite. Indexing a file costs **CPU only — never an LLM call**. Retrieval is hybrid ranked search (lexical + semantic + graph walk) over locally-computed embeddings. Your context window stays for your actual work. You can also use your GPU for up to 3.4x speeds.
 
-**4. Retrieval you can act on.** Semantic memory tools return plausible matches; Heimdall re-verifies every hit against the filesystem at query time and labels it:
+**4. Retrieval you can act on.** Semantic memory tools return plausible matches, but Heimdall also verifies it at runtime.
 
 - `STRONG` — path exists on disk, strong lexical coverage, **and** the file's actual content answers the query (content-aware scoring)
 - `WEAK` — semantic match only; plausible but unverified
 - `REBUILT` — file moved; Heimdall found it and re-anchored automatically
 - `STALE` / `REMOVED` — dead path, logged and pruned so it stops ranking
 
-An agent acting on a dead path is worse than no answer. Verdicts are what make the graph trustworthy enough to act on.
+An agent acting on a dead path is worse than no answer. Ranked retrieval is trustworthy enough to act on. Gives the real picture, instead of the best guess.
 
 ## How a session changes
 
@@ -67,7 +67,7 @@ Architecture-level comparison of shipped defaults — not benchmark claims. "LLM
 
 By design, not by benchmark — these follow from the architecture:
 
-1. **Zero-LLM indexing vs extraction pipelines.** mem0, Zep, Letta, and LangMem all put an LLM inside the write path: every remembered fact costs extraction tokens, adds latency, and means your code/notes are processed by (or prompt-built for) a hosted model unless you wire your own. Heimdall's ingest is tree-sitter plus local CPU embeddings — indexing 10k files costs $0 and leaks nothing.
+1. **Zero-LLM indexing instead of extraction pipelines.** mem0, Zep, Letta, and LangMem all use LLMs to write facts: every remembered fact costs extraction tokens, adds latency, and means your code/notes are processed by a cloud provider unless you wire your own. Heimdall's ingest is tree-sitter plus local CPU embeddings. It cannot leak data, nor does it cost anything.
 
 2. **Verified hits vs plausible hits.** RAG returns nearest neighbors with a similarity score; nothing checks that the chunk still exists, let alone that it answers the question. Heimdall re-verifies every result against the live filesystem at query time (path exists? content still matches?) and labels it STRONG/WEAK/REBUILT/STALE. Agents can act on STRONG without a confirmation round-trip.
 
@@ -75,9 +75,9 @@ By design, not by benchmark — these follow from the architecture:
 
 4. **Cross-repo scope without a corpus pipeline.** Classic RAG needs you to define, chunk, and refresh a corpus per app. Heimdall watches working trees continuously — new repos join the graph on their own, and personal context (prompt logs, notes, now even email via `heimdall ingest-email`) lands in the same graph your code lives in.
 
-5. **What they win back.** Fair's fair: mem0/Zep/Letta excel at conversational fact curation across chat products, multi-user serving, and hosted APIs; LLM extraction summarizes messy prose better than regexes. Heimdall is the opposite bet — a single developer's machine-wide workspace where the unit of memory is verified file-level knowledge, not chat utterances.
+5. **What they win back.** Fair's fair: mem0/Zep/Letta excel at conversational fact curation across chat products, multi-user serving, and hosted APIs; LLM extraction summarizes messy prose better than regexes. Heimdall is making the opposite bet, that a single developer's machine-wide workspace where the unit of memory is verified file-level knowledge, not chat utterances. 
 
-Heimdall is the only one built for the actual workflow: many repos, many months, one agent session at a time, on hardware you already own.
+Heimdall is the only one built for the real indie developer workflow: many repos, many months, one agent session at a time, on hardware you already own. Best for people with tons of side projects.
 
 ## FAQ
 
