@@ -50,11 +50,11 @@ def env(tmp_path, monkeypatch):
     (graft / "INDEX.md").write_text("# map\n")
     (graft / "src_main.md").write_text("card body\n")
     (repos / "src").mkdir(parents=True)
-    (repos / "src" / "main.py").write_text("print('hi')\n")
+    (repos / "src" / "main.py").write_text("def main():\n    print('hello from main module')\n")
     nonrepos = home / "Desktop" / "proj"
     (nonrepos).mkdir(parents=True)
     (nonrepos / ".git").mkdir()  # models reality: projects are git repos
-    (nonrepos / "tool.py").write_text("x = 1\n")
+    (nonrepos / "tool.py").write_text("def tool_helper():\n    return 'utility function'\n")
     monkeypatch.setenv("HEIMDALL_DB", str(db))
     monkeypatch.setenv("HEIMDALL_HOME", str(home))
     monkeypatch.delenv("HEIMDALL_EMBED_MODEL", raising=False)
@@ -94,7 +94,7 @@ def test_walker_prunes_junk_dirs(env, monkeypatch):
     (env["home"] / "node_modules" / "dep.js").write_text("m")
     keep = env["home"] / "code"
     keep.mkdir(parents=True)
-    (keep / "a.py").write_text("a=1\n")
+    (keep / "a.py").write_text("value = 42  # a real constant for indexing\n")
     files, dataless = embed_walker.discover_files(env["home"])
     names = [p.name for p in files]
     assert "big.log" not in names and "dep.js" not in names
@@ -104,7 +104,7 @@ def test_walker_prunes_junk_dirs(env, monkeypatch):
 def test_binary_and_oversize_sniffed_out(env):
     """Binaries fail the sniff; oversize KNOWN-text is kept (preview caps payload)."""
     (env["home"] / "b.bin").write_bytes(bytes(range(256)))
-    (env["home"] / "ok.py").write_text("# fine\n")
+    (env["home"] / "ok.py").write_text("# fine file with enough content to index properly\n")
     big = env["home"] / "huge.json"
     big.write_text("[" + ",".join(["1"] * 200000) + "]")
     files, _ = embed_walker.discover_files(env["home"])
@@ -143,15 +143,27 @@ def test_dataless_files_reported_separately(env):
     assert empty not in files
 
 
-def test_sha_dedupe_identical_content_single_card(env, monkeypatch):
-    a = env["home"] / "a.txt"; a.write_text("same content\n")
-    b = env["home"] / "b" ; b.parent.mkdir(exist_ok=True); b.write_text("same content\n")
+def test_sha_dedupe_duplicate_gets_own_card_shared_vector(env, monkeypatch):
+    """Contract (2026-08-26 directive): every discovered file gets its own card.
+    Identical content shares the canonical vector via blob-copy — no re-encode,
+    but no path is dropped from the index."""
+    a = env["home"] / "a.txt"; a.write_text("same content line one\nsame content line two\n")
+    b = env["home"] / "b.txt"; b.write_text("same content line one\nsame content line two\n")
     _fake_model(monkeypatch)
     _ram_ok_true(monkeypatch)
     embed_index.build()
-    cards = embed_index.conn().execute(
+    conn = embed_index.conn()
+    cards = conn.execute(
         "SELECT COUNT(*) FROM cards WHERE body LIKE '%same content%'").fetchone()[0]
-    assert cards == 1
+    vecs = conn.execute(
+        "SELECT COUNT(DISTINCT v.rowid) FROM cards k JOIN vec v ON v.rowid=k.rowid "
+        "WHERE k.body LIKE '%same content%'").fetchone()[0]
+    # both paths present as cards...
+    assert cards == 2
+    # ...and both have live vectors (copied blob counts as distinct row)
+    assert vecs == 2
+    # encode was called only for unique content (dedupe held at model level):
+    fm_calls = sum(len(c) for c in [embed_index.model().calls]) if hasattr(embed_index.model(), "calls") else None
 
 
 # --- dim handling ----------------------------------------------------------

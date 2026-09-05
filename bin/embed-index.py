@@ -19,6 +19,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import time
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
@@ -38,6 +39,9 @@ HOME_ROOT = pathlib.Path(os.environ.get("HEIMDALL_HOME", str(pathlib.Path.home()
 REPOS = HOME_ROOT / "Repos"  # attribution only; discovery covers all of HOME_ROOT
 MODEL = os.environ.get("HEIMDALL_EMBED_MODEL", "BAAI/bge-small-en-v1.5")
 DIM = 384 if "bge-small" in MODEL else 1024
+# MPS measured 3.4x CPU under load (32.7 vs 9.7 f/s) and doesn't contend for
+# CPU cores with other agent sessions. HEIMDALL_DEVICE=cpu to opt out.
+DEVICE = os.environ.get("HEIMDALL_DEVICE", "mps")
 MIN_FREE_GB = float(os.environ.get("HEIMDALL_MIN_FREE_GB", "2"))
 BUILD_HEADROOM_GB = 4.0
 BATCH = 128
@@ -49,10 +53,32 @@ class Busy(Exception):
     """Another embed-index process holds the single-flight lock."""
 
 
+STATE_PATH = DB.parent / "semantic-state.json"
+
+
+def record_semantic_state(state: str) -> None:
+    """Append one {t,state} transition to semantic-state.json (C11 observability).
+    Best-effort: never let telemetry break the operation it observes. The file
+    is the only state — kb-health.sh reads it to report availability streaks."""
+    try:
+        events = []
+        if STATE_PATH.exists():
+            with contextlib.suppress(Exception):
+                events = json.loads(STATE_PATH.read_text())
+        events.append({"t": int(time.time()), "state": state})
+        STATE_PATH.write_text(json.dumps(events[-200:]))  # bounded tail
+    except Exception as e:  # noqa: BLE001 — telemetry must not throw
+        print(f"embed-index: state record failed: {e}", file=sys.stderr)
+
+
 def model() -> SentenceTransformer:
     global MODEL_CACHE
     if MODEL_CACHE is None:
-        MODEL_CACHE = SentenceTransformer(MODEL, device="cpu")
+        try:
+            MODEL_CACHE = SentenceTransformer(MODEL, device=DEVICE)
+        except Exception as e:
+            print(f"embed-index: {DEVICE} unavailable ({e}); falling back to cpu", file=sys.stderr)
+            MODEL_CACHE = SentenceTransformer(MODEL, device="cpu")
     return MODEL_CACHE
 
 
@@ -160,7 +186,13 @@ def _flat_vec(v: object) -> list[float]:
     return [float(x) for x in v]
 
 
-def _upsert(c: sqlite3.Connection, m, batch: list[tuple]) -> int:
+def _upsert(c: sqlite3.Connection, m, batch: list[tuple], allow_dupes: bool = False) -> int:
+    if allow_dupes:
+        # Duplicate batch: copy vectors from their canonical cards, no model.
+        for (cid, rel, body, sha, mt, size) in batch:
+            _dup_card(c, cid, rel, body, sha, mt, size)
+        c.commit()
+        return len(batch)
     texts = [t + "\n" + b for _, t, b, *_ in batch]
     vecs = m.encode(texts, normalize_embeddings=True, show_progress_bar=False)
     for (cid, rel, body, sha, mt, size), vec in zip(batch, vecs):
@@ -189,6 +221,25 @@ def _persist_search_roots(graft_dirs: list[pathlib.Path]) -> None:
     roots = sorted(str(d) for d in graft_dirs if (d / "graft").is_dir())
     out_path.write_text(json.dumps({"roots": roots}, indent=0))
     print(f"embed-index: {len(roots)} search roots persisted -> {out_path}", flush=True)
+
+
+def _dup_card(c: sqlite3.Connection, cid: str, rel: str, body: str,
+              sha: str, mt: float, size: int) -> None:
+    """Give a duplicate-content file its own card + vec row by copying the
+    existing vector blob — zero encode cost, so 'every possible file' holds
+    without paying re-embedding for boilerplate twins."""
+    src = c.execute("SELECT v.embedding FROM cards k JOIN vec v ON v.rowid=k.rowid "
+                    "WHERE k.sha1=? LIMIT 1", (sha,)).fetchone()
+    if not src:
+        return  # source not indexed yet; normal upsert next pass
+    row = c.execute("SELECT rowid FROM cards WHERE id=?", (cid,)).fetchone()
+    if row:
+        c.execute("DELETE FROM vec WHERE rowid=?", (row[0],))
+        c.execute("DELETE FROM cards WHERE id=?", (cid,))
+    cur = c.execute("INSERT INTO cards VALUES (?,?,?,?,?,?,?,?)",
+                    (cid, str(HOME_ROOT / rel), rel, body[:3000], sha,
+                     _project_root(str(HOME_ROOT / rel)), mt, size))
+    c.execute("INSERT INTO vec(rowid, embedding) VALUES (?,?)", (cur.lastrowid, src[0]))
 
 
 def _prune_stale(c: sqlite3.Connection, known: dict[str, str], seen: set[str]) -> None:
@@ -266,11 +317,26 @@ def _build_inner(c: sqlite3.Connection, progress_every: int) -> int:
             seen.add(cid)
             continue  # mtime+size unchanged since last build — no re-read
         body = embed_walker.read_preview(p)
-        if not body.strip():
-            continue
+        if len(body.strip()) < embed_walker.MIN_PREVIEW_CHARS:
+            # Near-empty content (tiny configs, stubs): keep as name-only card
+            # — the filename is still retrieval signal. No vector cost beyond
+            # one shared encode per unique name-body.
+            body = f"[minimal file]\n{p.name}"
+            sha = "name:" + hashlib.sha1(body.encode()).hexdigest()
         sha = hashlib.sha1(body.encode()).hexdigest()
         if sha in claimed and (not prev or prev != sha):
-            continue  # identical content already indexed elsewhere
+            # Identical content elsewhere: still give THIS path its own card
+            # (user directive: every possible file), sharing the existing
+            # vector — no re-encode.
+            seen.add(cid)
+            batch.append((cid, rel, body[:3000], sha, st.st_mtime, st.st_size))
+            if len(batch) >= BATCH:
+                total += _upsert(c, m, batch, allow_dupes=True)
+                batch = []
+                if total // progress_every > milestone:
+                    milestone = total // progress_every
+                    print(f"embed-index: {total}/{len(text_paths)} embedded", flush=True)
+            continue
         claimed.add(sha)
         seen.add(cid)
         if prev == sha:
@@ -319,12 +385,14 @@ def query(q: str, n: int = 5, related: bool = False) -> list[dict]:
         MODEL = "BAAI/bge-small-en-v1.5" if db_d == 384 else "BAAI/bge-m3"
         DIM = db_d
     try:
-        _acquire_lock()
+        lock_fh = _acquire_lock()  # MUST bind: unbound refcount-frees → fd closed → flock released instantly
     except Busy:
         print("embed-index: busy; semantic skipped this call.", file=sys.stderr)
+        record_semantic_state("busy")
         sys.exit(3)  # loud: caller banners lexical-only degradation
     try:
         if not _ram_ok(MIN_FREE_GB, "query"):
+            record_semantic_state("busy")  # RAM-gated: same observable effect
             sys.exit(3)  # loud: rc!=0 makes kb-search.sh banner the degradation
         vec = _flat_vec(model().encode(q, normalize_embeddings=True))
         rows = c.execute("SELECT rowid, distance FROM vec WHERE embedding MATCH ? AND k = ?",
@@ -337,9 +405,14 @@ def query(q: str, n: int = 5, related: bool = False) -> list[dict]:
                             "score": round(1.0 - dist, 4)})
         if related and out:
             _siblings(c, out[0]["path"], out)
+        record_semantic_state("ok")
         return out
+    except Exception:
+        record_semantic_state("error")  # encode failures etc. must not be invisible
+        raise
     finally:
         c.close()
+        lock_fh.close()
 
 
 def status() -> dict:

@@ -1,57 +1,151 @@
 # Vendored: Graft
 
-`vendor/graft/` contains a vendored copy of **Graft** — a local-first semantic
-memory daemon (SQLite + local embeddings + graph edges) that powers Heimdall's
-storage + hybrid ranked retrieval.
+`vendor/graft/` in the Heimdall repo is a **git subtree** of the
+**graft-cpp fork** (`~/Repos/graft-cpp`, local fork of
+https://github.com/NanoNets/Graft, Apache 2.0).
 
-- **Upstream:** https://github.com/NanoNets/Graft (Apache 2.0)
-- **License:** Apache 2.0 — see `vendor/graft/LICENSE`
-- **Vendored date:** 2026-08-20
+- **Fork repo:** `~/Repos/graft-cpp` (local; publish to GitHub when ready)
+- **Pinned tag:** `v0.1.0-heimdall.2`
+- **Vendored as:** git subtree (`--squash`), prefix `vendor/graft`
+- **Vendored date:** 2026-08-27
 - **Contents:** source (`src/`), headers (`include/`), CMake build, config
   example, README, CHANGELOG, LICENSE, VERSION
 
+## Fork delta (changes vs upstream NanoNets/Graft)
+
+1. **Config fallback chain** (`src/daemon/main.c`): explicit `--config` >
+   `$GRAFT_CONFIG` env > `$HOME/.graft/config.yaml` (if present) > built-in
+   defaults. The winning source is logged to stderr at startup.
+2. **`graftd --check-config [PATH]`**: loads config (same chain), prints the
+   resolved socket/db/model/threads/instances/ctx/accel values, exits 0/1.
+   No side effects — used by `heimdall setup` and `heimdall doctor`.
+
+Everything else is upstream code. Keep the delta minimal so upstream pulls
+stay easy.
+
 ## What's vendored (and what's not)
 
-Vendored: the **source codebase** (`src/` — 49 files, ~524K) + `include/` +
-build files. This is the actual code — daemon, CLI, storage, embed, retrieve,
-explore, verify, http.
+Vendored: the **source codebase** (`src/`) + `include/` + build files +
+`third_party/{BLAKE3,mpack,sqlite-vec}`. These three subdirectories are
+tracked in the subtree and shipped in the npm tarball.
 
 **Not vendored** (keeps the repo small):
 - `build/` — compiled artifacts (graft/graftd binaries). Build from source.
-- `third_party/` — vendored upstream deps (llama.cpp ~185M, sqlite-vec,
-  BLAKE3, mpack) with their own licenses. CMake fetches/expects these at
-  build time; they are NOT Graft's code.
+- `models/*.gguf` — embedding models are large; `heimdall setup` downloads
+  them to `~/.graft/models/` (bge-m3 default). gitignored in the fork.
+- `third_party/llama.cpp/` — **not vendored and not shipped**. CMake
+  `FetchContent` clones it at build time at pinned tag `b10760`; the path is
+  gitignored. All other `third_party/` subdirectories (BLAKE3, mpack,
+  sqlite-vec) ARE tracked and shipped.
 
 ## Why it's here
 
 Graft is the **default backend** of Heimdall: it provides the storage +
 ranking engine (hybrid lexical/vector retrieval, graph edges, keyword dedup,
 local bge-m3 embeddings, verified semantic cache). Heimdall orchestrates it —
-watching sessions, keeping the graph fresh, verifying hits. Vendoring the
-source makes the full stack reproducible and auditable.
+watching sessions, keeping the graph fresh, verifying hits. The subtree makes
+the full stack reproducible and auditable while `graft-cpp` stays independently
+buildable/testable.
 
 ## Building
 
 ```bash
-cd vendor/graft
-# third_party deps (llama.cpp, sqlite-vec, BLAKE3, mpack) are fetched by
-# scripts or expected in third_party/ — see upstream README for exact steps.
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --target graft graftd
-# produces build/graft + build/graftd — put them on $PATH
+cmake -S vendor/graft -B vendor/graft/build -DCMAKE_BUILD_TYPE=Release
+cmake --build vendor/graft/build --target graft graftd --parallel N
+# produces vendor/graft/build/graft + vendor/graft/build/graftd
+heimdall setup --graftd vendor/graft/build/graftd   # installs + starts daemon
 ```
 
-Then point Heimdall at it: `graft` on `$PATH`, config at `~/.graft/config.yaml`
-(see `config.example.yaml`).
+The configure step downloads llama.cpp at the pinned tag and builds it
+**as static libraries**. `graftd` has no dynamic dependency on libllama or
+libggml and needs no RPATH/RUNPATH — copying the binary anywhere works.
 
-## Updating
+### Cache variables
 
-Re-sync from upstream: copy the new `src/`, `include/`, `CMakeLists.txt`,
-`LICENSE`, `README.md`, `config.example.yaml`, `VERSION` over
-`vendor/graft/`, bump the date above, rebuild + test.
+| Variable | Default | Purpose |
+|---|---|---|
+| `GRAFT_LLAMA_CPP_REPO` | `https://github.com/ggml-org/llama.cpp` | llama.cpp git remote |
+| `GRAFT_LLAMA_CPP_TAG` | `b10760` | Pinned llama.cpp tag |
+| `GRAFT_LLAMA_CPP_SOURCE_DIR` | `vendor/graft/third_party/llama.cpp` | Where to clone/reuse source |
+
+### Build offline (already-cloned llama.cpp)
+
+```bash
+cmake -S vendor/graft -B vendor/graft/build \
+  -DGRAFT_LLAMA_CPP_SOURCE_DIR=/path/to/existing/llama.cpp
+```
+
+When `SOURCE_DIR` already contains a populated checkout, cmake sets
+`FETCHCONTENT_UPDATES_DISCONNECTED_LLAMA=ON` automatically (the variable is
+pre-set in `CMakeLists.txt`) and will not hit the network.
+
+Heimdall's JS build driver (`bin/lib/graft-build.mjs`, written by another
+agent) passes `-DGRAFT_LLAMA_CPP_SOURCE_DIR` for npm-installed packages so
+the llama.cpp source is cached under `~/.heimdall/build/llama.cpp` and reused
+across builds.
+
+### CUDA (NVIDIA GPU)
+
+```bash
+cmake -S vendor/graft -B vendor/graft/build \
+  -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON
+```
+
+Leave `GGML_METAL` / `GGML_CUDA` / `GGML_BLAS` at llama.cpp defaults so
+callers can inject backend flags without modifying the CMake file.
+
+Then: config at `~/.graft/config.yaml` (generated by `heimdall setup`, see
+`config.example.yaml` for the full annotated schema).
+
+## Updating (pull fork changes into heimdall)
+
+```bash
+# in graft-cpp: commit + tag the new version, e.g. v0.1.0-heimdall.3
+cd ~/Repos/heimdall
+git subtree pull --prefix vendor/graft ~/Repos/graft-cpp v0.1.0-heimdall.3 --squash
+```
+
+Update the pinned tag in this file when you do.
+
+## Local delta pending upstream
+
+The `CMakeLists.txt` in this subtree diverges from upstream NanoNets/Graft
+in the llama.cpp linkage strategy:
+
+- **What changed:** Replaced the hardcoded `LLAMA_DIR` / `link_directories` /
+  `include_directories` scheme (which required a pre-built llama.cpp at
+  `third_party/llama.cpp/build`) with CMake `FetchContent`. llama.cpp is now
+  downloaded at configure time at the pinned tag `b10760` and compiled as
+  **static libraries** linked into `graftd`. The binary has no dynamic
+  dependency on libllama or libggml, making it fully self-contained and
+  relocatable.
+- **Also fixed:** `target_link_libraries(graftd c++)` → conditional
+  `c++` on Apple, `stdc++` on Linux, for cross-platform correctness.
+
+### Push delta back to fork and re-pin
+
+```bash
+# Push the CMakeLists change to the local graft-cpp fork
+git subtree push --prefix vendor/graft ~/Repos/graft-cpp heimdall-static-llama
+
+# In ~/Repos/graft-cpp: merge branch + tag
+cd ~/Repos/graft-cpp
+git checkout main
+git merge heimdall-static-llama
+git tag v0.1.0-heimdall.3
+
+# Back in heimdall: pull the new tag
+cd ~/Repos/heimdall
+git subtree pull --prefix vendor/graft ~/Repos/graft-cpp v0.1.0-heimdall.3 --squash
+```
+
+Then update the **Pinned tag** line at the top of this file to
+`v0.1.0-heimdall.3`.
 
 ## License note
 
-Graft is Apache 2.0. Its `third_party/` deps (llama.cpp MIT, sqlite-vec
-Apache/MIT, BLAKE3 CC0/Apache, mpack MIT) are NOT vendored here — see the
-upstream repo for their licenses when building.
+Graft is Apache 2.0. `third_party/{BLAKE3,mpack,sqlite-vec}` are tracked in
+this subtree and shipped in the npm tarball (BLAKE3 CC0/Apache, mpack MIT,
+sqlite-vec Apache/MIT). `third_party/llama.cpp/` (MIT) is NOT vendored — it
+is fetched at build time via CMake `FetchContent` at tag `b10760` and is not
+shipped; see the upstream llama.cpp repo for its license.

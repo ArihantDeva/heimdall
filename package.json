@@ -1,6 +1,6 @@
 {
   "name": "@arihantdeva/heimdall",
-  "version": "0.7.0",
+  "version": "0.9.0",
   "description": "Verified, self-healing knowledge layer for AI coding agents: cross-repo memory with trust verdicts, zero-token CPU-only indexing, hybrid retrieval",
   "license": "MIT",
   "keywords": [
@@ -35,7 +35,14 @@
     "config/",
     "docs/adapters.md",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "vendor/graft/",
+    "!vendor/graft/build/",
+    "!vendor/graft/third_party/llama.cpp/",
+    "!vendor/graft/models/",
+    "!vendor/graft/**/*.db",
+    "!vendor/graft/**/*.db-shm",
+    "!vendor/graft/**/*.db-wal"
   ],
   "engines": {
     "node": ">=22.5"

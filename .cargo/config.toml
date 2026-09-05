@@ -1,0 +1,5 @@
+# Workaround: CLT C++ include dir (c++/v1) missing from default search path on
+# this Mac (macOS 26.4, CommandLineTools). Any C++ crate (esaxx-rs via ort)
+# fails on `#include <cstdint>` without this. -isystem restores libc++ headers.
+[env]
+CXXFLAGS = "-isystem /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1"

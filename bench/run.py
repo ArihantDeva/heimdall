@@ -27,6 +27,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", choices=["oracle", "s", "m"], required=True)
     ap.add_argument("--limit", type=int, default=500)
+    ap.add_argument("--start", type=int, default=1,
+                    help="1-based index of first question (resume support)")
     ap.add_argument("--subset", choices=["cycle1"], default=None,
                     help="named question subset for cross-run comparability; "
                          "overrides --limit")
@@ -64,7 +66,7 @@ def main() -> None:
         multis = [r for r in rows if r["question_type"] == "multi-session"][:10]
         rows = singles + multis
     else:
-        rows = rows[: args.limit]
+        rows = rows[max(args.start - 1, 0) : args.limit]
 
     run_dir = RUNS / time.strftime("%Y%m%d-%H%M%S")
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -92,7 +94,8 @@ def main() -> None:
             continue
         try:
             cands = search(question["question"], top_k=args.top_k,
-                           with_bodies=not args.recall_only)
+                           with_bodies=not args.recall_only,
+                           question_type=question["question_type"])
             # Agent tier retrieves THROUGH the fact→session link: fact hits
             # are rewritten to their parent session title before scoring, so
             # fact precision converts into session recall (cycle-2 lever).

@@ -71,7 +71,12 @@ def _graft(args: list[str], profile: str) -> dict:
 
 
 def search(query: str, top_k: int = 25, profile: str = "longmemeval",
-           with_bodies: bool = True) -> list[Candidate]:
+           with_bodies: bool = True,
+           question_type: str | None = None) -> list[Candidate]:
+    from retrieval_levers import boost_recency, expand_query
+    # omega query-expansion: counting/temporal/entity cues (CPU-only)
+    if question_type:
+        query = expand_query(query, None)
     payload = _graft(["retrieve", query, "--top-k", str(top_k)], profile)
     results = payload["result"]["results"]
 
@@ -96,4 +101,7 @@ def search(query: str, top_k: int = 25, profile: str = "longmemeval",
             body = _graft(["get", cand.id_hex], profile)
             cand.body = (body.get("result") or {}).get("body")
         candidates.append(cand)
+    # omega recency-boost: knowledge-update questions rank newer sessions up
+    if question_type:
+        candidates = boost_recency(candidates, question_type)
     return candidates

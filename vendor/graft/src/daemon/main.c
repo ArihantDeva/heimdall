@@ -136,15 +136,22 @@ static void *handle_client(void *vp) {
 }
 
 int main(int argc, char **argv) {
-    const char *config_path = "./config.example.yaml";
+    const char *flag_config = NULL;
+    bool check_config = false;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--config") && i + 1 < argc) {
-            config_path = argv[++i];
+            flag_config = argv[++i];
+        } else if (!strcmp(argv[i], "--check-config")) {
+            check_config = true;
+            /* optional path argument: consume if next token is not a flag */
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                flag_config = argv[++i];
+            }
         } else if (!strcmp(argv[i], "--foreground")) {
             /* default; flag accepted for forward-compat */
         } else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             fprintf(stderr,
-                "usage: graftd [--config PATH] [--foreground]\n");
+                "usage: graftd [--config PATH] [--check-config] [--foreground]\n");
             return 0;
         } else {
             fprintf(stderr, "unknown flag: %s\n", argv[i]);
@@ -152,14 +159,75 @@ int main(int argc, char **argv) {
         }
     }
 
+    /* Config resolution order (heimdall fork delta): explicit --config wins;
+     * else $GRAFT_CONFIG; else $HOME/.graft/config.yaml when it exists; else
+     * built-in defaults. The winning source is logged so operators can see
+     * what was loaded. */
+    const char *config_path = flag_config;
+    const char *config_source = "--config flag";
+    char home_path[1024];
+    if (!config_path) {
+        const char *env = getenv("GRAFT_CONFIG");
+        if (env && *env) {
+            config_path = env;
+            config_source = "GRAFT_CONFIG env";
+        }
+    }
+    if (!config_path) {
+        const char *home = getenv("HOME");
+        if (home && *home &&
+            snprintf(home_path, sizeof(home_path), "%s/.graft/config.yaml",
+                     home) < (int)sizeof(home_path)) {
+            FILE *probe = fopen(home_path, "rb");
+            if (probe) {
+                fclose(probe);
+                config_path = home_path;
+                config_source = "$HOME/.graft/config.yaml";
+            }
+        }
+    }
+    if (!config_path) {
+        config_source = "built-in defaults";
+    }
+
     mg_config_t cfg;
-    mg_err_t err = mg_config_load(config_path, &cfg);
-    if (err != MG_OK) {
-        fprintf(stderr, "config load failed: %s (path=%s)\n",
-                mg_strerror(err), config_path);
-        return 1;
+    mg_err_t err;
+    if (config_path) {
+        err = mg_config_load(config_path, &cfg);
+        if (err != MG_OK) {
+            fprintf(stderr, "config load failed: %s (path=%s, source=%s)\n",
+                    mg_strerror(err), config_path, config_source);
+            return 1;
+        }
+    } else {
+        mg_config_defaults(&cfg);
+        if (!cfg.socket_path || !cfg.db_path || !cfg.embed_model_path) {
+            fprintf(stderr, "config defaults allocation failed\n");
+            return 1;
+        }
+    }
+    if (config_path) {
+        fprintf(stderr, "graftd: config loaded from %s (%s)\n",
+                config_path, config_source);
+    } else {
+        fprintf(stderr, "graftd: no config file found; using built-in defaults\n");
     }
     apply_env_overrides(&cfg);
+
+    if (check_config) {
+        /* Print the resolved config and exit — no socket, no db, no model. */
+        printf("socket_path: %s\n", cfg.socket_path);
+        printf("db_path: %s\n", cfg.db_path);
+        printf("model_path: %s\n",
+               cfg.embed_model_path ? cfg.embed_model_path : "(none)");
+        printf("threads: %d\n", cfg.embed_threads);
+        printf("instances: %d\n", cfg.embed_instances);
+        printf("ctx_size: %d\n", cfg.embed_ctx_size);
+        printf("hardware_accel: %s\n", cfg.hardware_accel ? "true" : "false");
+        mg_config_free(&cfg);
+        return 0;
+    }
+
     ensure_parent_dir(cfg.db_path);
     ensure_parent_dir(cfg.socket_path);
 

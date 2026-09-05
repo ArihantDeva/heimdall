@@ -1,11 +1,17 @@
 // kb-guard-core — pure state machine for the kb_search-before-search-chain guard.
-// grep-style actions are counted per-session; ladder of consequences:
+// grep-style DISCOVERY actions are counted per-session; ladder of consequences:
 //   firing 1 (chain hits 3): ⚠️ WARNING prepended to result
 //   firing 2:               🛑 ESCALATION prepended
 //   firing 3+:              {block:true, reason} — pi blocks the tool call.
+// Scope-aware (2026-08-27): only UNscoped discovery chains warn/escalate — a
+// search that names an explicit path (repo dir, ~-relative, ./ ../, absolute,
+// or a `cd <dir>` into a repo) is legitimate scoped work and never fires.
 // Blocks apply to search actions only: grep/find/ls/read TOOL calls always;
 // bash only when its first token is a search binary (rg/grep/find/ls/fd).
 // Non-search bash (tests, builds, echo) is never blockable.
+// At BLOCK stage (firings >= 2) legacy semantics hold: any search-head bash
+// or search tool call blocks — reaching block stage means 2 escalations were
+// ignored; kb_search/kb_sync/kb_guard_pause reset or suspend.
 // Reset: kb_search, kb_sync, or a bash command touching graft/heimdall.
 // Interleaved edit/write do NOT reset — only knowledge-access actions do.
 //
@@ -16,9 +22,9 @@ export const GREP_TOOLS = new Set(["bash", "read", "grep", "find", "ls"]);
 export const RESET_TOOLS = new Set(["kb_search", "kb_sync"]);
 
 export const WARNING =
-  "⚠️ kb-guard: 3+ consecutive search actions without kb_search. " +
-  "Run kb_search FIRST (ranked cross-project memory, verified paths). " +
-  "AGENTS.md requires it before implementation/research. Chain resets only on kb_search/kb_sync.";
+  "⚠️ kb-guard: 3+ consecutive UNscoped search actions without kb_search. " +
+  "Run kb_search FIRST (ranked cross-project memory, verified paths) — scoped " +
+  "repo searches (explicit paths) never trip this guard. Chain resets on kb_search/kb_sync.";
 
 export const ESCALATION =
   "🛑 kb-guard ESCALATED: this is the SECOND+ warning without any kb_search. " +
@@ -27,9 +33,9 @@ export const ESCALATION =
   "If Heimdall is genuinely irrelevant to this exact step, state why in one line, then proceed.";
 
 export const BLOCK_REASON =
-  "🛑 kb-guard BLOCKED: three+ search-chain warnings ignored — rg/grep/find/ls/read spam " +
-  "without a single kb_search. Call kb_search for what you're looking for FIRST " +
-  "(it resets this guard), then retry the search.";
+  "🛑 kb-guard BLOCKED: three+ discovery-chain warnings ignored — pathless " +
+  "rg/grep/find/ls/read spam without a single kb_search. Call kb_search for what " +
+  "you're looking for FIRST (it resets this guard), then retry the search.";
 
 /** Bash command where ANY pipe/chain segment leads with a file-search binary.
  * Covers `rg x .`, `cat f | grep x`, `echo hi && ls`. Path prefixes ok.
@@ -41,6 +47,33 @@ export function isSearchHead(command) {
     const head = s.trim().split(/\s+/)[0] ?? "";
     return /^(.*\/)?(rg|(ba|e|f)?grep|ggrep|find|ls|fd)$/.test(head);
   });
+}
+
+/** Is this bash command a SCOPED search — i.e. it names an explicit path the
+ * agent already knows (repo dir, ~/home, ./.., absolute, or `cd <dir>`)?
+ * Scoped searches are legitimate work; only pathless discovery chains trip
+ * the guard. Conservative: any path-like token => scoped.
+ * The search binary's own path (e.g. /usr/bin/grep) is NOT a scoping path —
+ * only the operands matter. */
+export function isScopedSearch(command) {
+  const cmd = String(command ?? "");
+  if (cmd === "") return false;
+  // `cd <path>` establishes a working directory — the search is inside it.
+  if (/cd\s+(\/|~|\$HOME|\.\.?\/|[^\s]*\/)/.test(cmd)) return true;
+  // Drop the leading binary path if present (`/usr/bin/grep -rn x` → `-rn x`).
+  const operands = cmd.replace(/^(\S*\/)+(rg|grep|ggrep|find|ls|fd)(\b|\s)/, "");
+  // Any operand that is a path: leading /, ~, ~/x, ./x, ../x, x/y (contains a slash),
+  // or a standalone . / .. (cwd / parent cwd).
+  return /(^|\s)(\/|~\/|\.\.?\/|~(\.)?(\s|$)|(\.\.?)(\s|$)|[^\s]*\/)/.test(operands);
+}
+
+/** Is this non-bash search TOOL call scoped? read/ls/find/grep take a `path`
+ * field — a non-empty path means the agent is reading/searching something it
+ * knows. A bare pattern (no path) is unscoped discovery. */
+export function isScopedToolSearch(toolName, input) {
+  if (!input || typeof input !== "object") return false;
+  const p = input.path;
+  return typeof p === "string" && p.trim() !== "";
 }
 
 function consequence(firings) {
@@ -97,17 +130,35 @@ export function createGuard() {
           firings = 0;
           return null;
         }
-        // Past escalation, only SEARCH-headed bash matters: other bash neither
-        // fires nor advances the chain (stays "search actions since reset").
-        if (firings >= 2 && !isSearchHead(cmd)) return null;
+        const search = isSearchHead(cmd);
+        // Past escalation, only SEARCH-headed bash matters: non-search bash
+        // neither fires nor advances the chain (stays "search actions since reset").
+        if (firings >= 2) {
+          // Block stage: scoped searches stay exempt (they are legitimate work
+          // even after escalations); only pathless discovery keeps blocking.
+          if (!search) return null;
+          return isScopedSearch(cmd) ? null : { block: true, reason: BLOCK_REASON };
+        }
+        // Warn/escalate stage: scoped searches are legitimate work — skip them.
+        if (search && isScopedSearch(cmd)) return null;
         chain += 1;
-        if (chain >= 3 && (firings < 2 || isSearchHead(cmd))) {
+        if (chain >= 3) {
           firings += 1;
           return consequence(firings);
         }
         return null;
       }
       if (GREP_TOOLS.has(toolName)) {
+        // Scoped tool calls (read with a path, etc.) never fire at any stage.
+        if (isScopedToolSearch(toolName, input)) return null;
+        if (firings >= 2) {
+          chain += 1;
+          if (chain >= 3) {
+            firings += 1;
+            return consequence(firings);
+          }
+          return null;
+        }
         chain += 1;
         if (chain >= 3) {
           firings += 1;

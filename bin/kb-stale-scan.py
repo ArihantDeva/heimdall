@@ -10,6 +10,7 @@ basename (cached), not once per stale node — Desktop reorgs leave many nodes
 pointing at the same few dead paths. Reuses extract_paths from
 kb_search_verify.py so scan and search agree on what counts as stale.
 """
+import json
 import os, sqlite3, subprocess, sys, tempfile, time
 
 # kb_search_verify lives beside this script. It used to be imported from
@@ -58,7 +59,30 @@ def find_basename(base, tmpdir):
     return cache
 
 
-def main():
+def count_only():
+    """Read-only stale census for `heimdall score` — no find, no rehome, no delete."""
+    if not os.path.exists(DB):
+        print('{"nodes": 0, "stale": 0}')
+        return 0
+    db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+    rows = db.execute("SELECT hex(id), title, body FROM nodes").fetchall()
+    db.close()
+    nodes = stale = 0
+    for _id_hex, title, body in rows:
+        paths = extract_paths(body or title)
+        # Same rule as the full sweep: a node with any live anchor is still
+        # reachable; only all-anchors-dead counts as stale.
+        if paths and not any(os.path.exists(p) for p in paths):
+            stale += 1
+        nodes += 1
+    print(json.dumps({"nodes": nodes, "stale": stale}))
+    return 0
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if "--count-only" in argv:
+        return count_only()
     db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
     rows = db.execute("SELECT hex(id), title, body FROM nodes").fetchall()
     db.close()
@@ -111,4 +135,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

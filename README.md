@@ -99,7 +99,7 @@ Heimdall is the only one built for the actual workflow: many repos, many months,
 - [x] v0.2 — single-writer reconciler, depth-ladder indexing (symbols + call edges)
 - [ ] LongMemEval-S score ≥ 0.90 published from `bench/` (baseline S 0.740 reproduced)
 - [ ] LongMemEval-M full reader/judge run published (S subset is token-free recall only — not end-to-end)
-- [ ] One-command graft backend install (`heimdall init --backend`)
+- [x] 0.9.0 — graft backend auto-builds on `npm i -g` (postinstall) and `heimdall setup`; no separate `init --backend` flag
 - [ ] Linux daemon packaging
 - [ ] MCP server mode
 
@@ -116,16 +116,37 @@ heimdall init --harness claude-code   # or pi | codex | cursor | windsurf | all
 
 That's it for install + harness wiring (`init`, `insert` work immediately).
 
-Ranked search and `doctor` need the [graft backend](https://github.com/NanoNets/Graft) — one extra step:
+`npm i -g` auto-builds the graft backend during install when prerequisites
+are present
+(macOS — Xcode Command Line Tools + `brew install cmake pkg-config libyaml sqlite`;
+Debian/Ubuntu — `apt install cmake pkg-config build-essential git libsqlite3-dev libyaml-dev`;
+Fedora/Amazon Linux — `dnf install gcc gcc-c++ make cmake git pkgconf-pkg-config sqlite-devel libyaml-devel`;
+`git` required — llama.cpp is cloned at first build);
+first build takes a few minutes (log: `~/.heimdall/bootstrap.log`). If
+prerequisites are missing, SETUP NEEDED prints and the install still
+succeeds — run `heimdall setup` to build later. Opt out:
+`HEIMDALL_NO_BUILD=1 npm i -g @arihantdeva/heimdall`. Defaults: model
+`bge-m3`, accel auto (Metal on Apple Silicon, CUDA when `nvidia-smi`
+present, else CPU), threads = physical cores, 2 instances.
+
+`heimdall setup` also builds/installs `graftd` when none is working,
+downloads the model if needed, generates `~/.graft/config.yaml`, and
+installs the launchd daemon:
 
 ```bash
-# build graft from source, put the binary on PATH, then:
-cp "$(npm root -g)/@arihantdeva/heimdall/config/heimdall.yaml.example" ~/.graft/config.yaml
+heimdall setup                         # detect + config + model + daemon
+heimdall setup --model bge-small-en-v1.5   # smaller model (~36MB, low RAM)
+heimdall setup --detect-only           # just print the hardware profile
 heimdall doctor                        # should print HEALTHY
 heimdall search "excel tracker portfolio optimization"
 ```
 
-On macOS the backend runs as the launchd job `com.graft.daemon` (template: `launchd/com.heimdall.backend.plist.example`).
+Full flags + hardware matrix + model catalog: [docs/setup.md](docs/setup.md).
+Prefer hand-rolling? Copy
+`config/heimdall.yaml.example` to `~/.graft/config.yaml` and edit
+(`/PATH/TO/` placeholders). On macOS the backend runs as the launchd job
+`com.graft.daemon` (setup writes the plist; template:
+`launchd/com.heimdall.backend.plist.example`).
 
 ### Alternative backend: Mnemosyne
 

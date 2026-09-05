@@ -43,11 +43,52 @@ else
 	HITS=$(printf '%s' "$HITS" | sed '/^$/d')
 fi
 N=$(printf '%s\n' "$HITS" | sed '/^$/d' | wc -l | tr -d ' ')
-if [ "$N" != "1" ]; then
-	[ "$N" = "0" ] && echo "NOTFOUND" || echo "AMBIGUOUS"
+if [ "$N" = "0" ]; then
+	echo "NOTFOUND"
 	exit 0
 fi
-NEW=$(printf '%s' "$HITS" | sed '/^$/d')
+
+# C2 narrow rehome: multiple basename hits used to be flat AMBIGUOUS. Compare
+# each FILE candidate's content against the node body via char-trigram Jaccard:
+#   >= 0.70 → confident rehome (with provenance note appended to the body)
+#   <= 0.30 → no candidate resembles the old content → NOTFOUND (remove)
+#   between → genuinely ambiguous → AMBIGUOUS (leave stale + report)
+# ponytail: fixed thresholds, calibrated later if the rehome log says so.
+if [ "$N" != "1" ] && [ -f "$BODYF" ]; then
+	BEST=$(printf '%s\n' "$HITS" | sed '/^$/d' | python3 -c '
+import sys, os
+body = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+def tris(s):
+    s = " ".join(s.split()).lower()
+    return {s[i:i+3] for i in range(max(0, len(s)-2))} or {s}
+bset = tris(body)
+best_path, best_score = None, 0.0
+for path in sys.argv[2:]:
+    if not os.path.isfile(path): continue
+    try: content = open(path, encoding="utf-8", errors="replace").read()
+    except OSError: continue
+    cset = tris(content)
+    union = bset | cset
+    score = len(bset & cset) / len(union) if union else 0.0
+    if score > best_score:
+        best_path, best_score = path, score
+HI, LO = 0.70, 0.30
+if best_path and best_score >= HI: print(f"REHOME|{best_path}|{best_score:.2f}")
+elif best_path and best_score <= LO: print("NOTFOUND")
+else: print("AMBIGUOUS")
+' "$BODYF" $(printf '%s\n' "$HITS" | sed '/^$/d') )
+	case "$BEST" in
+		REHOME\|*)
+			NEW=$(printf '%s' "$BEST" | cut -d'|' -f2)
+			C2_SCORE=$(printf '%s' "$BEST" | cut -d'|' -f3)
+			export C2_SCORE
+			;;
+		*) echo "$BEST"; exit 0 ;;
+	esac
+else
+	[ "$N" != "1" ] && { echo "AMBIGUOUS"; exit 0; }
+	NEW=$(printf '%s\n' "$HITS" | sed '/^$/d')
+fi
 # File moves only — a single dir-name match is not identity (dirs scatter on reorg).
 [ -f "$NEW" ] || { echo "NOTFOUND"; exit 0; }
 
@@ -66,11 +107,16 @@ import json,sys
 try: print(' '.join((json.load(sys.stdin).get('result') or {}).get('keywords') or []))
 except Exception: pass")
 NEWBODY=$(python3 -c 'import sys,re
+import os
 text=open(sys.argv[1]).read()
 old,new=sys.argv[2],sys.argv[3]
 # boundary-aware: only replace whole-path mentions (after old must be /, space, or EOS)
 pat=re.compile(re.escape(old)+"(?=/| |$)")
-print(pat.sub(lambda m:new, text), end="")' "$BODYF" "$DEAD" "$NEW")
+out=pat.sub(lambda m:new, text)
+score=os.environ.get("C2_SCORE")
+if score and not out.endswith(chr(10)): out += chr(10)
+if score: out += f"(rehomed by content match {score} — pre-delete snapshot verified)"+chr(10)
+print(out, end="")' "$BODYF" "$DEAD" "$NEW")
 DEADREL=$(printf '%s' "$DEAD" | sed "s|$HOME/||")
 # titles hold REL paths — replace both abs and rel forms (rel first, then abs), boundary-aware
 NEWTITLE=$(printf '%s' "$TITLE" | python3 -c 'import sys,re

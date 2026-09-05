@@ -171,3 +171,86 @@ test("FC-15 body embeds path:line provenance matching the line field", () => {
   assert.equal(f.line, 3);
   assert.ok(f.body.includes(`${PATH}:3`), `body missing "${PATH}:3": ${f.body}`);
 });
+
+// ── near-dup suppression (C1 dedup half) ──────────────────────────────
+// ponytail: boundary fixtures built by construction, not vibes — each pair
+// is scored with the same trigram math here and asserted onto its side.
+const trigramsOf = (s) => {
+  const set = new Set();
+  for (let i = 0; i <= s.length - 3; i++) set.add(s.slice(i, i + 3));
+  return set;
+};
+const jac = (a, b) => {
+  const ga = trigramsOf(a);
+  const gb = trigramsOf(b);
+  if (!ga.size || !gb.size) return 0;
+  let inter = 0;
+  for (const g of ga) if (gb.has(g)) inter++;
+  return inter / (ga.size + gb.size - inter);
+};
+const DEDUP_JACCARD = 0.97; // mirrors bin/lib/facts.mjs
+
+// Identical utterance (punct variant): ≥ threshold → suppressed, counted.
+test("FC-16 identical body suppressed, first occurrence wins", () => {
+  const buf = Buffer.from(
+    "I prefer SQLite over Postgres.\nI prefer SQLite over Postgres!\n",
+  );
+  const meta = { path: PATH };
+  const facts = extractFacts(buf, meta);
+  assert.equal(facts.length, 1);
+  assert.equal(meta.skippedDuplicates, 1);
+  assert.ok(facts[0].body.endsWith(`[${PATH}:1]`), "first occurrence wins");
+});
+
+// Provenance differences ([path:line]) must not bypass dedup: same utterance
+// at different lines still dedupes because keys are text-only.
+test("FC-17 provenance line shifts don't bypass dedup", () => {
+  const buf = Buffer.from(
+    "# scratch\n\nI prefer SQLite over Postgres.\nfiller sentence here.\nI prefer SQLite over Postgres.\n",
+  );
+  const meta = { path: "other.md" };
+  const facts = extractFacts(buf, meta);
+  assert.equal(facts.length, 1);
+  assert.equal(meta.skippedDuplicates, 1);
+});
+
+// Boundary from BELOW: one word swapped in a long utterance → J < 0.97,
+// both survive. Guard scores the fixture with the same trigram math and
+// asserts it really sits below the line.
+test("FC-18 similar-but-different pair below threshold survives", () => {
+  const cols = Array.from({ length: 40 }, (_, k) => `col${k}x`).join(" ");
+  const a = `I prefer table ${cols}.`;
+  const b = a.replace("col7x", "col7z").replace("col31x", "col31w");
+  const j = jac(a.toLowerCase(), b.toLowerCase());
+  assert.ok(j >= 0.9 && j < DEDUP_JACCARD, `fixture drift: J=${j}`);
+  const meta = { path: PATH };
+  const facts = extractFacts(Buffer.from(`${a}\n${b}\n`), meta);
+  assert.equal(facts.length, 2, `J=${j.toFixed(4)} must survive`);
+  assert.equal(meta.skippedDuplicates, 0);
+});
+
+// Boundary from ABOVE: single trailing-char difference → J ≥ 0.97 →
+// suppressed. Guard scores the fixture with the same trigram math and
+// asserts it really crosses the line (staying under 1.0 so the exact-dup
+// path isn't what's being tested).
+test("FC-19 near-identical pair at/above threshold suppressed", () => {
+  const cols = Array.from({ length: 40 }, (_, k) => `col${k}x`).join(" ");
+  const keyA = `i prefer table ${cols}`; // normalized form (what dedup sees)
+  const keyB = `${keyA.slice(0, -1)}q`;
+  const j = jac(keyA, keyB);
+  assert.ok(j >= DEDUP_JACCARD && j < 1, `fixture drift: J=${j}`);
+  // utterances end '.' vs ',' — normalization lowercases but keeps that
+  // final punctuation char, so the keys carry the difference just scored.
+  const buf = Buffer.from(`I prefer table ${cols}.\nI prefer table ${cols},\n`);
+  const meta = { path: PATH };
+  const facts = extractFacts(buf, meta);
+  assert.equal(facts.length, 1, `J=${j.toFixed(4)} must suppress`);
+  assert.equal(meta.skippedDuplicates, 1);
+});
+
+// Degenerate short strings (<3 chars normalized key): empty trigram set,
+// never a dupe — gate can't fire on nothing.
+test("FC-20 tiny utterances never trip the dedup gate", () => {
+  const facts = extractFacts(Buffer.from("I am up.\nI do run.\n"), { path: PATH });
+  assert.ok(facts.length >= 2, `got ${facts.length}`);
+});

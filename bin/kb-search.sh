@@ -179,29 +179,35 @@ n = int(sys.argv[2])
 script_dir = sys.argv[3]
 repos = sys.argv[4:]
 graft = os.environ.get("GRAFT", "graft")
-results = []
-for repo in repos:
+from concurrent.futures import ThreadPoolExecutor
+
+def ask_repo(repo):
     try:
         out = subprocess.run([graft, "ask", q, repo, "--json", "-n", str(n)],
                              capture_output=True, text=True, timeout=60).stdout
-        data = json.loads(out)
-        for h in data.get("hits", []):
+        hits = []
+        for h in json.loads(out).get("hits", []):
             pointer = h.get("pointer", "")
-            # pointer is file:line or symbol · function — resolve to the file
             fname = pointer.split(":")[0]
             full = os.path.join(repo, fname)
-            results.append({
+            hits.append({
                 "id_hex": f"graft-{repo}-{pointer}",
                 "title": h.get("title", ""),
                 "score": float(h.get("score", 0)),
                 "body": f"{h.get('snippet','')} [{full}]",
                 "path": full,
             })
+        return hits
     except Exception as e:
         # Per-repo graft failure must not kill the whole search, but must be
         # visible (2026-08-25 silent-swallow lesson).
         print(f"WARN: graft ask failed for {repo}: {e}", file=sys.stderr)
-        continue
+        return []
+
+# Parallel across roots — 95 sequential spawns measured 37s; a thread pool
+# cuts wall time to the slowest single ask (graft releases the GIL on subprocess).
+with ThreadPoolExecutor(max_workers=16) as ex:
+    results = [h for hits in ex.map(ask_repo, repos) for h in hits]
 # Global semantic hits (bge-m3): append as top-ranked candidates.
 # embed-index.py lives next to kb-search.sh; the shell passes SCRIPT_DIR in
 # argv[3] because sys.argv[0] is "-" for stdin-invoked python.
