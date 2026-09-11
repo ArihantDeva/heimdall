@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.10.0 — 2026-09-10
+
+### Added
+
+- **Per-hit freshness in search output** — final hits carry `as_of=<age>` and
+  `fresh`/`possibly_stale`, anchored to the indexed snapshot's card mtime vs
+  the file on disk (1s tolerance; read-only lookup; suppressed when the path
+  is dead). Available in `kb-search.sh` output and
+  `kb_search_verify.py::freshness_token()`. (Ported from zvec-grep.)
+- **Machine-readable semantic degradation** — when the semantic embedding leg
+  fails, `kb-search.sh` emits `SEMANTIC_ERROR: <reason>` plus the
+  `LEXICAL-ONLY (sem_coverage=degraded)` banner: one greppable token for
+  callers, no raw tracebacks, no silent garbage fallback. (Ported from
+  zvec-grep.)
+- **RRF fusion + adaptive recall in `heimdall-search`** — reciprocal-rank
+  fusion `Σ 1/(60+rank)` across lexical and vector recall (fused over full
+  recall width before capping), doubling recall ladder (200 → cap 2000) until
+  the fused top-k stabilizes, new `--hybrid` CLI mode, and `HEIMDALL_DB` env
+  replaces the hardcoded absolute DB path. (Ported from zvec-grep.)
+- **Type-aware index size caps** — `embed_walker.py` admits known-text files
+  by family: code 1 MiB, data 16 MiB, docs 256 MiB (flat 128 KB retained as
+  the unknown-ext content-sniff window). Oversize machine-generated dumps no
+  longer pollute the semantic index; large docs still index via preview.
+  (Ported from zvec-grep.)
+- **rg-vs-kb_search routing doctrine** — harness rule blocks now route exact
+  symbol/string/regex lookup to `rg --no-ignore` and cross-repo discovery to
+  `kb_search` (doc-only; zvec-grep steering doctrine).
+
+### Changed
+
+- `kb-search.sh` not-configured warning now uses the same `SEMANTIC_ERROR:`
+  marker as hard failures, so consumers need only one pattern.
+
 ## 0.9.0 — 2026-09-02
 
 ### Added

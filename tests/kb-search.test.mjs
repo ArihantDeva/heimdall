@@ -136,3 +136,74 @@ shellTest("kb-search verdict gate: zero-coverage semantic hit stays WEAK", () =>
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+// P1 (zvec-grep port): a dead semantic leg must degrade LOUDLY and
+// machine-readably — SEMANTIC_ERROR line on stdout, no raw tracebacks.
+shellTest("kb-search dead semantic leg emits SEMANTIC_ERROR with reason", () => {
+  const home = mkdtempSync(join(tmpdir(), "heimdall-sem-dead-"));
+  try {
+    const graft = join(home, ".local", "bin", "graft");
+    mkdirSync(dirname(graft), { recursive: true });
+    writeFileSync(graft, "#!/usr/bin/env bash\nprintf '%s\\n' '{\"hits\":[{\"pointer\":\"a.py:1\",\"title\":\"GraftOnly\",\"score\":1,\"snippet\":\"s\"}]}'\n");
+    chmodSync(graft, 0o755);
+    mkdirSync(join(home, "Repos", "example", "graft"), { recursive: true });
+    // Fake venv python whose embed-index query exits non-zero with an error.
+    const venvBin = join(home, ".heimdall", "venv", "bin");
+    mkdirSync(venvBin, { recursive: true });
+    const failingPy = "#!/usr/bin/env bash\necho 'boom: simulated dim mismatch' >&2\nexit 3\n";
+    writeFileSync(join(venvBin, "python3"), failingPy);
+    chmodSync(join(venvBin, "python3"), 0o755);
+    writeFileSync(join(home, ".heimdall", "global.db"), "");
+
+    const stdout = execFileSync("bash", [join(repoRoot, "bin", "kb-search.sh"), "example"], {
+      encoding: "utf8",
+      env: { ...process.env, HOME: home, PATH: "/usr/bin:/bin", GRAFT: undefined, MNEMOSYNE: undefined, HEIMDALL_BACKEND: undefined },
+    });
+
+    assert.match(stdout, /SEMANTIC_ERROR:/, "machine-readable degradation marker present");
+    assert.match(stdout, /LEXICAL-ONLY/, "caller told results are lexical-only");
+    assert.match(stdout, /GraftOnly/, "lexical hits still served");
+    assert.doesNotMatch(stdout, /Traceback/, "no raw traceback in output");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// P2 (zvec-grep port): freshness tokens — final hits carry as_of=<age>
+// plus fresh/possibly_stale, anchored to the indexed snapshot mtime.
+shellTest("kb-search hits carry freshness as_of + fresh/possibly_stale", () => {
+  const home = mkdtempSync(join(tmpdir(), "heimdall-freshness-"));
+  try {
+    const graft = join(home, ".local", "bin", "graft");
+    mkdirSync(dirname(graft), { recursive: true });
+    writeFileSync(graft, "#!/usr/bin/env bash\nprintf '%s\\n' '{\"hits\":[{\"pointer\":\"a.py:1\",\"title\":\"FreshHit\",\"score\":1,\"snippet\":\"s\"}]}'\n");
+    chmodSync(graft, 0o755);
+    const repo = join(home, "Repos", "example");
+    mkdirSync(join(repo, "graft"), { recursive: true });
+    // The searched file must exist (for the freshness mtime comparison).
+    writeFileSync(join(repo, "a.py"), "print('indexed payload')\n");
+    // Real sqlite db with a cards row whose mtime LAGS the file's mtime
+    // (simulate an index built 10 days ago).
+    const old = Math.floor(Date.now() / 1000) - 10 * 86400;
+    const db = join(home, ".heimdall", "global.db");
+    mkdirSync(dirname(db), { recursive: true });
+    execFileSync("/usr/bin/python3", ["-c", [
+      "import sqlite3,sys",
+      `con = sqlite3.connect(${JSON.stringify(db)})`,
+      "con.execute('CREATE TABLE cards (id TEXT PRIMARY KEY, path TEXT UNIQUE NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, sha1 TEXT NOT NULL, root TEXT NOT NULL, mtime REAL NOT NULL, size INTEGER NOT NULL)')",
+      `con.execute('INSERT INTO cards VALUES (\"1\", ?, \"FreshHit\", \"body\", \"s1\", \"r\", ?, 100)', (${JSON.stringify(join(repo, "a.py"))}, ${old}))`,
+      "con.commit()",
+    ].join("; ")]);
+
+    const stdout = execFileSync("bash", [join(repoRoot, "bin", "kb-search.sh"), "example"], {
+      encoding: "utf8",
+      env: { ...process.env, HOME: home, PATH: "/usr/bin:/bin", GRAFT: undefined, MNEMOSYNE: undefined, HEIMDALL_BACKEND: undefined },
+    });
+
+    assert.match(stdout, /FreshHit/, "hit present");
+    assert.match(stdout, /as_of=[\d.]+[hd]/, "as_of age token present");
+    assert.match(stdout, /possibly_stale/, "10-day-lagged card reported stale");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

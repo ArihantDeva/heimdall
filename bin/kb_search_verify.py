@@ -4,7 +4,7 @@ Input: argv[1]=retrieve JSON  [2]=label  [3]=scope  [4]=N  [5]=query
 Per candidate: fetch full node (body), lexical coverage vs query tokens, path existence.
 Output: ranked lines — verdict (STRONG/WEAK/STALE/NOPATH), coverage %, path, title, score.
 """
-import json, os, re, subprocess, sys, tempfile, time
+import json, os, re, sqlite3, subprocess, sys, tempfile, time
 
 STOP = {
     "the", "and", "for", "with", "from", "that", "this", "have", "are", "was",
@@ -143,6 +143,30 @@ def handle_stale(id_hex, title, path, body):
         return "STALE", path
 
 
+def freshness_token(path):
+    """Freshness (zvec-grep port, P2): as_of age + possibly_stale from the
+    indexed snapshot's card mtime in global.db vs the file on disk. No card
+    row, missing db, or dead path => empty token (freshness unknown)."""
+    db = os.path.expanduser("~/.heimdall/global.db")
+    if not os.path.exists(db) or not os.path.exists(path):
+        return ""
+    try:
+        con = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+        row = con.execute("SELECT mtime FROM cards WHERE path=?", (path,)).fetchone()
+        con.close()
+    except Exception:
+        return ""
+    if not row:
+        return ""
+    age = max(0.0, time.time() - row[0])
+    as_of = "%.1fh" % (age / 3600) if age < 86400 * 14 else "%.1fd" % (age / 86400)
+    try:
+        stale = os.path.getmtime(path) - row[0] > 1.0
+    except OSError:
+        stale = False
+    return "as_of=%s %s" % (as_of, "possibly_stale" if stale else "fresh")
+
+
 def content_score(path, query_tokens):
     """Lexical coverage of query tokens against the anchored file's content.
     None = cannot read (binary/missing/oversized) -> fall back to path+body
@@ -238,7 +262,9 @@ def main():
     for i, (vrank, nsc, verdict, cov, path, title, cs) in enumerate(rows):
         p = ("  " + path) if path else ""
         cs_s = " content:%d%%" % int(cs * 100) if cs is not None else ""
-        print("  %2d. [%-6s] cov%02d%%%s  %s — %s" % (i + 1, verdict, int(cov * 100), cs_s, p, title))
+        fr = freshness_token(path) if path else ""
+        fr_s = (" " + fr) if fr else ""
+        print("  %2d. [%-6s] cov%02d%%%s%s  %s — %s" % (i + 1, verdict, int(cov * 100), cs_s, fr_s, p, title))
 
 
 if __name__ == "__main__":
