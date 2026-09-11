@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync, existsSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,8 +19,10 @@ test("C11: query records busy on contention and ok on success into semantic-stat
     // Deterministic path: import module and call record_semantic_state directly
     // (a real cross-process flock is flaky in CI; the Busy→record wiring is
     // three lines in query(), verified by inspection). Uses the repo venv —
-    // embed-index.py hard-imports sqlite_vec at module load.
+    // embed-index.py hard-imports sqlite_vec at module load. The venv only
+    // exists on machines that ran `heimdall setup`; absent (CI runner) → skip.
     const venvPy = join(homedir(), ".heimdall", "venv", "bin", "python3");
+    if (!existsSync(venvPy)) return;
     // Deterministic path: import module and call record_semantic_state + check.
     const mod = execFileSync(venvPy, ["-c", `
 import sys, json, os

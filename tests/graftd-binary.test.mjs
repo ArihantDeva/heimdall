@@ -12,7 +12,7 @@ import {
 	mkdtempSync, rmSync, copyFileSync, chmodSync,
 	writeFileSync, existsSync,
 } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,20 +26,41 @@ function tmpHome() {
 }
 
 // --- locate graftd (same three candidates as setup.test.mjs) ---
+// Usability, not mere existence: a failed in-tree cmake build can leave a
+// non-runnable artifact at vendor/graft/build/graftd (CI: EACCES). Gate on
+// the executable bit + a successful --check-config probe so dev machines
+// with a real build still run everything, while broken artifacts skip.
+import { accessSync, constants as fsConstants } from "node:fs";
+
+function usableGraftd(p) {
+	try {
+		accessSync(p, fsConstants.X_OK);
+	} catch {
+		return false;
+	}
+	const probe = spawnSync(p, ["--check-config"], { encoding: "utf8", timeout: 15000 });
+	// Any clean exit (even usage/config error) proves the binary runs on this
+	// machine; EACCES/ENOINT-style spawn errors prove it doesn't.
+	return probe.error === undefined;
+}
+
 const graftd = [
 	join(repo, "vendor", "graft", "build", "graftd"),
 	join(process.env.HOME || "", "Repos", "graft-cpp", "build", "graftd"),
 	join(process.env.HOME || "", ".local", "bin", "graftd"),
-].find((p) => existsSync(p));
+].find(usableGraftd);
 
 test("graftd is self-contained: no dynamic llama/ggml deps and runs after relocation", () => {
-	if (!graftd) return; // binary not built yet — skip silently
+	if (!graftd) return; // binary not built / not runnable — skip silently
 
 	const platform = process.platform;
 
-	// (i) No dynamic llama/ggml library dependency
+	// (i) No dynamic llama/ggml library dependency. ldd exits non-zero for
+	// static binaries on Linux ("not a dynamic executable") — that is a PASS
+	// for self-containment, so parse output and treat spawn failure as ok.
 	if (platform === "linux") {
-		const lddOut = execFileSync("ldd", [graftd], { encoding: "utf8" });
+		const ldd = spawnSync("ldd", [graftd], { encoding: "utf8" });
+		const lddOut = (ldd.stdout ?? "") + (ldd.stderr ?? "");
 		assert.doesNotMatch(lddOut, /libllama|libggml/,
 			"ldd must show no libllama or libggml dynamic dependency");
 	} else if (platform === "darwin") {

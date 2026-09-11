@@ -4,8 +4,8 @@
 // No network, no writes to ~/.graft (temp dirs only).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, statSync, existsSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync, statSync, existsSync, accessSync, constants } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,7 +14,6 @@ import {
 	parseSetupArgs, validateModelPath, physicalCoresFromCpuinfo, resolveAccel,
 	writeProbeConfig,
 } from "../bin/lib/setup.mjs";
-import { spawnSync } from "node:child_process";
 import { mkdirSync, chmodSync } from "node:fs";
 
 const repo = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -129,13 +128,30 @@ test("validateModelPath: rejects missing, non-gguf, tiny; accepts real-size gguf
 });
 
 // --- graftd --check-config accepts a rendered config (integration, binary-dependent) ---
-test("rendered config passes graftd --check-config", () => {
-	const graftd = [
+// Usability gate, not existence: a failed in-tree cmake build can leave a
+// dead artifact at vendor/graft/build/graftd (CI: EACCES). Require the
+// executable bit AND a runnable binary before exercising it.
+function findGraftd() {
+	for (const p of [
 		join(repo, "vendor", "graft", "build", "graftd"),
 		join(process.env.HOME || "", "Repos", "graft-cpp", "build", "graftd"),
 		join(process.env.HOME || "", ".local", "bin", "graftd"),
-	].find((p) => existsSync(p));
-	if (!graftd) return; // binary not built — skip silently
+	]) {
+		try {
+			accessSync(p, constants.X_OK);
+		} catch {
+			continue;
+		}
+		const probe = spawnSync(p, ["--check-config"], { encoding: "utf8", timeout: 15000 });
+		if (probe.error === undefined) return p; // binary runs on this machine
+	}
+	return undefined;
+}
+
+const graftd = findGraftd();
+
+ test("rendered config passes graftd --check-config", () => {
+	if (!graftd) return; // binary not built / not runnable — skip silently
 	const hw = { platform: "darwin", cores: 8, arm: true, accel: "metal", instances: 2 };
 	const c = defaultChoices(hw, "/models/bge-m3.gguf");
 	const { home, cleanup } = tmpHome();
