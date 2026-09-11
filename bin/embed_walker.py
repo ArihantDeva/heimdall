@@ -25,6 +25,41 @@ PRUNE_DIRS = {
 MAX_BYTES = 131_072
 SNIFF_BYTES = 4096
 
+# Type-aware discovery caps (zvec-grep port, P5): known-text extensions are
+# bucketed by family; each family has its own admission cap. Rationale: a
+# 50MB machine-generated dump (data/log family) has near-zero retrieval value
+# per embedding and pollutes k-NN — but a 5MB design doc is legitimately
+# worth indexing (zg caps: code 1MiB, text 256MiB, data 16MiB). Files above
+# their family cap are skipped from DISCOVERY (no card, no preview); flat
+# MAX_BYTES stays as the sniff/read window for unknown-ext files.
+CODE_EXTS = {
+    ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".rs", ".go",
+    ".java", ".kt", ".swift", ".c", ".h", ".cpp", ".hpp", ".rb", ".php",
+    ".sh", ".zsh", ".bash", ".sql", ".vue", ".svelte", ".lua", ".pl",
+    ".ex", ".exs", ".erl", ".hs", ".clj", ".scala", ".dart", ".zig",
+    ".nim", ".sol", ".cu", ".r", ".jl", ".tf", ".hcl", ".graphql",
+    ".proto", ".ipynb",
+}
+DATA_EXTS = {".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
+             ".env", ".xml", ".csv", ".tsv"}
+DOC_EXTS = {".md", ".txt", ".rst", ".adoc", ".tex", ".html", ".css",
+            ".scss"}
+CAP_CODE = 1_048_576      # 1 MiB
+CAP_DATA = 16_777_216     # 16 MiB
+CAP_DOC = 268_435_456     # 256 MiB (zg text cap — admitted almost always)
+
+
+def family_cap(name: str) -> int | None:
+    """Admission cap for a known-text extension, or None if not a known ext."""
+    ext = os.path.splitext(name)[1].lower()
+    if ext in CODE_EXTS:
+        return CAP_CODE
+    if ext in DATA_EXTS:
+        return CAP_DATA
+    if ext in DOC_EXTS:
+        return CAP_DOC
+    return None
+
 TEXT_EXTS = {
     ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".rs", ".go", ".java",
     ".kt", ".swift", ".c", ".h", ".cpp", ".hpp", ".rb", ".php", ".sh", ".zsh",
@@ -115,6 +150,13 @@ def discover_files(root: pathlib.Path, graft_dirs_out=None):
                 if st.st_size == 0:
                     continue
                 if _name_skipped(p):
+                    continue
+                cap = family_cap(name)
+                if cap is not None:
+                    # Type-aware admission (P5): known-text families get their
+                    # own cap; oversize machine-generated dumps are skipped.
+                    if st.st_size <= cap:
+                        known.append(p)
                     continue
                 if os.path.splitext(name)[1].lower() in TEXT_EXTS:
                     known.append(p)

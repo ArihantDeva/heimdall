@@ -112,6 +112,23 @@ def test_binary_and_oversize_sniffed_out(env):
     assert "b.bin" not in names and "ok.py" in names and "huge.json" in names
 
 
+def test_type_aware_size_caps(env):
+    """P5 (zvec-grep port): known-text families admit by family cap —
+    oversize code rejected, mid-size data and docs admitted. Flat 128KB
+    MAX_BYTES no longer gates known-text discovery."""
+    big_code = env["home"] / "big.py"
+    big_code.write_text("x = 1  # " + "p" * (1_048_576 + 1024))
+    mid_data = env["home"] / "mid.json"
+    mid_data.write_text("[" + ",".join(["1"] * 600_000) + "]")  # ~1.2 MB
+    big_doc = env["home"] / "big.md"
+    big_doc.write_text("# doc\n\n" + "word " * 300_000)  # ~1.8 MB
+    files, _ = embed_walker.discover_files(env["home"])
+    names = {p.name for p in files}
+    assert "big.py" not in names, "code family: >1MiB cap must be rejected"
+    assert "mid.json" in names, "data family: 16MiB cap admits 1.2MB"
+    assert "big.md" in names, "doc family: 256MiB cap admits 1.8MB"
+
+
 def test_unknown_extension_content_sniffed(env):
     """Unknown extensions AND dotfiles-without-ext get content-sniffed:
     text-like unknowns kept, binaries dropped."""

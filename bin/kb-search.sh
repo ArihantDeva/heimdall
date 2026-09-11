@@ -109,7 +109,7 @@ fi
 # Global semantic layer (bge-m3 embeddings over repo source).
 EMBED="$HOME/.heimdall/venv/bin/python3"
 if [ ! -x "$EMBED" ] || [ ! -f "$HOME/.heimdall/global.db" ]; then
-	echo "WARN: semantic layer missing (venv or global.db). Run: ~/.heimdall/venv/bin/python3 bin/embed-index.py build"
+	echo "SEMANTIC_ERROR: not-configured (venv or global.db missing). Run: ~/.heimdall/venv/bin/python3 bin/embed-index.py build"
 fi
 
 # Repo roots: env override, else ~/Repos (expand ~). Colon-separated.
@@ -221,11 +221,13 @@ if os.path.exists(venv_py) and os.path.exists(os.path.expanduser("~/.heimdall/gl
         out = subprocess.run([venv_py, sem, "query", q, "-n", str(n), "--related"],
                              capture_output=True, text=True, timeout=90)
         if out.returncode != 0:
-            # LOUD by design (2026-08-25 dim-mismatch lesson): a dead semantic
-            # layer must be visible to the caller, not a stderr whisper. The
-            # lexical hits still print below, but the banner rides with them.
+            # LOUD + machine-readable (2026-09-10 zvec-grep port, live incident):
+            # a dead semantic leg must be (a) visible and (b) parseable by the
+            # caller. Never a raw traceback, never a silent lex-only fallback.
             tail_lines = [ln for ln in out.stderr.splitlines() if ln.strip()][-3:]
-            print("ERROR: semantic layer failed — results are LEXICAL-ONLY:")
+            reason = (" | ".join(tail_lines[-1:]) if tail_lines else "unknown embed-index.py failure")
+            print(f"SEMANTIC_ERROR: {reason}")
+            print("WARN: semantic layer failed — results are LEXICAL-ONLY (sem_coverage=degraded):")
             for ln in tail_lines:
                 print(f"  {ln}")
         for line in out.stdout.splitlines():
@@ -256,7 +258,8 @@ if os.path.exists(venv_py) and os.path.exists(os.path.expanduser("~/.heimdall/gl
                     "semantic": True,
                 })
     except Exception as e:
-        print(f"WARN: semantic layer failed: {e}", file=sys.stderr)
+        print(f"SEMANTIC_ERROR: semantic layer exception: {e}", file=sys.stderr)
+        print("WARN: semantic layer failed — results are LEXICAL-ONLY (sem_coverage=degraded)", file=sys.stderr)
 # dedupe by title, keep top score
 seen = {}
 for r in sorted(results, key=lambda x: -x["score"]):
@@ -267,6 +270,24 @@ merged = sorted(seen.values(), key=lambda x: -x["score"])[:n]
 # WEAK if path exists, NOPATH/STALE otherwise. (Replaces kb_search_verify.py,
 # which was built around the old daemon's `graft get`.)
 q_toks = set(q.lower().split())
+# Freshness anchors: per-card mtime from global.db = when the snapshot was
+# indexed. Read-only, final hits only; absent db / errors => unknown freshness.
+import sqlite3, time
+
+card_mtimes = {}
+db_path = os.path.expanduser("~/.heimdall/global.db")
+if os.path.exists(db_path):
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        hit_paths = [r["path"] for r in merged if r.get("path")]
+        if hit_paths:
+            qm = ",".join("?" * len(hit_paths))
+            card_mtimes = dict(con.execute(
+                f"SELECT path, mtime FROM cards WHERE path IN ({qm})", hit_paths))
+        con.close()
+    except Exception as e:
+        print(f"WARN: freshness lookup failed: {e}", file=sys.stderr)
+        card_mtimes = {}
 for i, r in enumerate(merged, 1):
     p = r["path"]
     exists = os.path.exists(p)
@@ -286,6 +307,22 @@ for i, r in enumerate(merged, 1):
         # corroboration lets the semantic signal carry it to STRONG. Never
         # upgrades NOPATH — a dead anchor must not look trustworthy.
         verdict = "STRONG"
-    print(f"{i:>2}. [{verdict:<6}] cov{int(cov*100):02d}%  {p}")
+    # Freshness (zvec-grep port): the card's mtime is the as_of anchor of the
+    # indexed snapshot. Older than the file on disk (1s tolerance) =>
+    # possibly_stale; no card row (e.g. graft-only hits) => freshness unknown,
+    # no token printed. Dead path (NOPATH) => no token: "fresh" on a corpse
+    # would be a lie.
+    fr = ""
+    cm = card_mtimes.get(p)
+    if cm is not None and exists:
+        age = max(0.0, time.time() - cm)
+        as_of = f"{age/3600:.1f}h" if age < 86400 * 14 else f"{age/86400:.1f}d"
+        try:
+            stale = os.path.getmtime(p) - cm > 1.0
+        except OSError:
+            stale = False
+        fr = f"as_of={as_of} " + ("possibly_stale" if stale else "fresh")
+    fr_s = f"  {fr}" if fr else ""
+    print(f"{i:>2}. [{verdict:<6}] cov{int(cov*100):02d}%{fr_s}  {p}")
     print(f"      {r['title']}")
 PYEOF
