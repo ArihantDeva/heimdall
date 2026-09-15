@@ -318,6 +318,12 @@ for i, r in enumerate(merged, 1):
     #
     # Two stats, zero reads: this is what makes the README's "act on STRONG
     # without a confirmation round-trip" true without opening the file.
+    #
+    # ponytail: a same-size rewrite that ALSO restores mtime (os.utime) defeats
+    # any stat-based check by construction; the index card stores sha1, so the
+    # upgrade path if that ever matters is comparing hashes — paid for on the
+    # reconciler's schedule, never at query time, because query-time reads are
+    # exactly what this layer exists to avoid.
     identity = None
     if exists and p in card_sizes:
         try:
@@ -325,39 +331,39 @@ for i, r in enumerate(merged, 1):
             identity = st.st_size == card_sizes[p] and (st.st_mtime - card_mtimes[p]) <= 1.0
         except OSError:
             identity = None
-    # Indexed backends (graft, mnemosyne) return no card, so identity is
-    # unknown there; file identity is all we can honestly claim, and only when
-    # the query tokens actually appear in content we hold.
-    if identity is True and cov >= 0.5:
-        verdict = "STRONG"
-        why = ""
-    elif not exists:
+    if not exists:
         verdict = "NOPATH"
         why = "anchor is gone from disk"
     elif identity is False:
         verdict = "WEAK"
         why = "file changed since it was indexed"
-    elif cov == 0.0:
+    elif identity is None:
+        # No card (graft/mnemosyne backends return none) or an unreadable stat.
+        # Nothing was verified here, so this must not be STRONG: an unverifiable
+        # hit is labelled as one, with the reason on its own line. The remedy is
+        # to index the path, which is what creates the card STRONG is built on.
         verdict = "WEAK"
-        why = "path only — no query token in the indexed card"
-    elif p in card_sizes:
-        # identity is None: stat failed on a path that os.path.exists accepted
+        why = ("could not read file metadata" if p in card_sizes else
+               "no index card for this path — content not verified")
+    elif cov < 0.5:
+        # Identity holds, but the card's own text barely overlaps the query:
+        # an intact anchor is not the same thing as an answer. A semantic hit
+        # may still upgrade this below, on top of the identity.
         verdict = "WEAK"
-        why = "could not read file metadata"
+        why = f"indexed content intact, but query tokens cover only {int(cov*100)}% of it"
     else:
-        # No card (indexed backend). Name the content that was actually
-        # matched — the label must never claim a check that did not happen.
-        snippet = " ".join(r["body"].split())[:180]
         verdict = "STRONG"
-        why = f'matched file content [{p}] "{snippet}"'
-    if r.get("semantic") and exists and identity is not False and verdict == "WEAK" and cov > 0:
-        # Semantic similarity proves relevance, not liveness: an existing path
-        # whose content matches NO query token stays WEAK; any (>0) lexical
-        # corroboration lets the semantic signal carry it to STRONG. Never
-        # upgrades NOPATH — a dead anchor must not look trustworthy — and never
-        # upgrades a file that changed after it was indexed (identity False).
+        why = ""
+    if r.get("semantic") and identity is True and verdict == "WEAK" and cov > 0:
+        # Semantic similarity proves relevance, not liveness. It only carries a
+        # hit to STRONG on top of an identity that already holds (card agrees
+        # with the file), where the lexical overlap is partial rather than
+        # absent: "the file is unchanged AND its indexed content is what the
+        # query is near". Never upgrades NOPATH — a dead anchor must not look
+        # trustworthy — never upgrades a changed file, and never upgrades a hit
+        # with no card to check, so every STRONG rests on verified identity.
         verdict = "STRONG"
-        why = f'semantic match corroborated by query tokens "{q}"'
+        why = f'semantic similarity to unchanged content "{q}"'
     # Freshness (zvec-grep port): the card's mtime is the as_of anchor of the
     # indexed snapshot. Older than the file on disk (1s tolerance) =>
     # possibly_stale; no card row (e.g. graft-only hits) => freshness unknown,

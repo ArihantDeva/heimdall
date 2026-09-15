@@ -13,7 +13,7 @@
 // absence of any content read.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -101,6 +101,47 @@ shellTest("issue #13: a size-preserving rewrite is not STRONG", () => {
     assert.match(stdout, /Expected hit/, "hit still returned");
     assert.doesNotMatch(stdout, /STRONG/, `same-length rewrite must not be STRONG:\n${stdout}`);
     assert.match(stdout, /changed since it was indexed/, "the reason names the stale card");
+  } finally { cleanup(); }
+});
+
+// A no-card hit (the graft/mnemosyne path returns no card) has nothing to
+// verify against, and reading the file to find out is exactly what this layer
+// exists to avoid. It stays WEAK and says why, rather than claiming a check it
+// never performed.
+shellTest("issue #13: a hit with no index card is WEAK and names the reason", () => {
+  const { home, cleanup } = sandbox(); // no card written
+  try {
+    const stdout = search(home);
+
+    assert.match(stdout, /Expected hit/, "hit still ranked and returned");
+    assert.doesNotMatch(stdout, /STRONG/, `unverifiable hit must not be STRONG:\n${stdout}`);
+    assert.match(stdout, /no index card for this path/, "the reason names the missing evidence");
+    assert.doesNotMatch(stdout, /matched file content/, "must not claim a content check that never ran");
+  } finally { cleanup(); }
+});
+
+// The ceiling of any stat-based check, pinned so it is a documented limit
+// rather than an unknown one: a same-size rewrite that also restores mtime is
+// indistinguishable without reading the file. If this test ever starts failing
+// because the verdict went to WEAK, the upgrade was hash-based comparison — and
+// the comment documenting the ceiling should be updated with it.
+shellTest("issue #13: known ceiling — same size plus restored mtime still reads STRONG", () => {
+  const { home, hit, cleanup } = sandbox();
+  try {
+    writeFileSync(hit, "ALLOWED=1\n");
+    const mtime = statSync(hit).mtimeMs / 1000;
+    writeCard(home, hit, { size: 10, mtime });
+    writeFileSync(hit, "DELETED=1\n"); // same length
+    utimesSync(hit, mtime, mtime); // ...and the same mtime
+
+    const stdout = search(home);
+
+    assert.equal(readFileSync(hit, "utf8"), "DELETED=1\n");
+    assert.match(
+      stdout,
+      /\[STRONG\]/,
+      `stat-based identity cannot see this rewrite; if it now reports WEAK the check became content-based and the ponytail comment in kb-search.sh must be updated:\n${stdout}`,
+    );
   } finally { cleanup(); }
 });
 
