@@ -80,9 +80,14 @@ export function installHookBinary(home = HOME()) {
  * Register the MCP server in a settings object shaped like
  * { mcpServers: { heimdall: { command, args } } } — the common dialect
  * (Claude Code, Gemini CLI, Cursor, DeepSeek all use mcpServers).
+ *
+ * The `mcp` subcommand is NOT optional: cli-main serves JSON-RPC only for the
+ * explicit `mcp` case, so an entry without it launches a process that prints
+ * usage and exits. Every adapter goes through here (or mirrors these args)
+ * precisely so that shape is written once.
  */
-function mcpServerEntry(nodeBin, heimdallJs) {
-	return { command: nodeBin || "node", args: [heimdallJs], env: {} };
+export function mcpServerEntry(nodeBin, heimdallJs) {
+	return { command: nodeBin || "node", args: [heimdallJs, "mcp"], env: {} };
 }
 
 function resolveCli() {
@@ -141,7 +146,8 @@ function writeCodex(home) {
 	const cfgPath = join(cfgDir, "config.toml");
 	const toml = readIfExists(cfgPath);
 	if (!toml.includes("[mcp_servers.heimdall]")) {
-		const entry = `\n[mcp_servers.heimdall]\ncommand = "${process.execPath}"\nargs = ["${cli}"]\n`;
+		const args = mcpServerEntry(process.execPath, cli).args.map((a) => `"${a}"`).join(", ");
+		const entry = `\n[mcp_servers.heimdall]\ncommand = "${process.execPath}"\nargs = [${args}]\n`;
 		appendFileSync(cfgPath, entry);
 	}
 	upsertMarkdownBlock(join(home, "AGENTS.md"), ruleBlock("kb_search"));
@@ -197,8 +203,9 @@ export const HeimdallPlugin = async ({ project }) => ({
 `;
 	writeFileSync(pluginPath, plugin);
 	// opencode.json at ~/.config/opencode/opencode.json — mcp local servers
+	const entry = mcpServerEntry(process.execPath, cli);
 	mergeJson(join(home, ".config", "opencode", "opencode.json"), {
-		mcp: { heimdall: { type: "local", enabled: true, command: [process.execPath, cli] } },
+		mcp: { heimdall: { type: "local", enabled: true, command: [entry.command, ...entry.args] } },
 	});
 	upsertMarkdownBlock(join(home, ".config", "opencode", "AGENTS.md"), ruleBlock("mcp__heimdall__kb_search"));
 	return "opencode";

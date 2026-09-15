@@ -35,7 +35,18 @@ ok "$COUNT repo graph(s) under ~/Repos"
 
 # 4. search smoke: ask the first repo graph
 FIRST="$(for d in "$HOME"/Repos/*/; do [ -d "${d%/}/graft" ] && echo "${d%/}" && break; done)"
-if timeout 15 "$GRAFT" ask "function" "$FIRST" --json >/dev/null 2>&1; then
+# GNU `timeout` is not in the default macOS userland, and macOS is the primary
+# supported platform — a hard dependency here failed the smoke test before it
+# even ran the command. Prefer whatever exists, fall back to perl (present on
+# macOS + Linux by default), and run unguarded if neither does.
+timeout_run() {
+  if command -v timeout >/dev/null 2>&1; then timeout 15 "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout 15 "$@"
+  elif command -v perl >/dev/null 2>&1; then perl -e 'alarm shift; exec @ARGV' 15 "$@"
+  else "$@"
+  fi
+}
+if timeout_run "$GRAFT" ask "function" "$FIRST" --json >/dev/null 2>&1; then
   ok "search smoke (graft ask)"
 else
   fail "search smoke (graft ask) on $FIRST"

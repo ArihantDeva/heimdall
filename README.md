@@ -69,7 +69,7 @@ By design, not by benchmark — these follow from the architecture:
 
 1. **Zero-LLM indexing instead of extraction pipelines.** mem0, Zep, Letta, and LangMem all use LLMs to write facts: every remembered fact costs extraction tokens, adds latency, and means your code/notes are processed by a cloud provider unless you wire your own. Heimdall's ingest is tree-sitter plus local CPU embeddings. It cannot leak data, nor does it cost anything.
 
-2. **Verified hits vs plausible hits.** RAG returns nearest neighbors with a similarity score; nothing checks that the chunk still exists, let alone that it answers the question. Heimdall re-verifies every result against the live filesystem at query time (path exists? content still matches?) and labels it STRONG/WEAK/REBUILT/STALE. Agents can act on STRONG without a confirmation round-trip.
+2. **Verified hits vs plausible hits.** RAG returns nearest neighbors with a similarity score; nothing checks that the chunk still exists, let alone that it answers the question. Heimdall re-verifies every result against the live filesystem at query time and labels it STRONG/WEAK/REBUILT/STALE. STRONG means the anchor is intact and the content is still the content that was indexed — the verdict pass compares the file against the size and mtime recorded in its index card, so the check is one `stat` per hit and never opens (let alone reads) the file it judges. Agents can act on STRONG without a confirmation round-trip; anything whose provenance cannot be verified is WEAK, and printed with the reason.
 
 3. **Self-healing vs stale corpora.** In vector-RAG, a moved file leaves orphaned chunks ranking forever until someone re-runs ingestion. Heimdall's level-triggered reconciler converges: moved files re-anchor automatically (REBUILT), deletions retract exactly their own nodes, and re-indexing twice is identical to once.
 
@@ -176,7 +176,7 @@ $ kb_search "portfolio optimization jam optimizer"
    2. [WEAK]   excel report builder — ~/work/reports/excel
 ```
 
-Every hit carries a trust verdict computed against the live filesystem — not a cached embedding score.
+Every hit carries a trust verdict computed against the live filesystem — not a cached embedding score. STRONG is never derived from a similarity score: it requires either an index card that still matches the file on disk, or content the backend actually returned for that path. A hit that cannot be verified says so on its own line (`path only — no query token in the indexed card`, `file changed since it was indexed`, `anchor is gone from disk`), so an agent reading a WEAK hit knows exactly which check failed.
 
 ## Design history
 
@@ -272,7 +272,7 @@ Extraction is tree-sitter AST parsing via a Python bridge, **not an LLM call**: 
 | **Hints** | `bin/lib/hints.mjs` | the one channel a non-writer may use (append-only, atomic, torn-line tolerant) |
 | **Sink** | `bin/lib/sink.mjs` | projection targets: `GraftSink` (CLI) and `MemorySink` (tests/dry-run) |
 | **Ranked search** | `bin/kb-search.sh` | top-k hybrid (per-repo `graft ask` + global semantic) merged + verdict pass in-process, `--scope` filter |
-| **Trust verification** | `bin/kb_search_verify.py` | legacy verifier retained for the mnemosyne backend path; the graft backend's verdicts are computed in kb-search.sh |
+| **Trust verification** | `bin/kb-search.sh` verdict pass, `bin/kb_search_verify.py` | STRONG requires card-to-file identity (size + mtime vs `~/.heimdall/global.db`), one `stat` per hit and no file reads; the legacy verifier is retained for the mnemosyne backend path |
 | **Stale pruning** | `bin/kb-stale-scan.py`, `bin/kb-rehome.sh` | full-graph sweep: deterministic rehome or log+delete |
 | **Health & telemetry** | `bin/kb-health.sh`, `bin/telemetry.sh` | daemon health, index freshness, usage stats (kb_* calls/24h, hit rate, est. time saved) |
 | **Bootstrap** | `bin/sync-edits.sh`, `bin/seed-graft.sh` | replay session edit logs → hints; seed inventory TSV into Graft |
@@ -375,6 +375,9 @@ Suites:
 - `tests/guard.test.mjs` — kb-search-guard contract (warn on 3rd consecutive grep action, reset on kb_search/kb_sync/graft, interleaved reads do NOT reset; agent-callable `suspend(N)`/`tickTurn()` pause: silences all enforcement for N model turns, clamped 1–20, expiry restores clean-slate).
 - `tests/init.test.mjs` + `tests/adapters.test.mjs` — CLI contract and per-harness config-writer smoke tests against temp HOMEs.
 - `tests/kb-verify.test.mjs` — content-aware verdict contract via `selftest:` node ids (no graft daemon needed): content mismatch downgrades STRONG, content match upgrades to STRONG, binary files degrade gracefully, `extract_paths` home-anchor regression (the tilde-form bug).
+- `tests/kb-search-identity.test.mjs` — the STRONG contract end to end: a card that agrees with the file is STRONG, a card whose size no longer matches is WEAK, and a `sys.addaudithook` "open" trace proves the verdict pass never opens the files it judges (a `stat` is not an open, so a regression to content-reading verification shows up here).
+- `tests/adapters-mcp-entry.test.mjs` — launches the command+args the adapters actually write into each harness config (codex TOML, `mcp.json`, `opencode.json`) and requires a JSON-RPC `initialize` reply, so a generated config can never again ship an entry point that prints usage and exits.
+- `tests/npm-pack-contents.test.mjs` — packs the working tree and asserts `vendor/graphify/` is in the tarball, then runs one real L2 extraction from the unpacked artifact (not a source checkout) and checks `capability()` refuses to claim graph depth without the bridge.
 
 The concurrency tests are the point: if the single-writer or idempotency properties ever break, those are the tests that go red.
 

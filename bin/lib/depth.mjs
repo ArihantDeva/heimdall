@@ -45,16 +45,40 @@ export function pythonWithTreeSitter(env = process.env) {
 let _cachedCap;
 /**
  * Deepest level this machine can actually produce.
- * L2 and L3 both need tree-sitter; without it we cap at L1.
+ *
+ * Needs BOTH halves: tree-sitter (the parser) and the vendored graphify
+ * extractors (the bridge that drives it). Probing tree-sitter alone reported
+ * graph depth on machines where every extraction then failed at import and
+ * silently settled at file depth — and since capability is stamped into the
+ * journal as cap_max, the upgrade stopped being re-reported. So the probe runs
+ * the real bridge import, not a proxy for it.
+ *
+ * root: package root holding vendor/. Defaults to this checkout; the npm
+ * tarball must ship vendor/graphify/ for this to pass after install.
  */
-export function capability(env = process.env, { fresh = false } = {}) {
+export function capability(env = process.env, { fresh = false, root = REPO_ROOT } = {}) {
   if (!fresh && _cachedCap) return _cachedCap;
   const py = pythonWithTreeSitter(env);
-  _cachedCap = {
-    max: py ? "graph" : "file",
-    python: py,
-    reason: py ? "tree-sitter available" : "tree-sitter not importable — L2/L3 unavailable",
-  };
+  let graphify = false;
+  let probeError = "";
+  if (py) {
+    const vendor = join(root, "vendor");
+    try {
+      execFileSync(py, [
+        "-c",
+        "import sys; sys.path.insert(0, sys.argv[1]); from graphify import extract; assert extract is not None",
+        vendor,
+      ], { stdio: "ignore", timeout: 10_000 });
+      graphify = true;
+    } catch (e) {
+      probeError = String(e.stderr ?? e.message ?? e).trim().split("\n").pop() ?? "";
+    }
+  }
+  let reason;
+  if (!py) reason = "tree-sitter not importable — L2/L3 unavailable";
+  else if (!graphify) reason = `graphify extractors not importable from ${join(root, "vendor")} — L2/L3 unavailable${probeError ? ` (${probeError})` : ""}`;
+  else reason = "tree-sitter + graphify extractors available";
+  _cachedCap = { max: py && graphify ? "graph" : "file", python: py, graphify, reason };
   return _cachedCap;
 }
 

@@ -266,15 +266,20 @@ for r in sorted(results, key=lambda x: -x["score"]):
     seen.setdefault(r["title"], r)
 merged = sorted(seen.values(), key=lambda x: -x["score"])[:n]
 
-# Verdict pass: STRONG if path exists on disk + lexical coverage of query,
-# WEAK if path exists, NOPATH/STALE otherwise. (Replaces kb_search_verify.py,
-# which was built around the old daemon's `graft get`.)
+# Verdict pass: STRONG requires identity with the indexed content — the path
+# exists AND the file on disk still matches the card that was indexed (size +
+# mtime). Query-token coverage is a RANKING signal, never a trust signal: a
+# semantic hit's body is synthesized as `semantic hit [<path>]`, so the path
+# alone scores full coverage, and a stale card still points at a live file.
+# Size/mtime come from the card, so this opens nothing — verification costs one
+# stat per hit. (See tests/kb-search-identity.test.mjs.)
 q_toks = set(q.lower().split())
 # Freshness anchors: per-card mtime from global.db = when the snapshot was
 # indexed. Read-only, final hits only; absent db / errors => unknown freshness.
 import sqlite3, time
 
 card_mtimes = {}
+card_sizes = {}
 db_path = os.path.expanduser("~/.heimdall/global.db")
 if os.path.exists(db_path):
     try:
@@ -282,12 +287,15 @@ if os.path.exists(db_path):
         hit_paths = [r["path"] for r in merged if r.get("path")]
         if hit_paths:
             qm = ",".join("?" * len(hit_paths))
-            card_mtimes = dict(con.execute(
-                f"SELECT path, mtime FROM cards WHERE path IN ({qm})", hit_paths))
+            for p_, mt_, sz_ in con.execute(
+                    f"SELECT path, mtime, size FROM cards WHERE path IN ({qm})", hit_paths):
+                card_mtimes[p_] = mt_
+                card_sizes[p_] = sz_
         con.close()
     except Exception as e:
         print(f"WARN: freshness lookup failed: {e}", file=sys.stderr)
         card_mtimes = {}
+        card_sizes = {}
 for i, r in enumerate(merged, 1):
     p = r["path"]
     exists = os.path.exists(p)
@@ -300,13 +308,56 @@ for i, r in enumerate(merged, 1):
             if tok in title_l or tok in body_l or tok in p.lower():
                 matched += 1
         cov = round(matched / len(q_toks), 2)
-    verdict = "STRONG" if exists and cov >= 0.5 else ("WEAK" if exists else "NOPATH")
-    if r.get("semantic") and exists and verdict == "WEAK" and cov > 0:
+    # Content identity: the card this hit came from recorded the size AND mtime
+    # the file had when it was indexed. A file that has moved on since then is
+    # not the content we matched — whatever it now says is unverified, so it
+    # cannot be STRONG no matter how well the query tokens line up. Size alone
+    # would miss a same-length rewrite (ALLOWED=1 -> DELETED=1); the mtime
+    # comparison closes that, and matches the freshness token below so a hit can
+    # never read `possibly_stale` and STRONG at the same time.
+    #
+    # Two stats, zero reads: this is what makes the README's "act on STRONG
+    # without a confirmation round-trip" true without opening the file.
+    identity = None
+    if exists and p in card_sizes:
+        try:
+            st = os.stat(p)
+            identity = st.st_size == card_sizes[p] and (st.st_mtime - card_mtimes[p]) <= 1.0
+        except OSError:
+            identity = None
+    # Indexed backends (graft, mnemosyne) return no card, so identity is
+    # unknown there; file identity is all we can honestly claim, and only when
+    # the query tokens actually appear in content we hold.
+    if identity is True and cov >= 0.5:
+        verdict = "STRONG"
+        why = ""
+    elif not exists:
+        verdict = "NOPATH"
+        why = "anchor is gone from disk"
+    elif identity is False:
+        verdict = "WEAK"
+        why = "file changed since it was indexed"
+    elif cov == 0.0:
+        verdict = "WEAK"
+        why = "path only — no query token in the indexed card"
+    elif p in card_sizes:
+        # identity is None: stat failed on a path that os.path.exists accepted
+        verdict = "WEAK"
+        why = "could not read file metadata"
+    else:
+        # No card (indexed backend). Name the content that was actually
+        # matched — the label must never claim a check that did not happen.
+        snippet = " ".join(r["body"].split())[:180]
+        verdict = "STRONG"
+        why = f'matched file content [{p}] "{snippet}"'
+    if r.get("semantic") and exists and identity is not False and verdict == "WEAK" and cov > 0:
         # Semantic similarity proves relevance, not liveness: an existing path
         # whose content matches NO query token stays WEAK; any (>0) lexical
         # corroboration lets the semantic signal carry it to STRONG. Never
-        # upgrades NOPATH — a dead anchor must not look trustworthy.
+        # upgrades NOPATH — a dead anchor must not look trustworthy — and never
+        # upgrades a file that changed after it was indexed (identity False).
         verdict = "STRONG"
+        why = f'semantic match corroborated by query tokens "{q}"'
     # Freshness (zvec-grep port): the card's mtime is the as_of anchor of the
     # indexed snapshot. Older than the file on disk (1s tolerance) =>
     # possibly_stale; no card row (e.g. graft-only hits) => freshness unknown,
@@ -325,4 +376,6 @@ for i, r in enumerate(merged, 1):
     fr_s = f"  {fr}" if fr else ""
     print(f"{i:>2}. [{verdict:<6}] cov{int(cov*100):02d}%{fr_s}  {p}")
     print(f"      {r['title']}")
+    if why:
+        print(f"      {why}")
 PYEOF
