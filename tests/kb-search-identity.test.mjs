@@ -122,9 +122,13 @@ shellTest("issue #13: a hit with no index card is WEAK and names the reason", ()
 
 // The ceiling of any stat-based check, pinned so it is a documented limit
 // rather than an unknown one: a same-size rewrite that also restores mtime is
-// indistinguishable without reading the file. If this test ever starts failing
-// because the verdict went to WEAK, the upgrade was hash-based comparison — and
-// the comment documenting the ceiling should be updated with it.
+// indistinguishable without reading the file. The boundary is owned elsewhere
+// by design — `heimdall verify --deep` re-hashes and reports the drift, and the
+// reconciler's next pass re-indexes the file, rewriting the card and making
+// search correct again. If this test ever starts failing because the verdict
+// went to WEAK, query-time identity became content-based (that read is exactly
+// what the layer avoids) and the ponytail comment in kb-search.sh needs
+// updating with it.
 shellTest("issue #13: known ceiling — same size plus restored mtime still reads STRONG", () => {
   const { home, hit, cleanup } = sandbox();
   try {

@@ -10,7 +10,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -52,6 +52,35 @@ function readCodexEntry(home) {
 		?.split(",").map((s) => s.trim().replace(/^"|"$/g, "")).filter(Boolean);
 	return { command, args: args ?? [] };
 }
+
+test("issue #11: re-running init repairs a codex config written by the broken version", () => {
+	const { home, cleanup } = freshHome();
+	try {
+		// Exactly what 0.10.0 wrote: the entry point with no `mcp` subcommand.
+		mkdirSync(join(home, ".codex"), { recursive: true });
+		writeFileSync(join(home, ".codex", "config.toml"), [
+			'[mcp_servers.other]',
+			'command = "/usr/bin/other"',
+			'',
+			'[mcp_servers.heimdall]',
+			'command = "/usr/bin/node"',
+			'args = ["/old/path/bin/heimdall.js"]',
+			'',
+		].join("\n"));
+
+		installAdapter("codex", home);
+		const { args } = readCodexEntry(home);
+
+		assert.ok(
+			args.includes("mcp"),
+			`upgrading must repair the stale entry, but re-running init left args ${JSON.stringify(args)} — every 0.10.0 user stays broken after upgrade`,
+		);
+		assert.ok(
+			readFileSync(join(home, ".codex", "config.toml"), "utf8").includes("[mcp_servers.other]"),
+			"repairing our entry must not drop the user's other MCP servers",
+		);
+	} finally { cleanup(); }
+});
 
 test("issue #11: launching the generated codex config serves MCP, not usage text", async () => {
 	const { home, cleanup } = freshHome();

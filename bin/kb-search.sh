@@ -320,10 +320,16 @@ for i, r in enumerate(merged, 1):
     # without a confirmation round-trip" true without opening the file.
     #
     # ponytail: a same-size rewrite that ALSO restores mtime (os.utime) defeats
-    # any stat-based check by construction; the index card stores sha1, so the
-    # upgrade path if that ever matters is comparing hashes — paid for on the
-    # reconciler's schedule, never at query time, because query-time reads are
-    # exactly what this layer exists to avoid.
+    # any stat-based check by construction, so query time cannot see it — and
+    # paying for it here would mean hashing every hit, which is the read this
+    # layer exists to avoid. The boundary is owned elsewhere on purpose:
+    # `heimdall verify --deep` re-hashes and reports `why: "hash"` drift, and
+    # the reconciler's next pass re-indexes the file, which rewrites the card
+    # and makes search correct again. So the exposure is bounded by how stale
+    # verification is, not permanent, and it is the same window in which the
+    # graph itself is out of date. tests/kb-search-identity.test.mjs pins this
+    # as a known ceiling: if that test ever fails toward WEAK, query-time
+    # identity became content-based and this comment is what to update.
     identity = None
     if exists and p in card_sizes:
         try:
