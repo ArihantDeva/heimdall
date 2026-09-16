@@ -46,7 +46,17 @@ export const ANCHOR_TOLERANCE = 1.5;
 // while the target p50 went 108.7ms -> 227ms, and the gate reported a code
 // regression. The OS load average is the direct signal the anchor was proxying
 // badly.
-export const LOAD_SATURATION = 1.0;
+//
+// Calibration is deliberately conservative and empirical — only two observed
+// points, so the ceiling is set where the SECOND one is clearly pathological
+// rather than at the first hint of load:
+//   load 7.9/core  (63/8):  p50 108.7 -> 227ms     <- real 2.1x inflation
+//   load 1.51/core (12.1/8): p50 106ms vs 108.7ms  <- honest, must NOT refuse
+// A ceiling of 1.0 refused the second case, i.e. it failed honest work, which
+// is the failure mode this whole guard exists to prevent. 2.0 separates the two
+// observations; it is not a validated general threshold, and a future cycle
+// with more data should refit it.
+export const LOAD_SATURATION = 2.0;
 
 function cliEnv(home, python) {
   return { ...process.env, HOME: home, HEIMDALL_PYTHON: python };
