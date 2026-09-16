@@ -9,8 +9,12 @@ after `npm i -g @arihantdeva/heimdall`. One command per harness; all idempotent.
 | Claude Code | `heimdall init --harness claude-code` | `~/.claude/settings.json` PostToolUse hook (edit-log sync) + `~/.claude/HEIMDALL.md` snippet |
 | Codex CLI | `heimdall init --harness codex` | `~/AGENTS.md` search/insert snippet |
 | Cursor | `heimdall init --harness cursor` | `~/.cursor/rules/heimdall.mdc` rules file |
-| Windsurf | `heimdall init --harness windsurf` | `~/.windsurf/rules/heimdall.md` rules file |
 | All | `heimdall init --harness all` | everything above |
+
+Windsurf is deliberately absent: there is no writer in `bin/lib/adapters.mjs`,
+so `--harness windsurf` is rejected by the CLI. It was listed here and in the
+usage string long after the writer went away, which made a documented command
+fail — add it back only with a writer and a test that launches the config.
 
 ## Pi (reference adapter)
 

@@ -14,7 +14,10 @@ Five fixes reported against 0.10.0. Each has a regression test that failed on
   OpenCode. The MCP protocol tests missed it because they spawn
   `heimdall.js mcp` directly instead of launching the config the adapters
   write; `tests/adapters-mcp-entry.test.mjs` now does the latter. Existing
-  installations need to re-run `heimdall init --harness <name>`.
+  installations are repaired by re-running `heimdall init --harness <name>`:
+  the Codex writer now replaces its own TOML table rather than skipping it when
+  present, which previously left the broken args in place forever while the
+  other adapters overwrote theirs.
 - **The npm package could not do AST extraction.** `files[]` omitted
   `vendor/graphify/`, which `bin/lib/heimdall_extract.py` imports at runtime,
   so every installed copy silently settled at file depth. Related: `capability()`

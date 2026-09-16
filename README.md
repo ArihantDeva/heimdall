@@ -111,7 +111,7 @@ PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). The concurrency invarian
 
 ```bash
 npm i -g @arihantdeva/heimdall
-heimdall init --harness claude-code   # or pi | codex | cursor | windsurf | all
+heimdall init --harness claude-code   # or pi | codex | cursor | opencode | all
 ```
 
 That's it for install + harness wiring (`init`, `insert` work immediately).

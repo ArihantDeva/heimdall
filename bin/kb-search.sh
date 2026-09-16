@@ -78,14 +78,25 @@ for r in (data.get("results") or []):
     except (TypeError, ValueError) as e:
         print(f"WARN: skipping malformed memory result: {e}", file=sys.stderr)
 q_toks = set(q.lower().split())
+# This backend has no index cards, so there is nothing here that could ever
+# corroborate the content it returns. A path that exists plus tokens that appear
+# in the memory's own prose is evidence of a mention, not of verification — so
+# these hits are WEAK with the reason stated, exactly like a cardless hit on the
+# graft path. Claiming STRONG here would mean the same word meaning two
+# different things depending on which backend answered.
 for i, r in enumerate(sorted(results, key=lambda x: -x["score"])[:n], 1):
     p = r["path"]
     exists = os.path.exists(p)
     blob = (r["title"] + " " + r["body"] + " " + p).lower()
     cov = round(sum(1 for t in q_toks if t in blob) / len(q_toks), 2) if q_toks else 0.0
-    verdict = "STRONG" if exists and cov >= 0.5 else ("WEAK" if exists else "NOPATH")
+    if not exists:
+        verdict, why = "NOPATH", "anchor is gone from disk"
+    else:
+        verdict = "WEAK"
+        why = "memory store has no index card — content not verified"
     print(f"{i:>2}. [{verdict:<6}] cov{int(cov*100):02d}%  {p}")
     print(f"      {r['title']}")
+    print(f"      {why}")
 PYEOF
 	exit 0
 }
@@ -276,7 +287,7 @@ merged = sorted(seen.values(), key=lambda x: -x["score"])[:n]
 q_toks = set(q.lower().split())
 # Freshness anchors: per-card mtime from global.db = when the snapshot was
 # indexed. Read-only, final hits only; absent db / errors => unknown freshness.
-import sqlite3, time
+import sqlite3, stat, time
 
 card_mtimes = {}
 card_sizes = {}
@@ -331,15 +342,36 @@ for i, r in enumerate(merged, 1):
     # as a known ceiling: if that test ever fails toward WEAK, query-time
     # identity became content-based and this comment is what to update.
     identity = None
-    if exists and p in card_sizes:
+    # A directory or a symlink is not the file the card describes: os.stat
+    # follows links, and a directory can carry a plausible size/mtime, so both
+    # would otherwise inherit the verdict the path used to deserve. Read the
+    # entry itself (lstat) and require it to be a regular file.
+    try:
+        link_st = os.lstat(p)
+        is_file = stat.S_ISREG(link_st.st_mode)
+    except OSError:
+        is_file = False
+    if exists and is_file and p in card_sizes:
         try:
             st = os.stat(p)
-            identity = st.st_size == card_sizes[p] and (st.st_mtime - card_mtimes[p]) <= 1.0
+            # SYMMETRIC and TIGHT. `st.st_mtime - card <= 1.0` accepted a
+            # downward skew of any size, which is reachable without utime:
+            # embed-index fast-paths on EXACT mtime equality, so an edit landing
+            # in the same coarse tick as the index pass keeps the old content
+            # hash, as does any mtime-preserving restore. Mirroring that exact
+            # equality (with an epsilon only for float round-tripping) is what
+            # "the file is unchanged since we indexed it" actually means; a
+            # loose window would re-admit the evidence-free STRONG this whole
+            # check exists to prevent.
+            identity = st.st_size == card_sizes[p] and abs(st.st_mtime - card_mtimes[p]) < 1e-6
         except OSError:
             identity = None
     if not exists:
         verdict = "NOPATH"
         why = "anchor is gone from disk"
+    elif not is_file:
+        verdict = "WEAK"
+        why = "path is no longer a regular file (directory or symlink)"
     elif identity is False:
         verdict = "WEAK"
         why = "file changed since it was indexed"
@@ -380,8 +412,11 @@ for i, r in enumerate(merged, 1):
     if cm is not None and exists:
         age = max(0.0, time.time() - cm)
         as_of = f"{age/3600:.1f}h" if age < 86400 * 14 else f"{age/86400:.1f}d"
+        # The freshness token says exactly what identity verified: the file's
+        # mtime still equals the card's. Same test, same tightness, so the token
+        # and the verdict can never disagree.
         try:
-            stale = os.path.getmtime(p) - cm > 1.0
+            stale = abs(os.path.getmtime(p) - cm) >= 1e-6
         except OSError:
             stale = False
         fr = f"as_of={as_of} " + ("possibly_stale" if stale else "fresh")

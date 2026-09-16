@@ -10,11 +10,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { installAdapter } from "../bin/lib/adapters.mjs";
+import { installAdapter, KNOWN_HARNESSES } from "../bin/lib/adapters.mjs";
 
 const INIT = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test", version: "0" } } };
 
@@ -104,6 +104,9 @@ test("issue #11: launching the generated codex config serves MCP, not usage text
 /** Every adapter that registers an MCP server, and how to read its args. */
 const MCP_HARNESSES = {
 	"claude-code": (home) => JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf8")).mcpServers.heimdall,
+	// codex writes TOML, so the entry is read with the same minimal parser the
+	// launch test uses; its args are asserted here like every other adapter's.
+	codex: (home) => readCodexEntry(home),
 	cursor: (home) => JSON.parse(readFileSync(join(home, ".cursor", "mcp.json"), "utf8")).mcpServers.heimdall,
 	"gemini-cli": (home) => JSON.parse(readFileSync(join(home, ".gemini", "settings.json"), "utf8")).mcpServers.heimdall,
 	deepseek: (home) => JSON.parse(readFileSync(join(home, ".deepseek", "settings.json"), "utf8")).mcpServers.heimdall,
@@ -141,12 +144,29 @@ test("issue #11: claude-code MCP entry actually serves a JSON-RPC initialize", a
 	} finally { cleanup(); }
 });
 
-// Keep the harness map honest: pi is the only adapter that ships MCP tools via
-// an extension instead of a config entry, so it must not appear above.
-test("harness map matches the adapters that register MCP servers", () => {
+// The map above is a literal; on its own it asserts nothing about the product.
+// This derives the real answer by running every known adapter and checking which
+// ones actually wrote an MCP entry, so gaining a writer (or losing one) without
+// updating the map fails here instead of reading as coverage.
+test("issue #11: the harness map lists exactly the adapters that register MCP", () => {
+	const registered = KNOWN_HARNESSES.filter((h) => {
+		const home = mkdtempSync(join(tmpdir(), "heimdall-known-"));
+		try {
+			installAdapter(h, home);
+			return [
+				join(home, ".claude", "settings.json"),
+				join(home, ".codex", "config.toml"),
+				join(home, ".cursor", "mcp.json"),
+				join(home, ".gemini", "settings.json"),
+				join(home, ".deepseek", "settings.json"),
+				join(home, ".config", "opencode", "opencode.json"),
+			].some((p) => existsSync(p));
+		} finally { rmSync(home, { recursive: true, force: true }); }
+	});
+
 	assert.deepEqual(
+		registered.sort(),
 		Object.keys(MCP_HARNESSES).sort(),
-		["claude-code", "cursor", "deepseek", "gemini-cli", "opencode"],
+		"an adapter registers MCP but is not exercised above (or vice versa) — the map has drifted from the product",
 	);
-	mkdirSync(join(tmpdir(), "heimdall-noop"), { recursive: true });
 });

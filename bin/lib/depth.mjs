@@ -64,19 +64,26 @@ export function capability(env = process.env, { fresh = false, root = REPO_ROOT 
   if (py) {
     const vendor = join(root, "vendor");
     try {
-      execFileSync(py, [
-        "-c",
-        "import sys; sys.path.insert(0, sys.argv[1]); from graphify import extract; assert extract is not None",
-        vendor,
-      ], { stdio: "ignore", timeout: 10_000 });
-      graphify = true;
+      // Importing graphify.extract proves only that a module of stdlib imports
+      // loads. Every grammar is imported LAZILY inside the per-language
+      // extractors, and the bridge catches those failures and returns error
+      // rows that the caller degrades to file depth — the exact silent-
+      // degradation this probe exists to prevent. So actually extract a file:
+      // if the vendored extractor and its grammar can produce a symbol, the
+      // capability is real for that language. (The probe file exercises the one
+      // grammar we can count on: the extractor module and its binding.)
+      const probe = join(root, "bin", "lib", "heimdall_extract.py");
+      const out = execFileSync(py, [probe, probe], { encoding: "utf8", timeout: 15_000, stdio: ["ignore", "pipe", "ignore"] });
+      const result = JSON.parse(out).results[probe] ?? {};
+      graphify = Array.isArray(result.nodes) && result.nodes.length >= 2 && !result.error;
+      if (!graphify) probeError = String(result.error ?? "no symbol nodes produced");
     } catch (e) {
       probeError = String(e.stderr ?? e.message ?? e).trim().split("\n").pop() ?? "";
     }
   }
   let reason;
   if (!py) reason = "tree-sitter not importable — L2/L3 unavailable";
-  else if (!graphify) reason = `graphify extractors not importable from ${join(root, "vendor")} — L2/L3 unavailable${probeError ? ` (${probeError})` : ""}`;
+  else if (!graphify) reason = `the extraction bridge cannot produce symbols (vendor/graphify or a tree-sitter grammar missing) — L2/L3 unavailable${probeError ? ` (${probeError})` : ""}`;
   else reason = "tree-sitter + graphify extractors available";
   _cachedCap = { max: py && graphify ? "graph" : "file", python: py, graphify, reason };
   return _cachedCap;
