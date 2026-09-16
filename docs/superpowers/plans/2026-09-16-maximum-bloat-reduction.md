@@ -104,7 +104,7 @@ python3 -c "import sys
  sys.path.insert(0,'bin')
  import kb_search_verify as m
  assert not hasattr(m,'main'), 'dead path survived'"
-python3 -m py_compile bin/kb-stale-scan.py 
+python3 -m py_compile bin/kb-stale-scan.py
  echo "kb-stale-scan compiles"
 ```
 Expected: a one-element list containing an existing home path
@@ -196,7 +196,7 @@ For each hit line, delete the sentence/row/task block that describes the Rust wo
  if `mise.toml` has a `tasks` entry that only builds/benchmarks the Rust crates, delete that entry
  if a task mixes Rust and JS steps, delete only its Rust step. Do not rewrite neighbouring prose.
 - [ ] **Step 5: Verify nothing references the workspace and the gates stay green**
-```bash;rg --no-ignore -n "rs/heimdall|heimdall-embed|heimdall-search|export_onnx" bin extensions tests types bench docs README.md AGENTS.md CHANGELOG.md CONTRIBUTING.md mise.toml .github package.json launchd config demo.tape | rg -v '^docs/superpowers/' 
+```bash;rg --no-ignore -n "rs/heimdall|heimdall-embed|heimdall-search|export_onnx" bin extensions tests types bench docs README.md AGENTS.md CHANGELOG.md CONTRIBUTING.md mise.toml .github package.json launchd config demo.tape | rg -v '^docs/superpowers/'
  echo "0 refs"
 npm test
 npm run typecheck
@@ -234,7 +234,7 @@ git rm bin/lib/tier.mjs bin/lib/agent-memory.mjs tests/tier.test.mjs
 Delete the `tier` sample lines from `config/heimdall.yaml.example` (keep the rest of the `memory:` block), and delete each recorded prose row/sentence from `docs/adapters.md`. Leave dated specs and plans untouched. Removed capability gets no shim, no deprecation stub.
 - [ ] **Step 5: Verify and run the full suite**
 ```bash
-rg --no-ignore -n "memory\.tier|resolveTier|agentExtract|agent-memory\.mjs|tier\.mjs" bin extensions tests types bench docs README.md AGENTS.md CHANGELOG.md CONTRIBUTING.md mise.toml config | rg -v '^docs/superpowers/' 
+rg --no-ignore -n "memory\.tier|resolveTier|agentExtract|agent-memory\.mjs|tier\.mjs" bin extensions tests types bench docs README.md AGENTS.md CHANGELOG.md CONTRIBUTING.md mise.toml config | rg -v '^docs/superpowers/'
  echo "0 refs";node --test tests/
 npm run typecheck
 git diff --check
@@ -301,12 +301,12 @@ git rm kernels
 - [ ] **Step 3: Verify**
 ```bash
 git ls-files -s kernels            # expect empty
-test ! -e kernels 
+test ! -e kernels
  echo "symlink gone"
-rg --no-ignore -n "explainer\.png|heimdall-comparison|heimdall-infrastructure|heimdall-demo\.mp4" bin extensions tests docs README.md AGENTS.md package.json | rg -v '^docs/superpowers/' 
+rg --no-ignore -n "explainer\.png|heimdall-comparison|heimdall-infrastructure|heimdall-demo\.mp4" bin extensions tests docs README.md AGENTS.md package.json | rg -v '^docs/superpowers/'
  echo "0 refs"
-test -f assets/demo.gif 
- test -f docs/heimdall_compare.png 
+test -f assets/demo.gif
+ test -f docs/heimdall_compare.png
  echo "live assets intact"
 npm test
 git diff --check
@@ -458,7 +458,7 @@ for b in a1-verify-dead-path a2-dead-exports b1-rust-workspace b2-agent-tier b3-
   git merge --no-ff "bloat/$b" -m "merge(bloat): $b" ; { echo "CONFLICT in $b — fix in its own worktree, never in integration"
  break
  }
-  git diff --check 
+  git diff --check
  echo "whitespace error after $b"
 done
 ```
@@ -481,7 +481,7 @@ Expected: pack lists no deleted path
 **Interfaces:**;- Consumes: the frozen integration SHA;- Produces: recorded evidence that no consumer of a deleted artifact remains;- [ ] **Step 1: Whole-repo consumer scan**
 ```bash
 cd /Users/arihantdeva/.pi/worktrees/heimdall-bloat-integration
-rg --no-ignore -n "claudeHooksFragment|assetsDir|resolveTier|agentExtract|kb-verify\.sh|kbverify_insert_probe|kb_search_verify\.py|heimdall-embed|heimdall-search|export_onnx|render-explainer|render-comparison|render-infrastructure|render-demo-video|heimdall-comparison|heimdall-infrastructure|explainer\.png|heimdall-demo\.mp4|\bkernels\b" bin extensions tests types docs README.md AGENTS.md CHANGELOG.md CONTRIBUTING.md mise.toml .github package.json launchd config demo.tape | rg -v '^docs/superpowers/|^bench/(runs|data)/' 
+rg --no-ignore -n "claudeHooksFragment|assetsDir|resolveTier|agentExtract|kb-verify\.sh|kbverify_insert_probe|kb_search_verify\.py|heimdall-embed|heimdall-search|export_onnx|render-explainer|render-comparison|render-infrastructure|render-demo-video|heimdall-comparison|heimdall-infrastructure|explainer\.png|heimdall-demo\.mp4|\bkernels\b" bin extensions tests types docs README.md AGENTS.md CHANGELOG.md CONTRIBUTING.md mise.toml .github package.json launchd config demo.tape | rg -v '^docs/superpowers/|^bench/(runs|data)/'
  echo "0 live refs"
 ```
 Expected: `0 live refs` (historical specs/plans and bench corpora excluded by construction).
@@ -489,14 +489,14 @@ Expected: `0 live refs` (historical specs/plans and bench corpora excluded by co
 ```bash
 rg -n "HeimdallPlugin" bin docs extensions tests | wc -l     # expect unchanged vs base: compare with `git show $BASE:bin/lib/adapters.mjs | rg -c HeimdallPlugin`
 node bin/heimdall.js --help
-node bin/heimdall.js doctor 
+node bin/heimdall.js doctor
  echo "daemon absent — doctor SKIPPED (record as not-verified, not as pass)"
 for s in bin/*.sh
- do bash -n "$s" 
+ do bash -n "$s"
  echo "syntax error: $s"
  done
 for p in bin/*.py bin/lib/*.py
- do python3 -m py_compile "$p" 
+ do python3 -m py_compile "$p"
  echo "compile error: $p"
  done
 ```
@@ -551,8 +551,8 @@ Metrics are reported, not committed as a file. No commit.
 Dispatch a fresh `chain/deepseek-v4.1-flash` reviewer with: base SHA, integration SHA, `git diff c16b91f8b57408266f7f7116a4e1f5b922a32e21..HEAD`, Task 11 outputs, Task 12 outputs. Brief: find unjustified dependency, dead path, duplicate owner, layer violation, missed live consumer, packaging omission, invariant break. **Never include another reviewer's verdict or reasoning.**
 - [ ] **Step 2: Fix high-severity findings from Pass 1, re-run focused + full gates, re-merge**
 ```bash
-node --test tests/ 
- npm run typecheck 
+node --test tests/
+ npm run typecheck
  git diff --check
 git commit -m "fix(bloat): address review pass 1 <finding>"
 ```
@@ -577,10 +577,10 @@ git worktree list            # lane worktrees may stay
  nothing uncommitted;```
 - [ ] **Step 2: Re-run every gate on the frozen SHA with no further commits**
 ```bash
-npm pack --dry-run 
- npm test 
+npm pack --dry-run
+ npm test
  npm run typecheck
-bash bin/kb-health.sh 
+bash bin/kb-health.sh
  echo "health SKIPPED (daemon state) — record as not-verified"
 git diff --check
 ```
