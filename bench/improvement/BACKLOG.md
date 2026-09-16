@@ -75,9 +75,18 @@ portable assertions were ported to `tests/portable-coverage.test.mjs`.
 
 ## Rules for a cycle
 
-- Test counts and measurements in these notes are point-in-time observations,
-  not invariants. Re-measure before quoting: the count moves with every landed
-  test (399 at `196d9ed`, 405 at `8c73441`, 438 at `661eff4`).
+- **A fresh git worktree does not inherit ignore rules or build outputs.** Verified on a detached
+  worktree at the combined tree `f76f59a`: `node_modules`, `vendor/graft/build`, and `bench/data` were
+  all MISSING, so `verify:improvement` cannot run until they are linked from the primary tree
+  (`ln -s <primary>/<path> <worktree>/<path>` for each). The failure is a `FileNotFoundError` on
+  `longmemeval_oracle.json` or a module-resolution error, which reads as a broken repo rather than a
+  missing symlink. Two independent workers hit this.
+- **The baseline is SHA-anchored by design.** `baseline.json` records the commit it was measured at,
+  and `commit` is deliberately NOT part of workload identity so a new commit is comparable. Do not
+  "fix" a workload-mismatch refusal by re-adding `commit`; that made the gate unable to measure change.
+- Test counts and measurements in these notes are point-in-time observations, not invariants.
+  Re-measure before quoting: the count moves with every landed test (399 at `196d9ed`, 438 at
+  `661eff4`, 446 at `ae11133`; the combined tree with the bloat campaign measures 437).
 
 - Metric contract is fixed; do not redefine a metric to make a candidate pass.
 - One bounded change per cycle; profile before optimizing.
