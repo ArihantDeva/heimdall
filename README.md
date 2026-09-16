@@ -21,8 +21,8 @@ Heimdall gives AI coding agents **persistent memory across every repository and 
 
 **4. Retrieval you can act on.** Semantic memory tools return plausible matches, but Heimdall also verifies it at runtime.
 
-- `STRONG` — path exists on disk, strong lexical coverage, **and** the file's actual content answers the query (content-aware scoring)
-- `WEAK` — semantic match only; plausible but unverified
+- `STRONG` — the anchor is intact **and** the indexed text answers the query: the file is still a regular file whose size and mtime match its index card, and the query's tokens appear in the content that was indexed. Nothing is read at query time
+- `WEAK` — plausible but unverified; the printed reason says which part failed (changed since indexing, no index card, tokens covering too little of the indexed text, or a path that is no longer a regular file)
 - `REBUILT` — file moved; Heimdall found it and re-anchored automatically
 - `STALE` / `REMOVED` — dead path, logged and pruned so it stops ranking
 
@@ -176,7 +176,7 @@ $ kb_search "portfolio optimization jam optimizer"
    2. [WEAK]   excel report builder — ~/work/reports/excel
 ```
 
-Every hit carries a trust verdict computed against the live filesystem — not a cached embedding score. Nothing is STRONG unless an index card says the file is unchanged (`~/.heimdall/global.db`: recorded size and mtime still match what `stat` reports), and either the query tokens overlap the indexed text or the semantic layer matched it on top of that verified identity. A similarity score alone never makes a hit STRONG. A hit that cannot meet the bar says which part failed, on its own line: `file changed since it was indexed`, `no index card for this path — content not verified`, `indexed content intact, but query tokens cover only 20% of it`, `anchor is gone from disk`. The ceiling is honest and bounded: a same-size rewrite that also restores mtime is invisible to a stat-based check, so query time cannot catch it. That boundary is owned elsewhere by design — `heimdall verify --deep` re-hashes and reports the drift, and the reconciler's next pass re-indexes the file, rewriting the card and making search correct again. The exposure is therefore the same window in which the graph itself is out of date, not a permanent gap.
+Every hit carries a trust verdict computed against the live filesystem — not a cached embedding score. Nothing is STRONG unless an index card says the file is unchanged (`~/.heimdall/global.db`: recorded size and mtime still match what `stat` reports), and either the query tokens overlap the indexed text or the semantic layer matched it on top of that verified identity. A similarity score alone never makes a hit STRONG. A hit that cannot meet the bar says which part failed, on its own line: `file changed since it was indexed`, `no index card for this path — content not verified`, `indexed content intact, but query tokens cover only 20% of it`, `anchor is gone from disk`. The ceiling is real and worth knowing: a same-size rewrite that also restores mtime is invisible to a stat-based check, so query time will not catch it. It is also invisible to the indexer, which fast-paths on the same size-and-mtime predicate — so the stale card survives a re-index and the wrong verdict persists until `heimdall verify --deep` re-hashes the file and reports the drift. That verifier audits the reconciler's journal, which is a different path set from the semantic index, so do not read it as full coverage.
 
 ## Design history
 

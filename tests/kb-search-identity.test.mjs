@@ -45,12 +45,16 @@ function writeCard(home, path, { size, title = "Expected hit", body = "example",
   const db = join(home, ".heimdall", "global.db");
   mkdirSync(dirname(db), { recursive: true });
   const drop = existsSync(db) ? 'con.execute("DROP TABLE IF EXISTS cards")' : "";
+  // SQLite is dynamically typed: binding a non-numeric mtime (a string) stores
+  // TEXT in a REAL NOT NULL column, which is how a legacy or hand-edited row
+  // ends up carrying a value the freshness arithmetic cannot subtract.
+  const insert = `con.execute('INSERT INTO cards VALUES ("1", ?, ?, ?, ?, "r", ?, ?)', (${JSON.stringify(path)}, ${JSON.stringify(title)}, ${JSON.stringify(body)}, "s1", ${JSON.stringify(mtime)}, ${size}))`;
   execFileSync("/usr/bin/python3", ["-c", [
     "import sqlite3,sys",
     `con = sqlite3.connect(${JSON.stringify(db)})`,
     drop,
     `con.execute(${JSON.stringify(CARDS_DDL)})`,
-    `con.execute('INSERT INTO cards VALUES ("1", ?, ?, ?, ?, "r", ?, ?)', (${JSON.stringify(path)}, ${JSON.stringify(title)}, ${JSON.stringify(body)}, "s1", ${mtime}, ${size}))`,
+    insert,
     "con.commit()",
   ].filter(Boolean).join("; ")]);
   return db;
@@ -73,7 +77,7 @@ const runEnv = (home, extra = {}) => ({
   ...extra,
 });
 
-const search = (home, extra) => execFileSync("bash", [KB_SEARCH, "example"], {
+const search = (home, extra, query = "example") => execFileSync("bash", [KB_SEARCH, query], {
   encoding: "utf8",
   env: runEnv(home, extra),
 });
@@ -257,6 +261,90 @@ shellTest("issue #13: the mnemosyne verdict does not claim unverified STRONG", (
       `mnemosyne has no index card to verify against, so nothing it returns can be STRONG:\n${stdout}`,
     );
   } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+// How coverage works, so the two cases below are unambiguous: `cov` is measured
+// over the TEXT OF THE HIT the backend returned (its title + snippet, with the
+// path removed) — not over the card row. The card supplies identity; the hit
+// supplies the text the query is matched against.
+//
+// The path is removed rather than merely excluded as a field because every
+// producer embeds it in the hit body (`snippet [path]`), so a filename alone
+// used to supply full coverage and read STRONG — the "agent acts without a
+// round-trip on content that does not answer the question" failure.
+shellTest("issue #13: a matching filename does not make unrelated content STRONG", () => {
+  const { home, hit, cleanup } = sandbox();
+  try {
+    // identity HOLDS: the card matches the file exactly, so only the coverage
+    // half can save this hit. The query is chosen so every token exists ONLY in
+    // the path portion of the hit body — the hit's own text is "example"
+    // (tests/fixtures/fake-graft.sh). Including the path in `covered` therefore
+    // made this cov100% and STRONG; excluding it, the hit's text shares nothing
+    // with the query and it must fall to WEAK.
+    writeCard(home, hit, cardFor(hit));
+
+    const stdout = search(home, {}, "src py");
+
+    assert.match(stdout, /file\.py/, "hit still returned (ranking is a different concern)");
+    assert.doesNotMatch(
+      stdout,
+      /\[STRONG\]/,
+      `identity holds but every matching token came from the path, none from the hit's text:\n${stdout}`,
+    );
+  } finally { cleanup(); }
+});
+
+// ...and the converse, so the rule is not "nothing can be STRONG": a hit whose
+// own text covers the query, with identity intact, still passes.
+shellTest("issue #13: a hit whose text matches the query still reaches STRONG", () => {
+  const { home, hit, cleanup } = sandbox();
+  try {
+    writeCard(home, hit, cardFor(hit));
+
+    // The hit's own text is "example" (tests/fixtures/fake-graft.sh), so this
+    // query is covered by content — not by the path.
+    const stdout = search(home, {}, "example");
+
+    assert.match(stdout, /\[STRONG\]/, `unchanged hit whose text matches must be STRONG:\n${stdout}`);
+  } finally { cleanup(); }
+});
+
+// SQLite is dynamically typed, so one hand-edited or legacy row can hold a
+// non-numeric mtime. Arithmetic on it raised inside the print loop and took the
+// ENTIRE result set down with it — one bad row, zero results.
+shellTest("issue #13: a malformed card row does not crash the search", () => {
+  const { home, hit, cleanup } = sandbox();
+  try {
+    writeCard(home, hit, { size: statSync(hit).size, mtime: "not-a-number" });
+
+    const stdout = search(home); // throws if the worker exits non-zero
+
+    assert.match(stdout, /Expected hit/, "the hit must still be reported");
+    assert.doesNotMatch(stdout, /\[STRONG\]/, "a row that cannot be interpreted verifies nothing");
+  } finally { cleanup(); }
+});
+
+// When the cards table cannot be read, no hit can be identity-checked. The
+// caller must be able to tell that apart from "this path was never indexed":
+// bin/lib/mcp-server.mjs returns stdout only and drops stderr, so a reason that
+// only exists on stderr is invisible to an agent on the MCP path.
+shellTest("issue #13: an unreadable index is named on stdout, not only stderr", () => {
+  const { home, cleanup } = sandbox();
+  try {
+    // global.db exists but is not a database, so the cards read fails.
+    mkdirSync(join(home, ".heimdall"), { recursive: true });
+    writeFileSync(join(home, ".heimdall", "global.db"), "not a database");
+
+    const stdout = execFileSync("bash", [KB_SEARCH, "example"], {
+      encoding: "utf8",
+      env: runEnv(home),
+    });
+
+    assert.match(stdout, /Expected hit/, "hits are still returned, just not trusted");
+    assert.match(stdout, /INDEX_ERROR:/, `an unreadable index must be machine-readable on stdout:\n${stdout}`);
+    assert.doesNotMatch(stdout, /\[STRONG\]/, "nothing can be verified without the index");
+    assert.match(stdout, /index unreadable/, "the per-hit reason names the index, not the path");
+  } finally { cleanup(); }
 });
 
 shellTest("issue #13: a card that agrees with the file on disk stays STRONG", () => {

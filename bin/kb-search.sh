@@ -291,6 +291,13 @@ import sqlite3, stat, time
 
 card_mtimes = {}
 card_sizes = {}
+# Index availability is part of the verdict: when the cards table cannot be
+# read, NO hit can be identity-checked, so every result degrades to WEAK. That
+# must be visible on the stream the caller actually reads — this script's own
+# stdout — because bin/lib/mcp-server.mjs returns stdout only and drops stderr,
+# so a stderr-only warning made "index is broken" and "path was never indexed"
+# print the identical reason line to an agent.
+index_reason = None
 db_path = os.path.expanduser("~/.heimdall/global.db")
 if os.path.exists(db_path):
     try:
@@ -305,6 +312,11 @@ if os.path.exists(db_path):
         con.close()
     except Exception as e:
         print(f"WARN: freshness lookup failed: {e}", file=sys.stderr)
+        # Machine-readable on stdout so the MCP caller (which drops stderr)
+        # can tell "the index is unreadable" from "this path was never
+        # indexed". Same convention as SEMANTIC_ERROR above.
+        print(f"INDEX_ERROR: cards lookup failed — no hit can be identity-verified ({e})")
+        index_reason = f"index unreadable — content not verified ({e})"
         card_mtimes = {}
         card_sizes = {}
 for i, r in enumerate(merged, 1):
@@ -312,12 +324,24 @@ for i, r in enumerate(merged, 1):
     exists = os.path.exists(p)
     title_l = r["title"].lower()
     body_l = r["body"].lower()
+    # Coverage is measured over the INDEXED TEXT only — never the path. The old
+    # expression included p.lower(), which let a filename supply the whole
+    # score: `deploy_policy_backup.md` full of lorem ipsum read cov100% off its
+    # own name and reached STRONG. The path is a retrieval signal (which is why
+    # it belongs in the ranking above); it is not evidence that content answers
+    # the query, which is the only thing this bar is for. Tokens here come from
+    # the card body ([path] is appended) or the backend's snippet, so a hit
+    # whose text genuinely contains the query still passes.
+    covered = title_l + " " + body_l
+    # ...and the path must be REMOVED from that text, not merely excluded as a
+    # field: every producer embeds it in the body (graft: `snippet [path]`,
+    # semantic: `semantic hit [path]`), so leaving it in re-admits exactly the
+    # filename-as-coverage bug this line exists to prevent.
+    if p:
+        covered = covered.replace(p.lower(), " ")
     cov = 0.0
     if q_toks:
-        matched = 0
-        for tok in q_toks:
-            if tok in title_l or tok in body_l or tok in p.lower():
-                matched += 1
+        matched = sum(1 for tok in q_toks if tok in covered)
         cov = round(matched / len(q_toks), 2)
     # Content identity: the card this hit came from recorded the size AND mtime
     # the file had when it was indexed. A file that has moved on since then is
@@ -333,14 +357,17 @@ for i, r in enumerate(merged, 1):
     # ponytail: a same-size rewrite that ALSO restores mtime (os.utime) defeats
     # any stat-based check by construction, so query time cannot see it — and
     # paying for it here would mean hashing every hit, which is the read this
-    # layer exists to avoid. The boundary is owned elsewhere on purpose:
-    # `heimdall verify --deep` re-hashes and reports `why: "hash"` drift, and
-    # the reconciler's next pass re-indexes the file, which rewrites the card
-    # and makes search correct again. So the exposure is bounded by how stale
-    # verification is, not permanent, and it is the same window in which the
-    # graph itself is out of date. tests/kb-search-identity.test.mjs pins this
-    # as a known ceiling: if that test ever fails toward WEAK, query-time
-    # identity became content-based and this comment is what to update.
+    # layer exists to avoid. The card is keyed on (size, mtime) all the way
+    # down, including index/embed-index.py's own
+    # `prev[1] == st.st_mtime and prev[2] == st.st_size` fast-path, so that same
+    # fast-path will NOT notice the rewrite either: the card keeps the stale
+    # hash and this stays wrong until something re-reads the file on purpose.
+    # The boundary is owned by `heimdall verify --deep`, which re-hashes and
+    # reports `why: "hash"` drift (reconcile.mjs). Note its scope: it audits the
+    # reconciler journal, which is not the same path set as semantic cards.
+    # tests/kb-search-identity.test.mjs pins this as a known ceiling — if that
+    # test ever fails toward WEAK, query-time identity became content-based and
+    # this comment is what to update.
     identity = None
     # A directory or a symlink is not the file the card describes: os.stat
     # follows links, and a directory can carry a plausible size/mtime, so both
@@ -354,6 +381,10 @@ for i, r in enumerate(merged, 1):
     if exists and is_file and p in card_sizes:
         try:
             st = os.stat(p)
+            cm = card_mtimes[p]
+            # Card columns are only loosely typed, so a non-numeric mtime must
+            # fail the check rather than raise inside it.
+            numeric_mtime = isinstance(cm, (int, float))
             # SYMMETRIC and TIGHT. `st.st_mtime - card <= 1.0` accepted a
             # downward skew of any size, which is reachable without utime:
             # embed-index fast-paths on EXACT mtime equality, so an edit landing
@@ -363,7 +394,9 @@ for i, r in enumerate(merged, 1):
             # "the file is unchanged since we indexed it" actually means; a
             # loose window would re-admit the evidence-free STRONG this whole
             # check exists to prevent.
-            identity = st.st_size == card_sizes[p] and abs(st.st_mtime - card_mtimes[p]) < 1e-6
+            identity = (numeric_mtime
+                        and st.st_size == card_sizes[p]
+                        and abs(st.st_mtime - cm) < 1e-6)
         except OSError:
             identity = None
     if not exists:
@@ -381,8 +414,12 @@ for i, r in enumerate(merged, 1):
         # hit is labelled as one, with the reason on its own line. The remedy is
         # to index the path, which is what creates the card STRONG is built on.
         verdict = "WEAK"
-        why = ("could not read file metadata" if p in card_sizes else
-               "no index card for this path — content not verified")
+        if index_reason:
+            why = index_reason
+        elif p in card_sizes:
+            why = "could not read file metadata"
+        else:
+            why = "no index card for this path — content not verified"
     elif cov < 0.5:
         # Identity holds, but the card's own text barely overlaps the query:
         # an intact anchor is not the same thing as an answer. A semantic hit
@@ -409,7 +446,11 @@ for i, r in enumerate(merged, 1):
     # would be a lie.
     fr = ""
     cm = card_mtimes.get(p)
-    if cm is not None and exists:
+    # SQLite is dynamically typed, so a hand-edited or older cards row can hold
+    # a non-numeric mtime. Arithmetic on it would raise and take the whole
+    # result set down (every other hit is lost to one bad row), so the type is
+    # checked before use.
+    if isinstance(cm, (int, float)) and exists:
         age = max(0.0, time.time() - cm)
         as_of = f"{age/3600:.1f}h" if age < 86400 * 14 else f"{age/86400:.1f}d"
         # The freshness token says exactly what identity verified: the file's
