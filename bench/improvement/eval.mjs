@@ -25,8 +25,8 @@
 //    20-sample candidate, which is how MIN_SAMPLES_FOR forced more reps.
 const WORKLOAD_KEYS = ["corpus", "hardware", "cache", "env"];
 
-/** Accuracy fields that are bookkeeping, not metrics. */
-export const NON_METRIC_KEYS = new Set(["n", "labels"]);
+/** Accuracy fields that are bookkeeping or evidence, not scalar metrics. */
+export const NON_METRIC_KEYS = new Set(["n", "labels", "perQuery"]);
 
 function dcg(relevances) {
   return relevances.reduce((sum, rel, i) => sum + rel / Math.log2(i + 2), 0);

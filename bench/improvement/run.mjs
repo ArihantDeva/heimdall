@@ -12,7 +12,7 @@
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 
-import { rankingMetrics, compareMetrics, summarizeTimings, sameWorkload } from "./eval.mjs";
+import { rankingMetrics, compareMetrics, summarizeTimings, sameWorkload, NON_METRIC_KEYS } from "./eval.mjs";
 import { FIXTURES, fixturesHash } from "./fixtures.mjs";
 
 // Absolute on purpose: see the header note. Overridable for other machines.
@@ -80,6 +80,16 @@ export function runSpeedWorkload({ repo, home, proj, reps = 5, samples = null, s
   const repeat = second === null ? null : summarizeTimings(second);
   const disagreement = repeat && distribution.p50 ? repeat.p50 / distribution.p50 : 1;
   const speedReliable = repeat === null ? true : Math.max(disagreement, 1 / disagreement) <= MAX_DISAGREEMENT;
+  // The tail gets its own reliability check. A batch pair can agree closely on
+  // p50 while disagreeing on p95 (observed: spread 1.07x on p50 with p95
+  // 115ms vs 202ms), and claiming a p95 regression from that is asserting a
+  // number the measurement does not support.
+  const tailDisagreement =
+    repeat && distribution.p95 && repeat.p95 ? repeat.p95 / distribution.p95 : 1;
+  const tailReliable =
+    repeat === null || repeat.p95 === null || distribution.p95 === null
+      ? true
+      : Math.max(tailDisagreement, 1 / tailDisagreement) <= MAX_DISAGREEMENT;
   const capability = fixed ? "fixed-samples" : timeOne(repo, home, proj, python).capability;
   return {
     command: "depth",
@@ -87,6 +97,8 @@ export function runSpeedWorkload({ repo, home, proj, reps = 5, samples = null, s
     repeat,
     disagreement,
     speedReliable,
+    tailDisagreement,
+    tailReliable,
     capability,
     workload: {
       commit: gitCommit(repo),
@@ -130,7 +142,9 @@ function accuracyShape(accuracy, label) {
   }
   const problems = [];
   for (const [key, value] of Object.entries(accuracy)) {
-    if (key === "n" || key === "labels") continue;
+    if (NON_METRIC_KEYS.has(key)) continue;
+    // per-query detail is evidence payload, not a scalar metric.
+    if (Array.isArray(value)) continue;
     if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
       problems.push(`${label}: accuracy.${key} is not a finite non-negative number (${value})`);
     }
@@ -193,6 +207,12 @@ function speedReasons(baseline, candidate) {
 
 function tailReasons(baseline, candidate) {
   const reasons = [];
+  if (candidate.tailReliable === false) {
+    const spread = typeof candidate.tailDisagreement === "number" ? `${candidate.tailDisagreement.toFixed(2)}x` : "unknown";
+    // Not a pass either: no tail claim can be made, and silently returning []
+    // would read as "tail is fine".
+    return [`speed tail unmeasurable: repeat runs disagreed by ${spread} (max ${MAX_DISAGREEMENT}x) — no p95 claim is possible`];
+  }
   for (const key of Object.keys(baseline.speed ?? {})) {
     const b = baseline.speed[key];
     const c = candidate.speed?.[key];
@@ -246,11 +266,14 @@ export function gate(baseline, candidate) {
   if (shape.length) return { ok: false, reasons: shape };
   const gone = missingKeys(baseline, candidate);
   if (gone.length) return { ok: false, reasons: [`candidate no longer reports: ${gone.join(", ")}`] };
+  const speed = speedReasons(baseline, candidate);
   const reasons = [
     ...compareMetrics(baseline.accuracy ?? {}, candidate.accuracy ?? {}),
-    ...speedReasons(baseline, candidate),
-    ...tailReasons(baseline, candidate),
-    ...capabilityReasons(baseline, candidate),
+    ...speed,
+    // Speed tail and capability are only meaningful when the speed measurement
+    // itself is usable. Reporting a p95 "regression" from a noisy run would be
+    // asserting a number the runner just refused to stand behind.
+    ...(speed.length ? [] : [...tailReasons(baseline, candidate), ...capabilityReasons(baseline, candidate)]),
     ...labelReasons(baseline, candidate),
   ];
   return { ok: reasons.length === 0, reasons };

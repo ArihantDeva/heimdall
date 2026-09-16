@@ -15,7 +15,10 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { runSpeedWorkload, runAccuracyWorkload, gate } from "./run.mjs";
+import { runRetrievalWorkload } from "./retrieval-lane.mjs";
 import { validateFixtures } from "./fixtures.mjs";
+import { validateCase } from "./retrieval-case.mjs";
+import { DEFAULT_PYTHON as PYTHON } from "./run.mjs";
 
 const REPO = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const BASELINE = join(REPO, "bench", "improvement", "baseline.json");
@@ -27,7 +30,17 @@ const REPS = Number(process.env.HEIMDALL_EVAL_REPS ?? 20);
 
 function checks() {
   return [
-    ["node tests", process.execPath, ["--test", join(REPO, "tests", "improvement-eval.test.mjs"), join(REPO, "tests", "improvement-run.test.mjs")]],
+    [
+      "node tests",
+      process.execPath,
+      [
+        "--test",
+        join(REPO, "tests", "improvement-eval.test.mjs"),
+        join(REPO, "tests", "improvement-run.test.mjs"),
+        join(REPO, "tests", "gate-hardening.test.mjs"),
+        join(REPO, "tests", "retrieval-lane.test.mjs"),
+      ],
+    ],
     ["bench tests", "~/.heimdall/venv/bin/python3", ["-m", "pytest", join(REPO, "bench", "tests"), "-q"]],
   ];
 }
@@ -46,6 +59,7 @@ function measure() {
   const proj = join(home, "proj");
   mkdirSync(proj, { recursive: true });
   writeFileSync(join(proj, "lib.mjs"), "export function alpha() { return 1; }\n");
+  const retrievalHome = mkdtempSync(join(tmpdir(), "heimdall-gate-retrieval-"));
   try {
     const speed = runSpeedWorkload({ repo: REPO, home, proj, reps: REPS });
     return {
@@ -57,11 +71,15 @@ function measure() {
       // p50=169ms against a quiet-machine 116ms for identical code).
       disagreement: speed.disagreement,
       speedReliable: speed.speedReliable,
-      accuracy: runAccuracyWorkload({}),
+      // Accuracy is measured on REAL retrieval (scratch index, real query
+      // path), not on literals — review found the first version scored
+      // hand-written arrays with zero product imports.
+      accuracy: runRetrievalWorkload({ repo: REPO, home: retrievalHome, python: PYTHON }),
       capability: speed.capability,
     };
   } finally {
     rmSync(home, { recursive: true, force: true });
+    rmSync(retrievalHome, { recursive: true, force: true });
   }
 }
 
@@ -85,7 +103,7 @@ function report(artifact, verdict) {
 const fmt = (v) => (typeof v === "number" ? v.toFixed(1) : "n/a");
 
 function main() {
-  const problems = validateFixtures();
+  const problems = [...validateFixtures(), ...validateCase()];
   if (problems.length) {
     console.error(`✖ fixture labels are invalid:\n  - ${problems.join("\n  - ")}`);
     return 1;
