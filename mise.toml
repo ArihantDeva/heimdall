@@ -12,5 +12,15 @@ run = "~/.heimdall/venv/bin/python3 -m pytest bench/tests -q"
 [tasks.embed-index-test]
 run = "~/.heimdall/venv/bin/python3 -m pytest bench/tests/test_embed_index.py -q"
 
+# Continuous improvement gate (locked verifyCommand target).
+# Deterministic correctness gates first, then the speed/accuracy measurement
+# compared against the frozen baseline in bench/improvement/baseline.json.
+[tasks."verify:improvement"]
+run = "node bench/improvement/cli.mjs"
+
+# Deliberate, baseline-breaking act: re-measure and rewrite the baseline.
+[tasks."improvement:freeze"]
+run = "node bench/improvement/cli.mjs --freeze"
+
 [tools]
 bun = "1.4.0"

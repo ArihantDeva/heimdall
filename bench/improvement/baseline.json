@@ -1,0 +1,28 @@
+{
+  "workload": {
+    "commit": "4eed256",
+    "corpus": "scratch-fixture",
+    "reps": 20,
+    "env": "darwin",
+    "cache": "cold"
+  },
+  "speed": {
+    "depth": {
+      "n": 20,
+      "p50": 119.09747949999999,
+      "p95": 177.3418256,
+      "p99": null
+    }
+  },
+  "disagreement": 0.9952774987148238,
+  "speedReliable": true,
+  "accuracy": {
+    "mrr": 0.45,
+    "recall@1": 0.16666666666666666,
+    "ndcg@1": 0.16666666666666666,
+    "recall@5": 0.8333333333333334,
+    "ndcg@5": 0.5466070113248191,
+    "n": 6
+  },
+  "capability": "graph"
+}
