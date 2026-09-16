@@ -245,20 +245,48 @@ export function gate(baseline, candidate) {
   if (gone.length) return { ok: false, reasons: [`candidate no longer reports: ${gone.join(", ")}`] };
   const speed = speedReasons(baseline, candidate);
   const anchor = anchorReasons(baseline, candidate);
+  // Suppression is about MEASUREMENT VALIDITY, not about which findings exist.
+  //
+  // When the machine is saturated or the repeat batches disagree, no latency
+  // claim is defensible, so speed/tail claims are withheld rather than asserted
+  // from numbers the runner refused. Review found the earlier version keyed this
+  // off `speed.length` ("some p50 reason exists") instead: a p50 regression then
+  // suppressed tailReasons AND capabilityReasons, so a graph -> file capability
+  // drop (issue #12) was reported as nothing at all whenever the p50 also moved.
+  // A smaller finding must never hide a larger one.
+  const measurementUsable = anchor.length === 0 && candidate.speedReliable !== false;
+  const tailUsable = measurementUsable && candidate.tailReliable !== false;
+  // An unusable measurement must SAY so. Silently withholding the claim reads
+  // as "nothing to report", which is how a refused run got mistaken for a pass
+  // in the first place. This is a refusal, phrased as one.
+  const unusable = [];
+  if (anchor.length === 0 && candidate.speedReliable === false) {
+    const spread =
+      typeof candidate.disagreement === "number" ? `${candidate.disagreement.toFixed(2)}x` : "unknown";
+    unusable.push(
+      `speed measurement unusable: repeat runs disagreed by ${spread} ` +
+        `(max ${MAX_DISAGREEMENT}x) — re-run on a quiet machine`,
+    );
+  }
+  if (measurementUsable && candidate.tailReliable === false) {
+    const spread =
+      typeof candidate.tailDisagreement === "number" ? `${candidate.tailDisagreement.toFixed(2)}x` : "unknown";
+    unusable.push(
+      `speed tail unmeasurable: repeat runs disagreed by ${spread} ` +
+        `(max ${MAX_DISAGREEMENT}x) — no p95 claim is possible`,
+    );
+  }
   const reasons = [
     ...compareMetrics(baseline.accuracy ?? {}, candidate.accuracy ?? {}),
     ...perQueryReasons(baseline, candidate),
-    // When the machine-load anchor fails, EVERY latency number is suspect, so
-    // no speed claim is made at all — reporting a p50 "regression" from a
-    // loaded machine asserts a code change that the measurement cannot support.
-    ...(anchor.length ? [] : speed),
+    ...(measurementUsable ? speed : []),
     ...anchor,
-    // Speed tail and capability are only meaningful when the speed measurement
-    // itself is usable. Reporting a p95 "regression" from a noisy or
-    // load-skewed run would be asserting a number the runner just refused.
-    ...(speed.length || anchor.length
-      ? []
-      : [...tailReasons(baseline, candidate), ...capabilityReasons(baseline, candidate)]),
+    ...unusable,
+    ...(tailUsable ? tailReasons(baseline, candidate) : []),
+    // Capability is a correctness property (which extraction depth actually
+    // runs), not a latency claim. It is reported whenever it is present on both
+    // sides — a saturated machine does not make an L2/L3 downgrade untrue.
+    ...capabilityReasons(baseline, candidate),
     ...labelReasons(baseline, candidate),
   ];
   return { ok: reasons.length === 0, reasons };

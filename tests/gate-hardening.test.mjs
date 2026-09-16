@@ -230,6 +230,37 @@ test("an inverted or negative tail percentile is refused", () => {
   refused(gate(baseline(), candidate({ speed: { depth: { n: 100, p50: 100, p95: -500, p99: null } } })));
 });
 
+test("a smaller speed finding never hides a capability regression", () => {
+  // Found by review of the final fix patch: suppression was keyed off
+  // `speed.length`, so a p50 regression suppressed capabilityReasons entirely
+  // and a graph -> file downgrade (issue #12) was reported as nothing at all.
+  const verdict = gate(
+    baseline(),
+    candidate({
+      capability: "file",
+      speed: { depth: { n: 100, p50: 300, p95: 900, p99: null } },
+    }),
+  );
+  refused(verdict);
+  assert.ok(
+    verdict.reasons.some((r) => /CAPABILITY REGRESSION/.test(r)),
+    `capability drop must surface alongside the speed finding: ${JSON.stringify(verdict.reasons)}`,
+  );
+  assert.ok(verdict.reasons.some((r) => /SPEED REGRESSION/.test(r)), "and so must the p50 finding");
+  assert.ok(verdict.reasons.some((r) => /TAIL REGRESSION/.test(r)), "and the tail finding");
+});
+
+test("an unusable measurement still withholds speed and tail claims", () => {
+  // The suppression that IS intended: no latency claim from a refused run.
+  const verdict = gate(
+    baseline(),
+    candidate({ speedReliable: false, tailReliable: false, speed: { depth: { n: 100, p50: 400, p95: 900, p99: null } } }),
+  );
+  refused(verdict);
+  assert.ok(verdict.reasons.some((r) => /unusable/.test(r)));
+  assert.ok(!verdict.reasons.some((r) => /SPEED REGRESSION/.test(r)), "no speed claim from an unusable run");
+});
+
 // --- machine load: the noise guard cannot see a sustained slowdown ----------
 
 test("a uniformly slow machine is refused, not reported as a code regression", () => {
