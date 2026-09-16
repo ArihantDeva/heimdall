@@ -62,12 +62,23 @@ function perQueryReasons(baseline, candidate) {
       reasons.push(`query "${before.id}" disappeared from the candidate`);
       continue;
     }
+    // Emptied or nulled metrics are a defect, not an absence of evidence.
+    // Review found a candidate with per-query metric objects blanked out passed
+    // `ok:true []` because only the ARRAY LENGTH was compared.
+    const beforeKeys = Object.keys(before.metrics ?? {});
+    const afterKeys = Object.keys(after.metrics ?? {});
+    if (beforeKeys.length > 0 && afterKeys.length === 0) {
+      reasons.push(`PER-QUERY REGRESSION ${before.id}: metrics emptied (was ${beforeKeys.join(", ")})`);
+      continue;
+    }
     for (const [key, value] of Object.entries(before.metrics ?? {})) {
       const now = after.metrics?.[key];
-      if (typeof now === "number" && typeof value === "number" && now < value) {
-        reasons.push(
-          `PER-QUERY REGRESSION ${before.id}.${key}: ${value} -> ${now}`,
-        );
+      if (typeof now !== "number" || !Number.isFinite(now)) {
+        reasons.push(`PER-QUERY UNUSABLE ${before.id}.${key}: ${String(now)}`);
+        continue;
+      }
+      if (typeof value === "number" && now < value) {
+        reasons.push(`PER-QUERY REGRESSION ${before.id}.${key}: ${value} -> ${now}`);
       }
     }
   }
@@ -179,6 +190,10 @@ function loadGuardReasons(baseline, candidate) {
   if (!ok(base) && !ok(now)) {
     return ["no machine-load reading recorded on either side — speed comparability is unproven"];
   }
+  // Symmetric with the anchor guard: a missing reading on EITHER side is a
+  // refusal. Review found a missing/garbage baseline load silently disabled the
+  // load half of the guard (`ok:true []`) even though the anchor half refuses.
+  if (!ok(base)) return ["baseline records no usable machine-load reading — no speed claim is possible"];
   if (!ok(now)) return [`machine load not recorded for this run — no speed claim is possible`];
   if (now.load1PerCpu > LOAD_SATURATION) {
     return [
@@ -204,6 +219,18 @@ function capabilityReasons(baseline, candidate) {
     return [`capability missing (baseline ${b}) — the probe produced no verdict, so depth is unproven`];
   }
   if (c !== b && c !== "fixed-samples") {
+    // A `file` verdict is only a DOWNGRADE if it was actually determined. A
+    // probe that timed out (common under load) also reports `file`, and review
+    // reproduced the gate announcing "CAPABILITY REGRESSION: graph -> file"
+    // while the machine was unchanged. Report that as undetermined instead:
+    // still a refusal (failing closed), but with the true cause named.
+    if (c === "file" && candidate.capabilityDetermined === false) {
+      const why = candidate.capabilityReason ? ` (${candidate.capabilityReason})` : "";
+      return [
+        `capability probe did not complete: reported ${c} vs baseline ${b}${why} — ` +
+          `this is an undetermined probe, not a measured downgrade`,
+      ];
+    }
     // Correctness, not speed: dropping graph -> file disables L2/L3 extraction
     // (issue #12) while every latency number can still look healthy.
     return [`CAPABILITY REGRESSION: ${b} -> ${c} (extraction depth changed)`];
@@ -214,6 +241,10 @@ function capabilityReasons(baseline, candidate) {
 function labelReasons(baseline, candidate) {
   const b = baseline.accuracy?.labels;
   const c = candidate.accuracy?.labels;
+  // A dropped label hash is a refusal, not "nothing to compare": review found a
+  // candidate that omitted `labels` entirely passed `ok:true []`, which is the
+  // same silent-disable shape as the anchor and capability holes.
+  if (b && !c) return ["candidate reports no label hash — the accuracy baseline's labels cannot be verified"];
   if (!b || !c) return [];
   return b === c
     ? []

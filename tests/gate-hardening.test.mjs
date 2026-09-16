@@ -261,6 +261,69 @@ test("an unusable measurement still withholds speed and tail claims", () => {
   assert.ok(!verdict.reasons.some((r) => /SPEED REGRESSION/.test(r)), "no speed claim from an unusable run");
 });
 
+// --- review round 5: false positive + three pre-existing false greens -------
+
+test("a timed-out capability probe is undetermined, not a measured downgrade", () => {
+  // Review reproduced: under load the probe timed out and the gate announced
+  // "CAPABILITY REGRESSION: graph -> file (extraction depth changed)" while the
+  // machine was unchanged. Failing closed is right; the wrong diagnosis is not.
+  const verdict = gate(
+    baseline(),
+    candidate({ capability: "file", capabilityDetermined: false, capabilityReason: "timed out after 15s" }),
+  );
+  refused(verdict);
+  assert.ok(
+    verdict.reasons.some((r) => /probe did not complete/.test(r)),
+    `must name the probe failure: ${JSON.stringify(verdict.reasons)}`,
+  );
+  assert.ok(
+    !verdict.reasons.some((r) => /CAPABILITY REGRESSION/.test(r)),
+    "must not claim a measured downgrade from an undetermined probe",
+  );
+});
+
+test("a DETERMINED graph -> file downgrade is still a capability regression", () => {
+  const verdict = gate(baseline(), candidate({ capability: "file", capabilityDetermined: true }));
+  refused(verdict);
+  assert.ok(verdict.reasons.some((r) => /CAPABILITY REGRESSION/.test(r)));
+});
+
+test("emptied per-query metrics are a defect, not an absence of evidence", () => {
+  // G1: only the array LENGTH was compared, so blanking every metric object
+  // passed ok:true [].
+  const before = { ...ACC, perQuery: [{ id: "x", ranked: [], metrics: { mrr: 1 } }] };
+  const after = { ...ACC, perQuery: [{ id: "x", ranked: [], metrics: {} }] };
+  const verdict = gate(baseline({ accuracy: before }), candidate({ accuracy: after }));
+  refused(verdict);
+  assert.ok(verdict.reasons.some((r) => /metrics emptied|PER-QUERY/.test(r)));
+});
+
+test("a dropped label hash is a refusal, not a skip", () => {
+  // G2: `if (!b || !c) return []` meant omitting labels entirely passed.
+  // The missing-key check may fire first; either refusal is correct, what
+  // matters is that it is REFUSED and the message names the labels.
+  const { labels: _dropped, ...withoutLabels } = ACC;
+  const verdict = gate(baseline(), candidate({ accuracy: withoutLabels }));
+  refused(verdict);
+  assert.ok(
+    verdict.reasons.some((r) => /label/i.test(r)),
+    `a dropped label hash must be refused with labels named: ${JSON.stringify(verdict.reasons)}`,
+  );
+});
+
+test("a missing or garbage baseline load refuses instead of disabling the guard", () => {
+  // G3: the anchor half of the guard was symmetric but the load half returned
+  // [] when the BASELINE lacked a usable reading.
+  for (const bad of [undefined, null, {}, { load1PerCpu: NaN }, { load1PerCpu: "nope" }]) {
+    const verdict = gate(baseline({ load: bad }), candidate());
+    refused(verdict);
+    assert.ok(
+      verdict.reasons.some((r) => /load/i.test(r)),
+      `baseline load ${JSON.stringify(bad)} must refuse: ${JSON.stringify(verdict.reasons)}`,
+    );
+  }
+});
+
 // --- machine load: the noise guard cannot see a sustained slowdown ----------
 
 test("a uniformly slow machine is refused, not reported as a code regression", () => {

@@ -74,6 +74,8 @@ const RELIABILITY_FIELDS = [
   "anchor",
   "anchorReadings",
   "load",
+  "capabilityDetermined",
+  "capabilityReason",
 ];
 
 function reliability(speed) {

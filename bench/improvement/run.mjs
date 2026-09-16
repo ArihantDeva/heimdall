@@ -120,8 +120,28 @@ export function minAnchor(pair) {
 }
 
 function extractCapability(stdout) {
-  const m = /^capability:\s*(\w+)/m.exec(stdout ?? "");
-  return m ? m[1] : null;
+  return parseCapability(stdout).verdict;
+}
+
+/**
+ * Parse the capability line into verdict + whether that verdict is TRUSTWORTHY.
+ *
+ * `depth` prints `capability: <verdict> (<reason>)`. A probe that timed out or
+ * could not execute also prints `file`, but that is "undetermined", not "this
+ * machine lost L2/L3". Review reproduced the difference being misreported:
+ * under load the probe timed out and the gate announced
+ * "CAPABILITY REGRESSION: graph -> file (extraction depth changed)" while the
+ * machine was unchanged. Failing closed is right; diagnosing the wrong cause is
+ * not, and it sends a reader hunting a regression that does not exist.
+ */
+export function parseCapability(stdout) {
+  const m = /^capability:\s*(\w+)(?:\s*\(([^)]*)\))?/m.exec(stdout ?? "");
+  if (!m) return { verdict: null, determined: false, reason: "no capability line" };
+  const verdict = m[1];
+  const reason = (m[2] ?? "").trim();
+  if (verdict !== "file") return { verdict, determined: true, reason };
+  const failure = /timed?\s*out|ETIMEDOUT|timeout|killed|ENOENT|EACCES|Error:/i.test(reason);
+  return { verdict, determined: !failure, reason };
 }
 
 function gitCommit(repo) {
@@ -145,7 +165,7 @@ function timeOne(repo, home, proj, python) {
       `heimdall depth failed (status=${r.status ?? "spawn-error"}): ${String(r.error?.message ?? r.stderr ?? "").trim().slice(0, 300)}`,
     );
   }
-  return { ms, capability: extractCapability(r.stdout) };
+  return { ms, capability: extractCapability(r.stdout), capabilityProbe: parseCapability(r.stdout) };
 }
 
 /**
@@ -178,7 +198,8 @@ export function runSpeedWorkload({ repo, home, proj, reps = 5, samples = null, s
     repeat === null || repeat.p95 === null || distribution.p95 === null
       ? true
       : Math.max(tailDisagreement, 1 / tailDisagreement) <= MAX_DISAGREEMENT;
-  const capability = fixed ? "fixed-samples" : timeOne(repo, home, proj, python).capability;
+  const capabilityProbe = fixed ? { verdict: "fixed-samples", determined: true, reason: "samples supplied" } : timeOne(repo, home, proj, python).capabilityProbe;
+  const capability = capabilityProbe.verdict;
   const anchorAfter = fixed ? null : measureAnchor();
   return {
     command: "depth",
@@ -192,6 +213,11 @@ export function runSpeedWorkload({ repo, home, proj, reps = 5, samples = null, s
     anchorReadings: fixed ? null : { before: anchorBefore, after: anchorAfter },
     load: measureLoad(),
     capability,
+    // Whether the capability verdict above can be trusted as a MEASUREMENT.
+    // A timed-out probe also reports `file`; treating that as a downgrade is a
+    // false positive (review-reproduced).
+    capabilityDetermined: capabilityProbe.determined,
+    capabilityReason: capabilityProbe.reason,
     workload: {
       commit: gitCommit(repo),
       corpus: "scratch-fixture",
