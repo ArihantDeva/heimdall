@@ -15,6 +15,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { runSpeedWorkload } from "./run.mjs";
+import { LOAD_SATURATION } from "./run.mjs";
 import { gate } from "./gate.mjs";
 import { runRetrievalWorkload } from "./retrieval-lane.mjs";
 import { validateCase } from "./retrieval-case.mjs";
@@ -72,6 +73,7 @@ const RELIABILITY_FIELDS = [
   "tailReliable",
   "anchor",
   "anchorReadings",
+  "load",
 ];
 
 function reliability(speed) {
@@ -159,6 +161,15 @@ function main() {
     // with each other while both are uniformly inflated. Compare the run's
     // anchor against a fixed reference so a baseline is never recorded from a
     // machine state that makes every future comparison meaningless.
+    const saturated = artifact.load && artifact.load.load1PerCpu > LOAD_SATURATION;
+    if (!process.argv.includes("--force") && saturated) {
+      console.error(
+        `✖ refusing to freeze a baseline on a saturated machine ` +
+          `(load ${artifact.load.load1.toFixed(1)} / ${artifact.load.cores} cores). ` +
+          `A baseline recorded under load makes every later comparison fail honest work. Re-run when quiet, or pass --force.`,
+      );
+      return 1;
+    }
     if (!process.argv.includes("--force") && artifact.anchor > FREEZE_ANCHOR_MAX) {
       console.error(
         `✖ refusing to freeze a baseline while the machine is loaded ` +

@@ -41,12 +41,14 @@ const ACC = { mrr: 0.5, "recall@1": 0.5, n: 6, labels: "sha256:aaaa", perQuery: 
 const SPEED = { depth: { n: 20, p50: 100, p95: null, p99: null } };
 const RELIABILITY = { anchor: 40, speedReliable: true, tailReliable: true, tailDisagreement: 1, disagreement: 1 };
 
+const LOAD_OK = { cores: 8, load1: 2, load1PerCpu: 0.25 };
+
 function candidate(extra) {
-  return { workload: WL, speed: SPEED, accuracy: ACC, capability: "graph", ...RELIABILITY, ...extra };
+  return { workload: WL, speed: SPEED, accuracy: ACC, capability: "graph", load: LOAD_OK, ...RELIABILITY, ...extra };
 }
 
 function baseline(extra) {
-  return { workload: WL, speed: SPEED, accuracy: ACC, capability: "graph", ...RELIABILITY, ...extra };
+  return { workload: WL, speed: SPEED, accuracy: ACC, capability: "graph", load: LOAD_OK, ...RELIABILITY, ...extra };
 }
 
 test("speed workload measures the real CLI in a scratch HOME", () => {
@@ -87,6 +89,7 @@ test("GATE PASSES on an intact workload (no false alarm)", () => {
     workload: { commit: "base", corpus: "fixture-v1", env: "darwin", cache: "cold" },
     speed: SPEED,
     capability: "graph",
+    load: LOAD_OK,
     ...RELIABILITY,
   };
   const verdict = gate(

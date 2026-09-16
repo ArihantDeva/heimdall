@@ -20,8 +20,10 @@ const WL = { corpus: "c1", env: "darwin", cache: "cold" };
 const ACC = { mrr: 0.5, "recall@1": 0.5, "ndcg@1": 0.5, n: 6, labels: "sha256:aaaa" };
 const SPEED = { depth: { n: 20, p50: 100, p95: 150, p99: null } };
 
-const baseline = (over = {}) => ({ workload: WL, accuracy: ACC, speed: SPEED, capability: "graph", anchor: 40, ...over });
-const candidate = (over = {}) => ({ workload: WL, accuracy: ACC, speed: SPEED, capability: "graph", anchor: 40, ...over });
+const LOAD_OK = { cores: 8, load1: 2, load1PerCpu: 0.25 };
+
+const baseline = (over = {}) => ({ workload: WL, accuracy: ACC, speed: SPEED, capability: "graph", anchor: 40, load: LOAD_OK, ...over });
+const candidate = (over = {}) => ({ workload: WL, accuracy: ACC, speed: SPEED, capability: "graph", anchor: 40, load: LOAD_OK, ...over });
 
 const refused = (verdict) => assert.equal(verdict.ok, false, `expected refusal, got ${JSON.stringify(verdict)}`);
 const accepted = (verdict) => assert.equal(verdict.ok, true, `expected acceptance, got ${JSON.stringify(verdict)}`);
@@ -253,6 +255,30 @@ test("a uniformly slow machine is refused, not reported as a code regression", (
 test("a comparable machine is judged normally", () => {
   const verdict = gate(baseline({ anchor: 40 }), candidate({ anchor: 42 }));
   accepted(verdict);
+});
+
+test("a saturated machine is refused from the OS load reading alone", () => {
+  // Verified real failure: at load 63 on unchanged code the anchor read 43ms
+  // (inside its tolerance) while the target p50 went 108.7ms -> 227ms, and the
+  // gate reported a CODE regression. A ~40ms bare-node anchor does not respond
+  // to load like a ~110ms process that spawns python and does file I/O.
+  const verdict = gate(
+    baseline(),
+    candidate({ load: { cores: 8, load1: 40, load1PerCpu: 5 } }),
+  );
+  refused(verdict);
+  assert.ok(
+    verdict.reasons.some((r) => /saturated/.test(r)),
+    `expected a saturation refusal: ${JSON.stringify(verdict.reasons)}`,
+  );
+  assert.ok(
+    !verdict.reasons.some((r) => /SPEED REGRESSION/.test(r)),
+    "must not assert a code regression from a saturated run",
+  );
+});
+
+test("a missing load reading refuses rather than skipping the guard", () => {
+  refused(gate(baseline(), candidate({ load: undefined })));
 });
 
 // --- finding 4: a crashing CLI must never look fast -------------------------

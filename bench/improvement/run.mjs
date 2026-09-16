@@ -10,6 +10,7 @@
 // dir, so a relative python path silently degrades the run to `capability:
 // file` (L2/L3 off) — hence the absolute default below.
 import { spawnSync } from "node:child_process";
+import { cpus, loadavg } from "node:os";
 import { join } from "node:path";
 
 import { summarizeTimings } from "./eval.mjs";
@@ -33,6 +34,19 @@ export const MAX_DISAGREEMENT = 1.25;
 // Machine-load anchor tolerance: how much the fixed anchor may inflate before
 // the machine itself is judged to have changed and speed claims are refused.
 export const ANCHOR_TOLERANCE = 1.5;
+
+// Absolute saturation ceiling: runnable processes per CPU core. Above this the
+// OS is oversubscribed and no latency comparison is meaningful, regardless of
+// what the anchor says.
+//
+// Why this exists on top of the anchor: the anchor is a bare node startup
+// (~40ms), but the measured workload spawns a python bridge and does file I/O
+// (~110ms), so the two do NOT respond to load equally. Verified failure: at
+// load average 63 with unchanged code, the anchor read 43ms (inside tolerance)
+// while the target p50 went 108.7ms -> 227ms, and the gate reported a code
+// regression. The OS load average is the direct signal the anchor was proxying
+// badly.
+export const LOAD_SATURATION = 1.0;
 
 function cliEnv(home, python) {
   return { ...process.env, HOME: home, HEIMDALL_PYTHON: python };
@@ -59,6 +73,19 @@ export function measureAnchor() {
     return Number(process.hrtime.bigint() - started) / 1e6;
   });
   return summarizeTimings(samples).p50;
+}
+
+/**
+ * Current machine load, normalized per CPU core.
+ *
+ * Recorded in every artifact and compared by the gate. Cheap (no spawning) and
+ * direct: 1-minute load average divided by core count. ~0 on an idle machine,
+ * >1 when runnable work exceeds available cores.
+ */
+export function measureLoad() {
+  const cores = cpus().length || 1;
+  const load1 = loadavg()[0];
+  return { cores, load1, load1PerCpu: load1 / cores };
 }
 
 /**
@@ -153,6 +180,7 @@ export function runSpeedWorkload({ repo, home, proj, reps = 5, samples = null, s
     tailReliable,
     anchor: fixed ? null : minAnchor({ before: anchorBefore, after: anchorAfter }),
     anchorReadings: fixed ? null : { before: anchorBefore, after: anchorAfter },
+    load: measureLoad(),
     capability,
     workload: {
       commit: gitCommit(repo),

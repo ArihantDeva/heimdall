@@ -7,7 +7,7 @@
 // imported here so there is exactly one source for each threshold.
 import { compareMetrics, sameWorkload } from "./eval.mjs";
 import { validateArtifact } from "./validate.mjs";
-import { SPEED_TOLERANCE, MAX_DISAGREEMENT, ANCHOR_TOLERANCE } from "./run.mjs";
+import { SPEED_TOLERANCE, MAX_DISAGREEMENT, ANCHOR_TOLERANCE, LOAD_SATURATION } from "./run.mjs";
 import { MIN_SAMPLES_FOR } from "./eval.mjs";
 
 /**
@@ -133,29 +133,57 @@ function tailReasons(baseline, candidate) {
 }
 
 /**
- * Machine-load anchoring: refuses speed claims when the whole machine is slow.
+ * Machine-load guard: refuses speed claims when the machine is saturated.
  *
- * The baseline records a fixed anchor (bare node startup). If this run's anchor
- * is inflated beyond the tolerance, the environment changed — every latency
- * number is suspect, including a suspiciously fast one.
+ * Two independent signals, because either alone was demonstrably wrong:
  *
- * A missing or non-numeric anchor on EITHER side is a refusal, not a skip:
- * review found `NaN`/`0`/`-1`/`"999"`/absent all disabled the guard and returned
- * ok:true, and the fast path is exactly where the anchor is easiest to break.
+ *  1. OS load (runnable work per core). Direct and cheap. Verified failure the
+ *     anchor missed: at load 63 with unchanged code the anchor read 43ms
+ *     (inside tolerance) while the target p50 went 108.7ms -> 227ms, and the
+ *     gate reported a code regression. A bare node startup and a process that
+ *     spawns a python bridge simply do not respond to load proportionally.
+ *  2. The anchor, kept as a cross-check for machines where the load average is
+ *     misleading (e.g. load includes unrelated I/O-bound work).
+ *
+ * A missing or non-numeric signal on either side is a refusal, not a skip:
+ * review found `NaN`/`0`/`-1`/`"999"`/absent all disabled the guard and
+ * returned ok:true, and the fast path is where the guard is easiest to break.
  */
 function anchorReasons(baseline, candidate) {
+  const reasons = [];
+  const loadReasons = loadGuardReasons(baseline, candidate);
+  if (loadReasons.length) reasons.push(...loadReasons);
   const b = baseline.anchor;
   const c = candidate.anchor;
   const usable = (v) => typeof v === "number" && Number.isFinite(v) && v > 0;
   if (b === undefined && c === undefined) {
-    return ["no machine-load anchor recorded on either side — speed comparability is unproven"];
+    reasons.push("no machine-load anchor recorded on either side — speed comparability is unproven");
+    return reasons;
   }
-  if (!usable(b)) return [`baseline anchor is not usable (${String(b)}) — no speed claim is possible`];
-  if (!usable(c)) return [`candidate anchor is not usable (${String(c)}) — no speed claim is possible`];
+  if (!usable(b)) return [...reasons, `baseline anchor is not usable (${String(b)}) — no speed claim is possible`];
+  if (!usable(c)) return [...reasons, `candidate anchor is not usable (${String(c)}) — no speed claim is possible`];
   if (c > b * ANCHOR_TOLERANCE) {
-    return [
+    reasons.push(
       `machine load changed: baseline anchor ${b.toFixed(1)}ms -> ${c.toFixed(1)}ms ` +
         `(>${ANCHOR_TOLERANCE}x). No speed claim is possible — re-run on a comparable machine state.`,
+    );
+  }
+  return reasons;
+}
+
+/** OS-level saturation check, normalized per core. */
+function loadGuardReasons(baseline, candidate) {
+  const base = baseline.load;
+  const now = candidate.load;
+  const ok = (l) => l && typeof l.load1PerCpu === "number" && Number.isFinite(l.load1PerCpu);
+  if (!ok(base) && !ok(now)) {
+    return ["no machine-load reading recorded on either side — speed comparability is unproven"];
+  }
+  if (!ok(now)) return [`machine load not recorded for this run — no speed claim is possible`];
+  if (now.load1PerCpu > LOAD_SATURATION) {
+    return [
+      `machine is saturated: load ${now.load1.toFixed(1)} across ${now.cores} cores ` +
+        `(${now.load1PerCpu.toFixed(2)} per core > ${LOAD_SATURATION}). No speed claim is possible.`,
     ];
   }
   return [];
