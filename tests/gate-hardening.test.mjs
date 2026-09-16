@@ -12,9 +12,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { gate, validateArtifact } from "../bench/improvement/run.mjs";
+import { gate, validateArtifact } from "../bench/improvement/gate.mjs";
 import { compareMetrics } from "../bench/improvement/eval.mjs";
-import { fixturesHash, validateFixtures } from "../bench/improvement/fixtures.mjs";
+import { validateCase, hashCase, RETRIEVAL_CASE } from "../bench/improvement/retrieval-case.mjs";
 
 const WL = { corpus: "c1", env: "darwin", cache: "cold" };
 const ACC = { mrr: 0.5, "recall@1": 0.5, "ndcg@1": 0.5, n: 6, labels: "sha256:aaaa" };
@@ -105,16 +105,49 @@ test("editing the labels makes the candidate incomparable, not better", () => {
   assert.ok(verdict.reasons.some((r) => /labels changed/.test(r)));
 });
 
-test("fixturesHash is stable for the same labels and changes when a label moves", () => {
-  const a = [{ id: "x", ranked: ["p", "q"], gold: ["p"] }];
-  const b = [{ id: "x", ranked: ["p", "q"], gold: ["p"] }];
-  const c = [{ id: "x", ranked: ["q", "p"], gold: ["p"] }];
-  assert.equal(fixturesHash(a), fixturesHash(b));
-  assert.notEqual(fixturesHash(a), fixturesHash(c));
+test("hashCase is stable for the same case and changes when a label moves", () => {
+  const a = [[{ name: "x.md", text: "t" }], [{ id: "q", text: "t", gold: ["x.md"] }]];
+  const b = [[{ name: "x.md", text: "t" }], [{ id: "q", text: "t", gold: ["x.md"] }]];
+  const c = [[{ name: "x.md", text: "t" }], [{ id: "q", text: "t", gold: ["y.md"] }]];
+  assert.equal(hashCase(...a), hashCase(...b));
+  assert.notEqual(hashCase(...a), hashCase(...c));
 });
 
-test("an empty fixture set is rejected by the validator", () => {
-  assert.ok(validateFixtures([]).length > 0, "empty fixtures must not validate");
+test("an empty case is rejected by the validator", () => {
+  assert.ok(validateCase([], []).length > 0, "empty case must not validate");
+  assert.deepEqual(validateCase(RETRIEVAL_CASE.docs, RETRIEVAL_CASE.queries), []);
+});
+
+// --- machine load: the noise guard cannot see a sustained slowdown ----------
+
+test("a uniformly slow machine is refused, not reported as a code regression", () => {
+  // Observed for real: load average 280 made every depth call ~2x slower in
+  // BOTH batches, so they agreed with each other (spread 1.13x, inside the
+  // 1.25x limit) and the gate reported a p50 regression against a quiet-machine
+  // baseline. The disagreement check cannot see sustained load; the anchor can.
+  const verdict = gate(
+    baseline({ anchor: 40 }),
+    candidate({ anchor: 300, speed: { depth: { n: 20, p50: 188, p95: 276, p99: null } } }),
+  );
+  refused(verdict);
+  assert.ok(
+    verdict.reasons.some((r) => /machine load changed/i.test(r)),
+    `expected a load-anchor refusal, got ${JSON.stringify(verdict.reasons)}`,
+  );
+  assert.ok(
+    !verdict.reasons.some((r) => /SPEED REGRESSION/.test(r)),
+    "must not also assert a code regression from numbers the load invalidated",
+  );
+});
+
+test("a comparable machine is judged normally", () => {
+  const verdict = gate(baseline({ anchor: 40 }), candidate({ anchor: 42 }));
+  accepted(verdict);
+});
+
+test("a missing anchor on either side does not fake a refusal", () => {
+  accepted(gate(baseline(), candidate()));
+  accepted(gate(baseline({ anchor: 40 }), candidate({ anchor: undefined })));
 });
 
 // --- finding 4: a crashing CLI must never look fast -------------------------

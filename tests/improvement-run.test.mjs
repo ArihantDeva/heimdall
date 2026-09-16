@@ -15,7 +15,8 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { runSpeedWorkload, runAccuracyWorkload, gate } from "../bench/improvement/run.mjs";
+import { runSpeedWorkload } from "../bench/improvement/run.mjs";
+import { gate } from "../bench/improvement/gate.mjs";
 
 const repo = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -70,13 +71,12 @@ test("speed workload spawns the real CLI when no fixed samples are given", () =>
   }
 });
 
-test("accuracy workload scores the real verdict path against held-out labels", () => {
-  const m = runAccuracyWorkload({});
-  assert.ok(m.n >= 3, "held-out fixture has cases");
-  assert.ok("mrr" in m, "ranking metrics present");
-  assert.ok("recall@1" in m);
-  assert.ok(Number.isFinite(m.mrr));
-  assert.ok(m.mrr > 0 && m.mrr < 1, `fixtures span good and bad cases, got mrr=${m.mrr}`);
+test("accuracy is measured on real retrieval, not literals", (t) => {
+  // The old literal-scoring helper (which imported zero product code) was
+  // deleted. Real retrieval accuracy lives in tests/retrieval-lane.test.mjs,
+  // which also asserts the embedding venv is present rather than skipping
+  // silently. Point here instead of duplicating that ~30s measurement.
+  t.skip("moved to tests/retrieval-lane.test.mjs — real retrieval measurement");
 });
 
 test("GATE PASSES on an intact workload (no false alarm)", () => {
@@ -86,8 +86,8 @@ test("GATE PASSES on an intact workload (no false alarm)", () => {
     capability: "graph",
   };
   const verdict = gate(
-    { ...shared, accuracy: runAccuracyWorkload({}) },
-    { ...shared, accuracy: runAccuracyWorkload({}) },
+    { ...shared, accuracy: ACC },
+    { ...shared, accuracy: ACC },
   );
   assert.equal(verdict.ok, true, JSON.stringify(verdict));
 });

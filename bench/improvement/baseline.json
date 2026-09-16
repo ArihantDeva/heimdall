@@ -1,6 +1,6 @@
 {
   "workload": {
-    "commit": "7ef3947",
+    "commit": "101dae6",
     "corpus": "scratch-fixture",
     "env": "darwin",
     "cache": "cold",
@@ -9,13 +9,14 @@
   "speed": {
     "depth": {
       "n": 20,
-      "p50": 101.028542,
-      "p95": 132.83281075,
+      "p50": 136.57208350000002,
+      "p95": 191.33213960000003,
       "p99": null
     }
   },
-  "disagreement": 1.0425251064199264,
+  "disagreement": 0.9393832012528386,
   "speedReliable": true,
+  "anchor": 42.430666,
   "accuracy": {
     "mrr": 0.8888888888888888,
     "recall@1": 0.8888888888888888,

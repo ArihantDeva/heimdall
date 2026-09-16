@@ -14,9 +14,9 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { runSpeedWorkload, runAccuracyWorkload, gate } from "./run.mjs";
+import { runSpeedWorkload } from "./run.mjs";
+import { gate } from "./gate.mjs";
 import { runRetrievalWorkload } from "./retrieval-lane.mjs";
-import { validateFixtures } from "./fixtures.mjs";
 import { validateCase } from "./retrieval-case.mjs";
 import { DEFAULT_PYTHON as PYTHON } from "./run.mjs";
 
@@ -27,6 +27,12 @@ const BASELINE = join(REPO, "bench", "improvement", "baseline.json");
 // also detect machine noise and refuse to gate on it. Override with
 // HEIMDALL_EVAL_REPS for a quick smoke run; keep >=20 for a real claim.
 const REPS = Number(process.env.HEIMDALL_EVAL_REPS ?? 20);
+
+// A loaded machine must never become the baseline: the anchor is a fixed
+// machine-only workload (bare node startup), and a baseline recorded while it
+// is inflated makes every later comparison fail honest work. Override with
+// --force when the load is understood and accepted.
+const FREEZE_ANCHOR_MAX = Number(process.env.HEIMDALL_EVAL_ANCHOR_MAX ?? 120);
 
 function checks() {
   return [
@@ -71,6 +77,7 @@ function measure() {
       // p50=169ms against a quiet-machine 116ms for identical code).
       disagreement: speed.disagreement,
       speedReliable: speed.speedReliable,
+      anchor: speed.anchor,
       // Accuracy is measured on REAL retrieval (scratch index, real query
       // path), not on literals — review found the first version scored
       // hand-written arrays with zero product imports.
@@ -103,7 +110,7 @@ function report(artifact, verdict) {
 const fmt = (v) => (typeof v === "number" ? v.toFixed(1) : "n/a");
 
 function main() {
-  const problems = [...validateFixtures(), ...validateCase()];
+  const problems = validateCase();
   if (problems.length) {
     console.error(`✖ fixture labels are invalid:\n  - ${problems.join("\n  - ")}`);
     return 1;
@@ -119,6 +126,18 @@ function main() {
       console.error(
         `✖ refusing to freeze a baseline from an unreliable measurement ` +
           `(repeat spread ${artifact.disagreement?.toFixed(2)}x). Re-run when the machine is quiet, or pass --force to record it anyway.`,
+      );
+      return 1;
+    }
+    // The batch agreement check cannot see sustained load: two batches agree
+    // with each other while both are uniformly inflated. Compare the run's
+    // anchor against a fixed reference so a baseline is never recorded from a
+    // machine state that makes every future comparison meaningless.
+    if (!process.argv.includes("--force") && artifact.anchor > FREEZE_ANCHOR_MAX) {
+      console.error(
+        `✖ refusing to freeze a baseline while the machine is loaded ` +
+          `(anchor ${artifact.anchor.toFixed(1)}ms > ${FREEZE_ANCHOR_MAX}ms). ` +
+          `A baseline recorded under load makes every later comparison fail honest work. Re-run when quiet, or pass --force.`,
       );
       return 1;
     }
