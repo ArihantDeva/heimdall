@@ -347,6 +347,42 @@ shellTest("issue #13: an unreadable index is named on stdout, not only stderr", 
   } finally { cleanup(); }
 });
 
+// Determinism is a property worth pinning, because a tolerance that is too
+// tight would silently downgrade CORRECT hits (a false WEAK is as damaging to
+// the contract as a false STRONG). The card is written from st_mtime and read
+// back through SQLite's REAL, so assert the round trip is exact and that a
+// freshly written file is STRONG on the first search — no window, no warm-up.
+// Also asserts the reverse: a whole-second card (what a hand-written row looks
+// like) against a fractional-mtime file is correctly NOT STRONG.
+shellTest("issue #13: a freshly indexed, unchanged file is STRONG on the first search", () => {
+  const { home, hit, cleanup } = sandbox();
+  try {
+    // Card written the way embed-index.py writes it: straight from os.stat.
+    writeCard(home, hit, cardFor(hit));
+
+    const stdout = search(home, {}, "example");
+
+    assert.match(stdout, /\[STRONG\]/, `no warm-up or retry should be needed:\n${stdout}`);
+  } finally { cleanup(); }
+
+  // And the mtime the card holds equals the file's mtime exactly, so
+  // `abs(st_mtime - card) < 1e-6` is an equality test on a value that survives
+  // the disk -> sqlite REAL -> disk round trip bit-for-bit.
+  const { home: home2, hit: hit2, cleanup: cleanup2 } = sandbox();
+  try {
+    writeCard(home2, hit2, cardFor(hit2));
+    const stored = Number(execFileSync("/usr/bin/python3", ["-c",
+      `import sqlite3; print(repr(sqlite3.connect(${JSON.stringify(join(home2, ".heimdall", "global.db"))}).execute("SELECT mtime FROM cards").fetchone()[0]))`,
+    ], { encoding: "utf8" }).trim());
+    const onDisk = statSync(hit2).mtimeMs / 1000;
+    assert.equal(
+      stored,
+      onDisk,
+      "the stored mtime must be bit-identical to the file's, or correct hits would be downgraded",
+    );
+  } finally { cleanup2(); }
+});
+
 shellTest("issue #13: a card that agrees with the file on disk stays STRONG", () => {
   const { home, hit, cleanup } = sandbox();
   try {
