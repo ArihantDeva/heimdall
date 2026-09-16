@@ -32,10 +32,16 @@ const isSecret = (s) => SECRET_RES.some((re) => re.test(s));
 // ponytail: English-only patterns — deliberate recall ceiling per spec
 // ("non-English: no match → zero facts, acceptable"); upgrade path is extra
 // pattern packs behind this same table, never a second extractor.
+// `declaration` carries only HALF its proposition in group 1 — "X is Y" puts
+// the subject in g1 and the predicate in g2. Every other pattern captures the
+// whole utterance in g1. So the picker below is what keeps declaration facts
+// complete: without it the predicate is dropped before construction, and
+// "X is allowed" / "X is not allowed" collapse into one identical truncated
+// fact at the dedup gate.
 const PATTERNS = [
   { kind: "preference", re: /\b(i\s+(?:prefer|always|never|usually|favor|favourite|favorite)\b[^.!?\n]*)/i },
   { kind: "assertion", re: /\b(i\s+(?:use|am|do|have|run|work|keep|commit)\b[^.!?\n]*)/i },
-  { kind: "declaration", re: /\b([A-Z][A-Za-z0-9_-]+(?:\s+[A-Za-z0-9_-]+){0,3})\s+is\s+([^.!?\n]{4,})/ },
+  { kind: "declaration", re: /\b([A-Z][A-Za-z0-9_-]+(?:\s+[A-Za-z0-9_-]+){0,3}\s+is\s+[^.!?\n]{4,})/, pick: (m) => m[1] },
   { kind: "negation", re: /\b((?:i\s+)?(?:do\s+not|don't|dont|won't|wont|will\s+not|can't|cant|cannot|never)\b[^.!?\n]*)/i },
 ];
 
@@ -89,10 +95,10 @@ function extractFromLine(lineText, path, line, out, meta) {
     return;
   }
   const text = nfkc(lineText); // fold compat codepoints before matching
-  for (const { kind, re } of PATTERNS) {
+  for (const { kind, re, pick } of PATTERNS) {
     const m = text.match(re);
     if (m) {
-      const raw = m[1] ?? m[0];
+      const raw = pick ? pick(m) : (m[1] ?? m[0]);
       out.push({ fact: makeFact(kind, raw, path, line), key: dedupKey(raw) });
       return;
     }

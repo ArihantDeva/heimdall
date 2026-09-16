@@ -45,16 +45,55 @@ export function pythonWithTreeSitter(env = process.env) {
 let _cachedCap;
 /**
  * Deepest level this machine can actually produce.
- * L2 and L3 both need tree-sitter; without it we cap at L1.
+ *
+ * Needs BOTH halves: tree-sitter (the parser) and the vendored graphify
+ * extractors (the bridge that drives it). Probing tree-sitter alone reported
+ * graph depth on machines where every extraction then failed at import and
+ * silently settled at file depth — and since capability is stamped into the
+ * journal as cap_max, the upgrade stopped being re-reported. So the probe runs
+ * the real bridge over a real file and requires symbol nodes back.
+ *
+ * ponytail: `max` means "this python can extract AT LEAST ONE language at
+ * L2/L3", not "every language". Grammars are imported lazily per language, so a
+ * python with only tree-sitter-python reports graph while a .go file still
+ * settles at file depth. Per-language capability would mean probing all 16
+ * bindings on every call for a per-file answer the depth ladder does not
+ * actually key on. Upgrade path if that ever matters: probe per extension and
+ * record the language set instead of one max.
+ *
+ * root: package root holding vendor/. Defaults to this checkout; the npm
+ * tarball must ship vendor/graphify/ for this to pass after install.
  */
-export function capability(env = process.env, { fresh = false } = {}) {
+export function capability(env = process.env, { fresh = false, root = REPO_ROOT } = {}) {
   if (!fresh && _cachedCap) return _cachedCap;
   const py = pythonWithTreeSitter(env);
-  _cachedCap = {
-    max: py ? "graph" : "file",
-    python: py,
-    reason: py ? "tree-sitter available" : "tree-sitter not importable — L2/L3 unavailable",
-  };
+  let graphify = false;
+  let probeError = "";
+  if (py) {
+    const vendor = join(root, "vendor");
+    try {
+      // Importing graphify.extract proves only that a module of stdlib imports
+      // loads. Every grammar is imported LAZILY inside the per-language
+      // extractors, and the bridge catches those failures and returns error
+      // rows that the caller degrades to file depth — the exact silent-
+      // degradation this probe exists to prevent. So actually extract a file:
+      // if the vendored extractor and its grammar can produce a symbol, the
+      // capability is real for that language. (The probe file exercises the one
+      // grammar we can count on: the extractor module and its binding.)
+      const probe = join(root, "bin", "lib", "heimdall_extract.py");
+      const out = execFileSync(py, [probe, probe], { encoding: "utf8", timeout: 15_000, stdio: ["ignore", "pipe", "ignore"] });
+      const result = JSON.parse(out).results[probe] ?? {};
+      graphify = Array.isArray(result.nodes) && result.nodes.length >= 2 && !result.error;
+      if (!graphify) probeError = String(result.error ?? "no symbol nodes produced");
+    } catch (e) {
+      probeError = String(e.stderr ?? e.message ?? e).trim().split("\n").pop() ?? "";
+    }
+  }
+  let reason;
+  if (!py) reason = "tree-sitter not importable — L2/L3 unavailable";
+  else if (!graphify) reason = `the extraction bridge cannot produce symbols (vendor/graphify or a tree-sitter grammar missing) — L2/L3 unavailable${probeError ? ` (${probeError})` : ""}`;
+  else reason = "tree-sitter + graphify extractors available";
+  _cachedCap = { max: py && graphify ? "graph" : "file", python: py, graphify, reason };
   return _cachedCap;
 }
 

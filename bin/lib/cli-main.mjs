@@ -10,7 +10,7 @@ const ROOT = dirname(dirname(HERE)); // repo root
 const BIN = (n) => join(ROOT, "bin", n);
 const USAGE = `usage: heimdall <command>
 
-  init [--harness pi|claude-code|codex|cursor|windsurf|all]   configure backend + harness hooks
+  init [--harness pi|claude-code|codex|cursor|opencode|gemini-cli|deepseek|all]   configure backend + harness hooks
   setup [--model ID | --model-path F] [--threads N] [--instances N]      hardware-fit graft config + daemon
         [--accel auto|metal|cuda|cpu] [--graftd PATH] [--skip-daemon] [--detect-only]
   search "<query>" [-n N] [--scope S] [--no-explore]          ranked + verified knowledge search

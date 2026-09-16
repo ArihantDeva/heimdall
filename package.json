@@ -42,7 +42,9 @@
     "!vendor/graft/models/",
     "!vendor/graft/**/*.db",
     "!vendor/graft/**/*.db-shm",
-    "!vendor/graft/**/*.db-wal"
+    "!vendor/graft/**/*.db-wal",
+    "vendor/graphify/",
+    "!vendor/graphify/**/__pycache__/"
   ],
   "engines": {
     "node": ">=22.5"

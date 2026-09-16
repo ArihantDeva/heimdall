@@ -1,8 +1,8 @@
 // C11 observability: semantic-state.json recording + kb-health reporting.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync, existsSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync, existsSync, readdirSync, symlinkSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -86,5 +86,44 @@ test("C11: kb-health prints availability line when state exists, graceful line w
     assert.match(out3, /WARN: semantic layer last seen BUSY/);
   } finally {
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("C11: kb-health runs without GNU timeout/gtimeout (issue #15 portability)", () => {
+  const home = mkdtempSync(join(tmpdir(), "heimdall-c11-portable-"));
+  const bin = mkdtempSync(join(tmpdir(), "heimdall-c11-bin-"));
+  try {
+    // Sandbox PATH holding every system binary EXCEPT timeout/gtimeout, so a
+    // GNU-coreutils machine (Homebrew) cannot mask the dependency.
+    for (const d of ["/bin", "/usr/bin", "/usr/sbin", "/sbin"]) {
+      for (const name of readdirSync(d)) {
+        if (name === "timeout" || name === "gtimeout") continue;
+        const link = join(bin, name);
+        if (!existsSync(link)) try { symlinkSync(join(d, name), link); } catch {}
+      }
+    }
+
+    // Minimal healthy sandbox: graft stub + one repo graph (same shape as above).
+    const graftDir = join(home, ".local", "bin");
+    mkdirSync(graftDir, { recursive: true });
+    const graft = join(graftDir, "graft");
+    writeFileSync(graft, "#!/usr/bin/env bash\ncase \"$1\" in version) echo graft-test;; ask) exit 0;; *) exit 0;; esac\n");
+    chmodSync(graft, 0o755);
+    mkdirSync(join(home, "Repos", "example", "graft"), { recursive: true });
+
+    const env = { HOME: home, PATH: bin, GRAFT: graft };
+
+    // Precondition: neither timeout nor gtimeout is resolvable in this env.
+    for (const name of ["timeout", "gtimeout"]) {
+      const which = spawnSync("/bin/sh", ["-c", `command -v ${name}`], { encoding: "utf8", env });
+      assert.notEqual(which.status, 0, `${name} unexpectedly resolves to ${which.stdout.trim()}`);
+    }
+
+    const out = execFileSync("bash", [HEALTH], { encoding: "utf8", env });
+    assert.doesNotMatch(out, /search smoke/, out);
+    assert.match(out, /HEALTHY/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(bin, { recursive: true, force: true });
   }
 });

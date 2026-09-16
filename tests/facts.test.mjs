@@ -254,3 +254,19 @@ test("FC-20 tiny utterances never trip the dedup gate", () => {
   const facts = extractFacts(Buffer.from("I am up.\nI do run.\n"), { path: PATH });
   assert.ok(facts.length >= 2, `got ${facts.length}`);
 });
+
+// Opposite declarations must survive as two distinguishable propositions:
+// the "is ..." predicate is part of the fact, not dropped at match time.
+test("FC-21 contrary declarations stay distinct facts", () => {
+  const buf = Buffer.from(
+    "Production deployment is allowed.\nProduction deployment is not allowed.\n",
+  );
+  const meta = { path: PATH };
+  const facts = extractFacts(buf, meta);
+  assert.equal(facts.length, 2);
+  assert.notEqual(facts[0].title, facts[1].title);
+  for (const f of facts) {
+    assert.ok(/\ballowed\b/.test(f.title), `title lost the predicate: "${f.title}"`);
+  }
+  assert.equal(meta.skippedDuplicates, 0);
+});

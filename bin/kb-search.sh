@@ -29,8 +29,6 @@ done
 
 SELF="$(readlink -f "$0" 2>/dev/null || python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$0" 2>/dev/null || echo "$0")"
 SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd -P)"
-VERIFY="$SCRIPT_DIR/kb_search_verify.py"
-[ -f "$VERIFY" ] || VERIFY="$HOME/knowledge-base/kb_search_verify.py"
 
 export GRAFT="${GRAFT:-$(command -v graft 2>/dev/null || echo "$HOME/.local/bin/graft")}"
 MNEMOSYNE="${MNEMOSYNE:-$(command -v mnemosyne 2>/dev/null || echo "$HOME/.local/bin/mnemosyne")}"
@@ -78,14 +76,25 @@ for r in (data.get("results") or []):
     except (TypeError, ValueError) as e:
         print(f"WARN: skipping malformed memory result: {e}", file=sys.stderr)
 q_toks = set(q.lower().split())
+# This backend has no index cards, so there is nothing here that could ever
+# corroborate the content it returns. A path that exists plus tokens that appear
+# in the memory's own prose is evidence of a mention, not of verification — so
+# these hits are WEAK with the reason stated, exactly like a cardless hit on the
+# graft path. Claiming STRONG here would mean the same word meaning two
+# different things depending on which backend answered.
 for i, r in enumerate(sorted(results, key=lambda x: -x["score"])[:n], 1):
     p = r["path"]
     exists = os.path.exists(p)
     blob = (r["title"] + " " + r["body"] + " " + p).lower()
     cov = round(sum(1 for t in q_toks if t in blob) / len(q_toks), 2) if q_toks else 0.0
-    verdict = "STRONG" if exists and cov >= 0.5 else ("WEAK" if exists else "NOPATH")
+    if not exists:
+        verdict, why = "NOPATH", "anchor is gone from disk"
+    else:
+        verdict = "WEAK"
+        why = "memory store has no index card — content not verified"
     print(f"{i:>2}. [{verdict:<6}] cov{int(cov*100):02d}%  {p}")
     print(f"      {r['title']}")
+    print(f"      {why}")
 PYEOF
 	exit 0
 }
@@ -94,10 +103,11 @@ if [ "$BACKEND" = "mnemosyne" ]; then
 	run_mnemosyne
 fi
 
-print_results() {
-	[ -f "$VERIFY" ] || { echo "ERROR: verify script missing: $VERIFY"; exit 1; }
-	python3 "$VERIFY" "$1" "$2" "$SCOPE" "$N" "$Q"
-}
+# (No legacy verifier wiring here. kb_search_verify.py is retained as history —
+# it targeted the retired global `graft retrieve` daemon API — and the wrapper
+# that would have invoked it had no callers, so it was dead code. Both backends
+# above compute their own verdicts; its STRONG is a separate content-heuristic
+# and is not what search emits.)
 echo "== retrieve (per-repo graft + global semantic): $Q"
 if [ ! -x "$GRAFT" ]; then
 	# Not a tool failure: a fresh/unconfigured machine has validly zero results.
@@ -266,15 +276,27 @@ for r in sorted(results, key=lambda x: -x["score"]):
     seen.setdefault(r["title"], r)
 merged = sorted(seen.values(), key=lambda x: -x["score"])[:n]
 
-# Verdict pass: STRONG if path exists on disk + lexical coverage of query,
-# WEAK if path exists, NOPATH/STALE otherwise. (Replaces kb_search_verify.py,
-# which was built around the old daemon's `graft get`.)
+# Verdict pass: STRONG requires identity with the indexed content — the path
+# exists AND the file on disk still matches the card that was indexed (size +
+# mtime). Query-token coverage is a RANKING signal, never a trust signal: a
+# semantic hit's body is synthesized as `semantic hit [<path>]`, so the path
+# alone scores full coverage, and a stale card still points at a live file.
+# Size/mtime come from the card, so this opens nothing — verification costs one
+# stat per hit. (See tests/kb-search-identity.test.mjs.)
 q_toks = set(q.lower().split())
 # Freshness anchors: per-card mtime from global.db = when the snapshot was
 # indexed. Read-only, final hits only; absent db / errors => unknown freshness.
-import sqlite3, time
+import sqlite3, stat, time
 
 card_mtimes = {}
+card_sizes = {}
+# Index availability is part of the verdict: when the cards table cannot be
+# read, NO hit can be identity-checked, so every result degrades to WEAK. That
+# must be visible on the stream the caller actually reads — this script's own
+# stdout — because bin/lib/mcp-server.mjs returns stdout only and drops stderr,
+# so a stderr-only warning made "index is broken" and "path was never indexed"
+# print the identical reason line to an agent.
+index_reason = None
 db_path = os.path.expanduser("~/.heimdall/global.db")
 if os.path.exists(db_path):
     try:
@@ -282,31 +304,140 @@ if os.path.exists(db_path):
         hit_paths = [r["path"] for r in merged if r.get("path")]
         if hit_paths:
             qm = ",".join("?" * len(hit_paths))
-            card_mtimes = dict(con.execute(
-                f"SELECT path, mtime FROM cards WHERE path IN ({qm})", hit_paths))
+            for p_, mt_, sz_ in con.execute(
+                    f"SELECT path, mtime, size FROM cards WHERE path IN ({qm})", hit_paths):
+                card_mtimes[p_] = mt_
+                card_sizes[p_] = sz_
         con.close()
     except Exception as e:
         print(f"WARN: freshness lookup failed: {e}", file=sys.stderr)
+        # Machine-readable on stdout so the MCP caller (which drops stderr)
+        # can tell "the index is unreadable" from "this path was never
+        # indexed". Same convention as SEMANTIC_ERROR above.
+        print(f"INDEX_ERROR: cards lookup failed — no hit can be identity-verified ({e})")
+        index_reason = f"index unreadable — content not verified ({e})"
         card_mtimes = {}
+        card_sizes = {}
 for i, r in enumerate(merged, 1):
     p = r["path"]
     exists = os.path.exists(p)
     title_l = r["title"].lower()
     body_l = r["body"].lower()
+    # Coverage is measured over the INDEXED TEXT only — never the path. The old
+    # expression included p.lower(), which let a filename supply the whole
+    # score: `deploy_policy_backup.md` full of lorem ipsum read cov100% off its
+    # own name and reached STRONG. The path is a retrieval signal (which is why
+    # it belongs in the ranking above); it is not evidence that content answers
+    # the query, which is the only thing this bar is for. Tokens here come from
+    # the card body ([path] is appended) or the backend's snippet, so a hit
+    # whose text genuinely contains the query still passes.
+    covered = title_l + " " + body_l
+    # ...and the path must be REMOVED from that text, not merely excluded as a
+    # field: every producer embeds it in the body (graft: `snippet [path]`,
+    # semantic: `semantic hit [path]`), so leaving it in re-admits exactly the
+    # filename-as-coverage bug this line exists to prevent.
+    if p:
+        covered = covered.replace(p.lower(), " ")
     cov = 0.0
     if q_toks:
-        matched = 0
-        for tok in q_toks:
-            if tok in title_l or tok in body_l or tok in p.lower():
-                matched += 1
+        matched = sum(1 for tok in q_toks if tok in covered)
         cov = round(matched / len(q_toks), 2)
-    verdict = "STRONG" if exists and cov >= 0.5 else ("WEAK" if exists else "NOPATH")
-    if r.get("semantic") and exists and verdict == "WEAK" and cov > 0:
-        # Semantic similarity proves relevance, not liveness: an existing path
-        # whose content matches NO query token stays WEAK; any (>0) lexical
-        # corroboration lets the semantic signal carry it to STRONG. Never
-        # upgrades NOPATH — a dead anchor must not look trustworthy.
+    # Content identity: the card this hit came from recorded the size AND mtime
+    # the file had when it was indexed. A file that has moved on since then is
+    # not the content we matched — whatever it now says is unverified, so it
+    # cannot be STRONG no matter how well the query tokens line up. Size alone
+    # would miss a same-length rewrite (ALLOWED=1 -> DELETED=1); the mtime
+    # comparison closes that, and matches the freshness token below so a hit can
+    # never read `possibly_stale` and STRONG at the same time.
+    #
+    # Two stats, zero reads: this is what makes the README's "act on STRONG
+    # without a confirmation round-trip" true without opening the file.
+    #
+    # ponytail: a same-size rewrite that ALSO restores mtime (os.utime) defeats
+    # any stat-based check by construction, so query time cannot see it — and
+    # paying for it here would mean hashing every hit, which is the read this
+    # layer exists to avoid. The card is keyed on (size, mtime) all the way
+    # down, including index/embed-index.py's own
+    # `prev[1] == st.st_mtime and prev[2] == st.st_size` fast-path, so that same
+    # fast-path will NOT notice the rewrite either: the card keeps the stale
+    # hash and this stays wrong until something re-reads the file on purpose.
+    # The boundary is owned by `heimdall verify --deep`, which re-hashes and
+    # reports `why: "hash"` drift (reconcile.mjs). Note its scope: it audits the
+    # reconciler journal, which is not the same path set as semantic cards.
+    # tests/kb-search-identity.test.mjs pins this as a known ceiling — if that
+    # test ever fails toward WEAK, query-time identity became content-based and
+    # this comment is what to update.
+    identity = None
+    # A directory or a symlink is not the file the card describes: os.stat
+    # follows links, and a directory can carry a plausible size/mtime, so both
+    # would otherwise inherit the verdict the path used to deserve. Read the
+    # entry itself (lstat) and require it to be a regular file.
+    try:
+        link_st = os.lstat(p)
+        is_file = stat.S_ISREG(link_st.st_mode)
+    except OSError:
+        is_file = False
+    if exists and is_file and p in card_sizes:
+        try:
+            st = os.stat(p)
+            cm = card_mtimes[p]
+            # Card columns are only loosely typed, so a non-numeric mtime must
+            # fail the check rather than raise inside it.
+            numeric_mtime = isinstance(cm, (int, float))
+            # SYMMETRIC and TIGHT. `st.st_mtime - card <= 1.0` accepted a
+            # downward skew of any size, which is reachable without utime:
+            # embed-index fast-paths on EXACT mtime equality, so an edit landing
+            # in the same coarse tick as the index pass keeps the old content
+            # hash, as does any mtime-preserving restore. Mirroring that exact
+            # equality (with an epsilon only for float round-tripping) is what
+            # "the file is unchanged since we indexed it" actually means; a
+            # loose window would re-admit the evidence-free STRONG this whole
+            # check exists to prevent.
+            identity = (numeric_mtime
+                        and st.st_size == card_sizes[p]
+                        and abs(st.st_mtime - cm) < 1e-6)
+        except OSError:
+            identity = None
+    if not exists:
+        verdict = "NOPATH"
+        why = "anchor is gone from disk"
+    elif not is_file:
+        verdict = "WEAK"
+        why = "path is no longer a regular file (directory or symlink)"
+    elif identity is False:
+        verdict = "WEAK"
+        why = "file changed since it was indexed"
+    elif identity is None:
+        # No card (graft/mnemosyne backends return none) or an unreadable stat.
+        # Nothing was verified here, so this must not be STRONG: an unverifiable
+        # hit is labelled as one, with the reason on its own line. The remedy is
+        # to index the path, which is what creates the card STRONG is built on.
+        verdict = "WEAK"
+        if index_reason:
+            why = index_reason
+        elif p in card_sizes:
+            why = "could not read file metadata"
+        else:
+            why = "no index card for this path — content not verified"
+    elif cov < 0.5:
+        # Identity holds, but the card's own text barely overlaps the query:
+        # an intact anchor is not the same thing as an answer. A semantic hit
+        # may still upgrade this below, on top of the identity.
+        verdict = "WEAK"
+        why = f"indexed content intact, but query tokens cover only {int(cov*100)}% of it"
+    else:
         verdict = "STRONG"
+        why = ""
+    if r.get("semantic") and identity is True and verdict == "WEAK" and cov > 0:
+        # Semantic similarity proves relevance, not liveness. It only carries a
+        # hit to STRONG on top of an identity that already holds (card agrees
+        # with the file), where the lexical overlap is partial rather than
+        # absent: "the file is unchanged AND its indexed content is what the
+        # query is near". Never upgrades NOPATH — a dead anchor must not look
+        # trustworthy — never upgrades a changed file, and never upgrades a hit
+        # with no card to check, so every STRONG rests on verified identity.
+        verdict = "STRONG"
+        why = f'semantic similarity to unchanged content "{q}"'
     # Freshness (zvec-grep port): the card's mtime is the as_of anchor of the
     # indexed snapshot. Older than the file on disk (1s tolerance) =>
     # possibly_stale; no card row (e.g. graft-only hits) => freshness unknown,
@@ -314,15 +445,24 @@ for i, r in enumerate(merged, 1):
     # would be a lie.
     fr = ""
     cm = card_mtimes.get(p)
-    if cm is not None and exists:
+    # SQLite is dynamically typed, so a hand-edited or older cards row can hold
+    # a non-numeric mtime. Arithmetic on it would raise and take the whole
+    # result set down (every other hit is lost to one bad row), so the type is
+    # checked before use.
+    if isinstance(cm, (int, float)) and exists:
         age = max(0.0, time.time() - cm)
         as_of = f"{age/3600:.1f}h" if age < 86400 * 14 else f"{age/86400:.1f}d"
+        # The freshness token says exactly what identity verified: the file's
+        # mtime still equals the card's. Same test, same tightness, so the token
+        # and the verdict can never disagree.
         try:
-            stale = os.path.getmtime(p) - cm > 1.0
+            stale = abs(os.path.getmtime(p) - cm) >= 1e-6
         except OSError:
             stale = False
         fr = f"as_of={as_of} " + ("possibly_stale" if stale else "fresh")
     fr_s = f"  {fr}" if fr else ""
     print(f"{i:>2}. [{verdict:<6}] cov{int(cov*100):02d}%{fr_s}  {p}")
     print(f"      {r['title']}")
+    if why:
+        print(f"      {why}")
 PYEOF

@@ -80,9 +80,14 @@ export function installHookBinary(home = HOME()) {
  * Register the MCP server in a settings object shaped like
  * { mcpServers: { heimdall: { command, args } } } — the common dialect
  * (Claude Code, Gemini CLI, Cursor, DeepSeek all use mcpServers).
+ *
+ * The `mcp` subcommand is NOT optional: cli-main serves JSON-RPC only for the
+ * explicit `mcp` case, so an entry without it launches a process that prints
+ * usage and exits. Every adapter goes through here (or mirrors these args)
+ * precisely so that shape is written once.
  */
-function mcpServerEntry(nodeBin, heimdallJs) {
-	return { command: nodeBin || "node", args: [heimdallJs], env: {} };
+export function mcpServerEntry(nodeBin, heimdallJs) {
+	return { command: nodeBin || "node", args: [heimdallJs, "mcp"], env: {} };
 }
 
 function resolveCli() {
@@ -135,17 +140,43 @@ function writeClaudeCode(home) {
 // ---------- codex ---------------------------------------------------------------
 // Codex reads ~/.codex/config.toml; MCP servers under [mcp_servers.<name>].
 // Line-based TOML insertion — no TOML dependency.
+//
+// Our own section is REPLACED, not skipped-if-present. Skipping made the writer
+// non-idempotent in the direction that matters: an install carrying the args we
+// wrote in 0.10.0 (no `mcp` subcommand) would keep those args forever, so every
+// existing user stayed broken after upgrading. Only our section is touched, and
+// the section ends where the next table header begins, so sibling tables
+// (other MCP servers, user settings) survive verbatim.
 function writeCodex(home) {
 	const cli = resolveCli();
 	const cfgDir = ensure(join(home, ".codex"));
 	const cfgPath = join(cfgDir, "config.toml");
 	const toml = readIfExists(cfgPath);
-	if (!toml.includes("[mcp_servers.heimdall]")) {
-		const entry = `\n[mcp_servers.heimdall]\ncommand = "${process.execPath}"\nargs = ["${cli}"]\n`;
-		appendFileSync(cfgPath, entry);
+	const args = mcpServerEntry(process.execPath, cli).args.map((a) => `"${a}"`).join(", ");
+	const entry = `[mcp_servers.heimdall]\ncommand = "${process.execPath}"\nargs = [${args}]\n`;
+	if (toml.includes("[mcp_servers.heimdall]")) {
+		if (!toml.includes(entry)) writeFileSync(cfgPath, replaceTomlTable(toml, "mcp_servers.heimdall", entry));
+	} else {
+		appendFileSync(cfgPath, `\n${entry}`);
 	}
 	upsertMarkdownBlock(join(home, "AGENTS.md"), ruleBlock("kb_search"));
 	return "codex";
+}
+
+/** Replace one TOML table's body, up to the next table header. TOML-level only. */
+function replaceTomlTable(toml, table, body) {
+	const header = `[${table}]`;
+	const lines = toml.split("\n");
+	const start = lines.findIndex((l) => l.trim() === header);
+	if (start < 0) return toml;
+	let end = start + 1;
+	while (end < lines.length && !/^\s*\[[^\]]+\]\s*$/.test(lines[end])) end++;
+	const rest = lines.slice(end);
+	// Keep a blank line between our table and whatever follows, as the writer
+	// does for a fresh file — otherwise a repaired config reads `args = [...]`
+	// directly above the next `[table]`.
+	const tail = rest.length && rest[0].trim() !== "" ? ["", ...rest] : rest;
+	return [...lines.slice(0, start), ...body.replace(/\n$/, "").split("\n"), ...tail].join("\n");
 }
 
 // ---------- cursor ----------------------------------------------------------------
@@ -197,8 +228,9 @@ export const HeimdallPlugin = async ({ project }) => ({
 `;
 	writeFileSync(pluginPath, plugin);
 	// opencode.json at ~/.config/opencode/opencode.json — mcp local servers
+	const entry = mcpServerEntry(process.execPath, cli);
 	mergeJson(join(home, ".config", "opencode", "opencode.json"), {
-		mcp: { heimdall: { type: "local", enabled: true, command: [process.execPath, cli] } },
+		mcp: { heimdall: { type: "local", enabled: true, command: [entry.command, ...entry.args] } },
 	});
 	upsertMarkdownBlock(join(home, ".config", "opencode", "AGENTS.md"), ruleBlock("mcp__heimdall__kb_search"));
 	return "opencode";

@@ -10,6 +10,16 @@ FAIL=0
 ok()   { echo "  ok    $1"; }
 bad()  { echo "  FAIL  $1"; FAIL=1; }
 
+# GNU `timeout` is not in the default macOS userland (same defect as #15 in
+# kb-health.sh): prefer it, then gtimeout, then perl, else run unguarded.
+timeout_run() {
+  if command -v timeout >/dev/null 2>&1; then timeout "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$@"
+  elif command -v perl >/dev/null 2>&1; then perl -e 'alarm shift; exec @ARGV' "$@"
+  else "$@"
+  fi
+}
+
 echo "== kb-verify =="
 
 # 1. status counts + dim agreement
@@ -20,7 +30,7 @@ if [ "${FILES:-0}" -ge 790000 ]; then ok "status files=$FILES (≥790k honest ce
 [ "$DOK" = "True" ] && ok "dimension_ok=true (no mismatch possible)" || bad "dimension_ok=$DOK"
 
 # 2. semantic roundtrip on a known non-Repos project
-SEM_OUT=$(timeout 180 "$PY" "$EMBED" query "resume tailoring pipeline ats score" -n 3 2>/dev/null)
+SEM_OUT=$(timeout_run 180 "$PY" "$EMBED" query "resume tailoring pipeline ats score" -n 3 2>/dev/null)
 if echo "$SEM_OUT" | rg -q "job-automation|resume_tailoring"; then
 	ok "semantic roundtrip hits job-automation/resume content"
 else
@@ -47,7 +57,7 @@ case "$GV" in
 	0.1[3-9]*|0.[2-9]*|[1-9]*) ok "graft $GV ≥0.13" ;;
 	*) bad "graft version '$GV' <0.13" ;;
 esac
-GASK=$(cd ~/Repos/cli-email && timeout 60 graft ask "daemon imap warm" . --json -n 1 2>/dev/null | rg -c '"hits"' || true)
+GASK=$(cd ~/Repos/cli-email && timeout_run 60 graft ask "daemon imap warm" . --json -n 1 2>/dev/null | rg -c '"hits"' || true)
 [ "${GASK:-0}" -ge 1 ] && ok "graft ask returns JSON hits" || bad "graft ask broken"
 
 echo "== kb-verify done (FAIL=$FAIL) =="

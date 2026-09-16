@@ -21,7 +21,7 @@ The vendor repo lives at `/Users/arihantdeva/Repos/heimdall`; **live runtime sta
 | `bin/lib/lock.mjs` | O_EXCL single-writer lock with stale-PID reclamation |
 | `bin/lib/hints.mjs` | the only channel a non-writer may use: append "look at this path" lines |
 | `bin/lib/sink.mjs` | projection targets: `MemorySink` (tests) and `GraftSink` (graft CLI) |
-| `bin/lib/adapters.mjs` | `heimdall init --harness X` config writers (pi, claude-code, codex, cursor, windsurf) |
+| `bin/lib/adapters.mjs` | `heimdall init --harness X` config writers (pi, claude-code, codex, cursor, opencode, gemini-cli, deepseek) |
 | `bin/kb-search.sh` | ranked search: graft retrieve + verify + graft explore walk |
 | `bin/kb_search_verify.py` | trust verdicts: STRONG/WEAK/STALE/REBUILT/REMOVED/NOPATH, content-aware, path extraction, stale handling |
 | `bin/kb-stale-scan.py` | full-graph stale sweep: rehome via `kb-rehome.sh` or log+delete |

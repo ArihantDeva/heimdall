@@ -10,13 +10,29 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # macOS is the primary supported platform (launchd daemon management), and
+    # a Linux-only matrix is exactly how a GNU-coreutils dependency shipped in
+    # kb-health.sh without anyone noticing. Both platforms run the suite.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      # L2/L3 extraction tests self-skip without a tree-sitter python, and the
+      # packed-tarball extraction smoke test is only meaningful if it actually
+      # runs — so give CI the parser the bridge needs rather than letting those
+      # assertions silently skip. HEIMDALL_PYTHON is the documented override.
+      - name: tree-sitter python for L2/L3 tests
+        run: |
+          python3 -m venv "$RUNNER_TEMP/ts-py"
+          "$RUNNER_TEMP/ts-py/bin/pip" install --quiet --upgrade pip tree-sitter tree-sitter-python
+          echo "HEIMDALL_PYTHON=$RUNNER_TEMP/ts-py/bin/python3" >> "$GITHUB_ENV"
       # CI has no need for a graftd build (tests gate on a usable binary and
       # skip when absent); skip the postinstall llama.cpp/graftd build to keep
       # installs fast and output clean.

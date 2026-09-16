@@ -21,8 +21,8 @@ Heimdall gives AI coding agents **persistent memory across every repository and 
 
 **4. Retrieval you can act on.** Semantic memory tools return plausible matches, but Heimdall also verifies it at runtime.
 
-- `STRONG` — path exists on disk, strong lexical coverage, **and** the file's actual content answers the query (content-aware scoring)
-- `WEAK` — semantic match only; plausible but unverified
+- `STRONG` — the anchor is intact **and** the indexed text answers the query: the file is still a regular file whose size and mtime match its index card, and the query's tokens appear in the content that was indexed. Nothing is read at query time
+- `WEAK` — plausible but unverified; the printed reason says which part failed (changed since indexing, no index card, tokens covering too little of the indexed text, or a path that is no longer a regular file)
 - `REBUILT` — file moved; Heimdall found it and re-anchored automatically
 - `STALE` / `REMOVED` — dead path, logged and pruned so it stops ranking
 
@@ -69,7 +69,7 @@ By design, not by benchmark — these follow from the architecture:
 
 1. **Zero-LLM indexing instead of extraction pipelines.** mem0, Zep, Letta, and LangMem all use LLMs to write facts: every remembered fact costs extraction tokens, adds latency, and means your code/notes are processed by a cloud provider unless you wire your own. Heimdall's ingest is tree-sitter plus local CPU embeddings. It cannot leak data, nor does it cost anything.
 
-2. **Verified hits vs plausible hits.** RAG returns nearest neighbors with a similarity score; nothing checks that the chunk still exists, let alone that it answers the question. Heimdall re-verifies every result against the live filesystem at query time (path exists? content still matches?) and labels it STRONG/WEAK/REBUILT/STALE. Agents can act on STRONG without a confirmation round-trip.
+2. **Verified hits vs plausible hits.** RAG returns nearest neighbors with a similarity score; nothing checks that the chunk still exists, let alone that it answers the question. Heimdall re-verifies every result against the live filesystem at query time and labels it STRONG/WEAK/REBUILT/STALE. STRONG requires an index card that still agrees with the file on disk — its recorded size and mtime match what `stat` reports now, compared exactly (the value round-trips through SQLite unchanged, so there is no tolerance and no window) — and query coverage in the hit's own text, with the path excluded so a filename cannot stand in for content. The whole check is two stats per hit: it never opens, let alone reads, the file it judges. A hit with no card to check against is WEAK and says so; it does not get to claim verification it never performed. Agents can act on STRONG without a confirmation round-trip. One boundary is real and documented rather than claimed away: a same-size rewrite that also restores mtime is invisible to any stat, and closing that requires reading content — which is what `heimdall verify --deep` is for.
 
 3. **Self-healing vs stale corpora.** In vector-RAG, a moved file leaves orphaned chunks ranking forever until someone re-runs ingestion. Heimdall's level-triggered reconciler converges: moved files re-anchor automatically (REBUILT), deletions retract exactly their own nodes, and re-indexing twice is identical to once.
 
@@ -111,7 +111,7 @@ PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). The concurrency invarian
 
 ```bash
 npm i -g @arihantdeva/heimdall
-heimdall init --harness claude-code   # or pi | codex | cursor | windsurf | all
+heimdall init --harness claude-code   # or pi | codex | cursor | opencode | all
 ```
 
 That's it for install + harness wiring (`init`, `insert` work immediately).
@@ -176,7 +176,7 @@ $ kb_search "portfolio optimization jam optimizer"
    2. [WEAK]   excel report builder — ~/work/reports/excel
 ```
 
-Every hit carries a trust verdict computed against the live filesystem — not a cached embedding score.
+Every hit carries a trust verdict computed against the live filesystem — not a cached embedding score. Nothing is STRONG unless an index card says the file is unchanged (`~/.heimdall/global.db`: recorded size and mtime still match what `stat` reports, compared exactly — the value round-trips bit-for-bit through SQLite, so this is deterministic, not a tolerance), and either the query tokens overlap the hit's text or the semantic layer matched it on top of that verified identity. A similarity score alone never makes a hit STRONG. A hit that cannot meet the bar says which part failed, on its own line: `file changed since it was indexed`, `no index card for this path — content not verified`, `indexed content intact, but query tokens cover only 20% of it`, `anchor is gone from disk`, `path is no longer a regular file`. The ceiling is honest and specific: a same-size rewrite that also restores mtime leaves metadata *byte-identical* while content differs, so no stat-based check can see it — and the card's `sha1` cannot close it for free, because it hashes `read_preview(path)`, i.e. content that must be read. That boundary is owned by `heimdall verify --deep`, which re-hashes the file and reports the drift, so the exposure lasts until that audit runs.
 
 ## Design history
 
@@ -272,7 +272,7 @@ Extraction is tree-sitter AST parsing via a Python bridge, **not an LLM call**: 
 | **Hints** | `bin/lib/hints.mjs` | the one channel a non-writer may use (append-only, atomic, torn-line tolerant) |
 | **Sink** | `bin/lib/sink.mjs` | projection targets: `GraftSink` (CLI) and `MemorySink` (tests/dry-run) |
 | **Ranked search** | `bin/kb-search.sh` | top-k hybrid (per-repo `graft ask` + global semantic) merged + verdict pass in-process, `--scope` filter |
-| **Trust verification** | `bin/kb_search_verify.py` | legacy verifier retained for the mnemosyne backend path; the graft backend's verdicts are computed in kb-search.sh |
+| **Trust verification** | `bin/kb-search.sh` verdict pass | both backends compute verdicts in-process: STRONG requires card-to-file identity (size + mtime vs `~/.heimdall/global.db`) plus query coverage in the hit's text; two stats per hit, no file reads. `bin/kb_search_verify.py` is retained as history only — it targeted the retired global `graft retrieve` API and nothing invokes it |
 | **Stale pruning** | `bin/kb-stale-scan.py`, `bin/kb-rehome.sh` | full-graph sweep: deterministic rehome or log+delete |
 | **Health & telemetry** | `bin/kb-health.sh`, `bin/telemetry.sh` | daemon health, index freshness, usage stats (kb_* calls/24h, hit rate, est. time saved) |
 | **Bootstrap** | `bin/sync-edits.sh`, `bin/seed-graft.sh` | replay session edit logs → hints; seed inventory TSV into Graft |
@@ -375,6 +375,9 @@ Suites:
 - `tests/guard.test.mjs` — kb-search-guard contract (warn on 3rd consecutive grep action, reset on kb_search/kb_sync/graft, interleaved reads do NOT reset; agent-callable `suspend(N)`/`tickTurn()` pause: silences all enforcement for N model turns, clamped 1–20, expiry restores clean-slate).
 - `tests/init.test.mjs` + `tests/adapters.test.mjs` — CLI contract and per-harness config-writer smoke tests against temp HOMEs.
 - `tests/kb-verify.test.mjs` — content-aware verdict contract via `selftest:` node ids (no graft daemon needed): content mismatch downgrades STRONG, content match upgrades to STRONG, binary files degrade gracefully, `extract_paths` home-anchor regression (the tilde-form bug).
+- `tests/kb-search-identity.test.mjs` — the STRONG contract end to end: a card that agrees with the file is STRONG, a card whose size no longer matches is WEAK, and a `sys.addaudithook` "open" trace proves the verdict pass never opens the files it judges (a `stat` is not an open, so a regression to content-reading verification shows up here).
+- `tests/adapters-mcp-entry.test.mjs` — launches the command+args the adapters actually write into each harness config (codex TOML, `mcp.json`, `opencode.json`) and requires a JSON-RPC `initialize` reply, so a generated config can never again ship an entry point that prints usage and exits.
+- `tests/npm-pack-contents.test.mjs` — packs the working tree and asserts `vendor/graphify/` is in the tarball, then runs one real L2 extraction from the unpacked artifact (not a source checkout) and checks `capability()` refuses to claim graph depth without the bridge.
 
 The concurrency tests are the point: if the single-writer or idempotency properties ever break, those are the tests that go red.
 
@@ -382,7 +385,7 @@ The concurrency tests are the point: if the single-writer or idempotency propert
 
 - Node ≥ 22.5 (the journal uses the built-in `node:sqlite`), `bash`, `python3`
 - macOS today (launchd daemon management); Linux works with a manual daemon
-- tree-sitter-capable python for L2/L3 (`HEIMDALL_PYTHON` env, or `~/.heimdall/venv/bin/python3`, or `python3` in PATH)
+- tree-sitter-capable python for L2/L3 (`HEIMDALL_PYTHON` env, or `~/.heimdall/venv/bin/python3`, or `python3` in PATH). The probe extracts a real file and requires symbols back, so this reports what the bridge can actually do rather than what imports. Note it is per-python, not per-language: only the grammars you install produce symbol depth, and a language without its binding settles at file depth.
 - Runtime npm deps: **zero** — `typebox`/`typescript`/`@types/node` are dev-only
 - Graft backend for `search`/`doctor` (built from `vendor/graft/`)
 
