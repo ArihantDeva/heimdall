@@ -163,8 +163,15 @@ function anchorReasons(baseline, candidate) {
 
 function capabilityReasons(baseline, candidate) {
   const b = baseline.capability;
-  if (b === undefined) return [];
   const c = candidate.capability;
+  // A missing capability record on either side is a refusal, not a skip. The
+  // anchor guard was hardened for exactly this reason after review; capability
+  // was left with the old `if (b === undefined) return []` behaviour, which
+  // meant a baseline frozen without a capability record silently disabled the
+  // check (verified: `anchors present, capability absent -> ok:true`).
+  if (b === undefined || b === null) {
+    return ["baseline records no capability verdict — extraction depth is unproven, so no green is justified"];
+  }
   if (c === undefined || c === null) {
     return [`capability missing (baseline ${b}) — the probe produced no verdict, so depth is unproven`];
   }

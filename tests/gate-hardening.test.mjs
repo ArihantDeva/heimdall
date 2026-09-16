@@ -86,6 +86,15 @@ test("an unknown capability is refused rather than assumed fine", () => {
   refused(gate(baseline(), candidate({ capability: null })));
 });
 
+test("a baseline with no capability record refuses rather than skipping the check", () => {
+  // Found by self-checking the fix patch: this used to return ok:true, so a
+  // baseline frozen without a capability verdict silently disabled the guard —
+  // the same hole the anchor was hardened against.
+  const verdict = gate(baseline({ capability: undefined }), candidate({ capability: undefined }));
+  refused(verdict);
+  assert.ok(verdict.reasons.some((r) => /capability/i.test(r)));
+});
+
 // --- finding 6: tail regressions were invisible -----------------------------
 
 test("a candidate that keeps p50 but triples p95 is refused", () => {
