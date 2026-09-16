@@ -23,7 +23,7 @@ The vendor repo lives at `/Users/arihantdeva/Repos/heimdall`; **live runtime sta
 | `bin/lib/sink.mjs` | projection targets: `MemorySink` (tests) and `GraftSink` (graft CLI) |
 | `bin/lib/adapters.mjs` | `heimdall init --harness X` config writers (pi, claude-code, codex, cursor, opencode, gemini-cli, deepseek) |
 | `bin/kb-search.sh` | ranked search: graft retrieve + verify + graft explore walk |
-| `bin/kb_search_verify.py` | trust verdicts: STRONG/WEAK/STALE/REBUILT/REMOVED/NOPATH, content-aware, path extraction, stale handling |
+| `bin/kb_search_verify.py` | path extraction for stale-node rehoming (`extract_paths`); the retired CLI/verdict path is gone |
 | `bin/kb-stale-scan.py` | full-graph stale sweep: rehome via `kb-rehome.sh` or log+delete |
 | `bin/kb-rehome.sh` | deterministic rehome of a stale node (bounded basename search) |
 | `bin/kb-health.sh` | `heimdall doctor`: daemon up, CLI responsive, search smoke, inventory freshness |
@@ -50,16 +50,16 @@ The vendor repo lives at `/Users/arihantdeva/Repos/heimdall`; **live runtime sta
 
 - **CLI:** `node bin/heimdall.js <command>` or the installed `heimdall` binary. Subcommands: `init`, `search`, `insert`, `doctor`, `daemon`, `reconcile`, `verify`, `depth`, `hint`.
 - **Read the flow here:** `bin/heimdall.js` → `bin/lib/cli-main.mjs` (dispatch) → `bin/heimdall-reconciler.mjs` (daemon loop) → `journal` / `hints` / `reconcile` / `extract` / `depth` / `sink`.
-- **Where the trust verdicts happen:** `bin/kb-search.sh` (fetch) + `bin/kb_search_verify.py` (verify/enrich).
+- **Where the trust verdicts happen:** `bin/kb-search.sh` (fetch + verify, in-process).
 - **Where the Pi tools come from:** `extensions/kb-tools.ts` → `bin/kb-search.sh`, graft CLI, `bin/sync-edits.sh`.
 
 ## How to run / test
 
 ```bash
 # tests (Node ≥ 22.5; uses node:sqlite, no native deps)
-node --test /Users/arihantdeva/Repos/heimdall/tests/*.test.mjs     # 44 pass
-# note: `npm test` (node --test "tests/**/*.test.mjs") matches ZERO files on
-# some shells — glob is not expanded; pass the dir or explicit paths instead.
+node --test /Users/arihantdeva/Repos/heimdall/tests/*.test.mjs     # 365 pass
+# or the same suite through the package script:
+npm test                                                          # node --test "tests/**/*.test.mjs"
 
 # typecheck (needs node_modules; npx may mis-parse flags, use the local bin)
 /Users/arihantdeva/Repos/heimdall/node_modules/.bin/tsc --noEmit -p /Users/arihantdeva/Repos/heimdall/tsconfig.json

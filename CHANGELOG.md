@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Removed
+
+- **Rust hybrid search/embed workspace** (`rs/heimdall-search`,
+  `rs/heimdall-embed`, `Cargo.toml`/`Cargo.lock`/`.cargo/`, and the tracked
+  generated tokenizer/model artifacts under `rs/heimdall-embed/model/`).
+  Nothing invoked the crates; retrieval is the per-repo graft + global-semantic
+  merge in `bin/kb-search.sh`. The 0.10.0 `--hybrid` CLI mode and the RRF
+  fusion described below are therefore no longer present in the tree.
+
 Five fixes reported against 0.10.0. Each has a regression test that failed on
 0.10.0 and passes now.
 
@@ -77,11 +86,12 @@ Five fixes reported against 0.10.0. Each has a regression test that failed on
   `LEXICAL-ONLY (sem_coverage=degraded)` banner: one greppable token for
   callers, no raw tracebacks, no silent garbage fallback. (Ported from
   zvec-grep.)
-- **RRF fusion + adaptive recall in `heimdall-search`** — reciprocal-rank
+- **RRF fusion + adaptive recall** — reciprocal-rank
   fusion `Σ 1/(60+rank)` across lexical and vector recall (fused over full
   recall width before capping), doubling recall ladder (200 → cap 2000) until
   the fused top-k stabilizes, new `--hybrid` CLI mode, and `HEIMDALL_DB` env
-  replaces the hardcoded absolute DB path. (Ported from zvec-grep.)
+  replaces the hardcoded absolute DB path. (Ported from zvec-grep. Shipped in
+  0.10.0; the `heimdall-search` implementation was removed — see Unreleased.)
 - **Type-aware index size caps** — `embed_walker.py` admits known-text files
   by family: code 1 MiB, data 16 MiB, docs 256 MiB (flat 128 KB retained as
   the unknown-ext content-sniff window). Oversize machine-generated dumps no

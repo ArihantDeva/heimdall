@@ -1,5 +1,5 @@
 // cli-main.mjs — heimdall CLI dispatch. Thin wrappers over existing scripts.
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
@@ -130,10 +130,6 @@ function runDoctor() {
   return sh(BIN("kb-health.sh"), []);
 }
 
-function configPath() {
-  return join(os.homedir(), ".heimdall", "config.json");
-}
-
 function writeConfig(harness) {
   mkdirSync(dirname(configPath()), { recursive: true });
   const cfg = existsSync(configPath())
@@ -144,18 +140,17 @@ function writeConfig(harness) {
 }
 
 import { installAdapter, detectHarnesses, KNOWN_HARNESSES } from "./adapters.mjs";
-const adaptersModule = () => ({ installAdapter, detectHarnesses, KNOWN_HARNESSES });
+import { configPath } from "./depth.mjs";
 
 function runInit(args) {
   if (args.includes("--detect")) {
-    const { detectHarnesses } = adaptersModule();
     const found = detectHarnesses();
     console.log(found.length ? found.join("\n") : "(no harness configs found)");
     return 0;
   }
   const i = args.indexOf("--harness");
   const harness = i >= 0 ? args[i + 1] : "pi";
-  const valid = [...adaptersModule().KNOWN_HARNESSES, "all"];
+  const valid = [...KNOWN_HARNESSES, "all"];
   if (!valid.includes(harness)) {
     console.error(`invalid --harness ${harness} (choose: ${valid.join("|")})`);
     return 1;
@@ -343,7 +338,6 @@ async function runIngestEmail(args) {
   const limit = Number(get("--limit", "50"));
   const root = resolve(process.cwd(), expandPath(get("--root", join("Repos", "email-archive"))));
   const { ingestEmail, EMAIL_CLI } = await import("./ingest-email.mjs");
-  const { spawnSync } = await import("node:child_process");
   // Read-only boundary: only list/show ever reach cli-email.
   const run = (sub, subArgs) => {
     const r = spawnSync(EMAIL_CLI, [sub, ...subArgs], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });

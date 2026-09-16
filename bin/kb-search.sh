@@ -67,7 +67,6 @@ for r in (data.get("results") or []):
         path = next((tok for tok in content.replace('"', ' ').split()
                      if tok.startswith("~/") or tok.startswith("/Users/") or tok.startswith("/home/")), "")
         results.append({
-            "id_hex": f"mnemo-{r.get('id', '?')}",
             "title": content[:120],
             "score": float(r.get("score", 0)),
             "body": f"memory [{path or 'no-path'}] {content}",
@@ -103,11 +102,10 @@ if [ "$BACKEND" = "mnemosyne" ]; then
 	run_mnemosyne
 fi
 
-# (No legacy verifier wiring here. kb_search_verify.py is retained as history —
-# it targeted the retired global `graft retrieve` daemon API — and the wrapper
-# that would have invoked it had no callers, so it was dead code. Both backends
-# above compute their own verdicts; its STRONG is a separate content-heuristic
-# and is not what search emits.)
+# (No legacy verifier wiring here. The `kb_search_verify.py` graft-retrieve CLI
+# targeted the retired global `graft retrieve` daemon API and had no callers, so
+# it was deleted; only its extract_paths() helper survives, for the stale scan.
+# Both backends above compute their own verdicts in-process.)
 echo "== retrieve (per-repo graft + global semantic): $Q"
 if [ ! -x "$GRAFT" ]; then
 	# Not a tool failure: a fresh/unconfigured machine has validly zero results.
@@ -143,7 +141,7 @@ if [ ${#REPO_LIST[@]} -eq 0 ] && [ -z "${SCOPE:-}" ]; then
 fi
 
 # Merge JSON hits from every repo into one JSON array shaped like graft
-# retrieve results: {result:{results:[{title,score,id_hex}]}} with paths.
+# results: dicts of {title,score,body,path} with paths.
 # PLUS global semantic hits from embed-index.py.
 # SCOPE-AWARE ROOT EXPANSION: --scope poker must also search non-Repos roots
 # whose path contains 'poker' (e.g. ~/poker-bot). Roots persisted by
@@ -201,7 +199,6 @@ def ask_repo(repo):
             fname = pointer.split(":")[0]
             full = os.path.join(repo, fname)
             hits.append({
-                "id_hex": f"graft-{repo}-{pointer}",
                 "title": h.get("title", ""),
                 "score": float(h.get("score", 0)),
                 "body": f"{h.get('snippet','')} [{full}]",
@@ -251,7 +248,6 @@ if os.path.exists(venv_py) and os.path.exists(os.path.expanduser("~/.heimdall/gl
             title = title.replace("·related", "").strip()
             if is_related:
                 results.append({
-                    "id_hex": f"sem-{full}",
                     "title": title,
                     "score": -5.0,  # structural siblings rank below semantic+lexical
                     "body": f"related file [{full}]",
@@ -260,7 +256,6 @@ if os.path.exists(venv_py) and os.path.exists(os.path.expanduser("~/.heimdall/gl
                 })
             else:
                 results.append({
-                    "id_hex": f"sem-{full}",
                     "title": title,
                     "score": float(score_s) + 3.0,  # semantic scores are tiny; offset so they rank above lexical
                     "body": f"semantic hit [{full}]",

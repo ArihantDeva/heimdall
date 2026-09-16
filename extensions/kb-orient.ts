@@ -22,7 +22,7 @@ const run = (cmd: string, args: string[], timeoutMs = 8_000): Promise<string> =>
 
 /** Compact one retrieve/explore result: score, title. */
 const formatHit = (r: Record<string, unknown>): string => {
-	const title = String(r.title ?? r.id_hex ?? "?");
+	const title = String(r.title ?? "?");
 	const score = r.score != null ? ` [${Number(r.score).toFixed(2)}]` : "";
 	return `${title}${score}`;
 };

@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -62,4 +62,31 @@ test("contract: init is idempotent — twice into temp HOME, no error", () => {
   assert.ok(second.includes("already") || second.includes("ok"), "second init idempotent");
   const cfg = JSON.parse(readFileSync(join(home, ".heimdall", "config.json"), "utf8"));
   assert.equal(cfg.harness, "pi");
+});
+
+// The agent tier (`memory.tier`) was removed as a dormant capability. A user
+// config that still carries the key must keep loading: the config loader is
+// tolerant by construction (JSON.parse + catch), so unknown keys are ignored
+// rather than rejected. Missing file, malformed JSON, and a stale tier key all
+// resolve; nothing hard-fails.
+test("contract: a stale memory.tier config still loads (no hard failure)", async () => {
+  const home = mkdtempSync(join(tmpdir(), "heimdall-tier-cfg-"));
+  try {
+    mkdirSync(join(home, ".heimdall"), { recursive: true });
+    writeFileSync(join(home, ".heimdall", "config.json"),
+      JSON.stringify({ version: 1, memory: { tier: "agent" }, backend: "graft" }));
+    const env = { ...process.env, HOME: home };
+    // init rewrites the config through the same loader the daemon uses: a
+    // rejected key would surface as a crashed command here.
+    const initOut = run(["init", "--harness", "pi"], { env });
+    assert.ok(initOut.includes("pi"), initOut);
+    // depth resolves a config carrying the removed key rather than throwing.
+    const depthOut = run(["depth", home], { env });
+    assert.match(depthOut, /requested:/, depthOut);
+    const { loadConfig } = await import("../bin/lib/depth.mjs");
+    assert.deepEqual(loadConfig(join(home, ".heimdall", "config.json")).memory,
+      { tier: "agent" }, "unknown keys must pass through untouched");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });

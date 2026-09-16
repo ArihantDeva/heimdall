@@ -21,7 +21,7 @@ export const WEIGHTS = Object.freeze({ error: 10, warning: 3, info: 1 });
 // why-pattern → count bucket, first match wins. Order matters: "missing"
 // must outrank the gentler patterns, and unknown future whys fall through to
 // infos so a taxonomy gap degrades the score gently instead of crashing it.
-export const WHY_SEVERITY = Object.freeze([
+const WHY_SEVERITY = Object.freeze([
   [/\bmissing\b/, "errors"], // indexed path gone — retrieval lies
   [/\breappeared\b/, "warnings"], // recorded-absent content came back
   [/\bhash\b/, "warnings"], // silent same-size/same-mtime rewrite

@@ -22,7 +22,6 @@ for (let i = 0; i < args.length; i++) {
 }
 if (!file && !dir) fail("missing --file <path> or --dir <path>");
 
-const { } = {};
 // Batch mode: --dir processes every file in one node invocation (fast ingest).
 // extractFacts is a pure function of (bytes, path), so batching is parity-safe.
 // The bench writes sessions under <root>/<qid>/session_*.md, so scan one level

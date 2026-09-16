@@ -1,0 +1,119 @@
+# Maximum Bloat Reduction — Execution Plan (condensed)
+
+**Status:** instructions for a future execution session — **not new approval**. Derivative of spec `docs/superpowers/specs/2026-09-16-maximum-bloat-reduction-design.md` (sha256 `4042921f0fbac019bdc94ada319e418f8425a81dc39839206252599839c33e55`, 7516 B). Approved scope is unchanged; only sequencing, metric, and verification corrections are folded in. This document changes nothing: no code, test, or config edits, no commit.
+
+**Goal:** delete every evidence-backed unused slice (dead internals, approved dormant capabilities, orphan assets/generators, dangling symlink, redundant manifests), reconcile package/ignore/docs, and produce a reproducible before/after reduction report with zero open HIGH review findings.
+
+**Invariants:** preserve active CLI, setup/install, search and trust-verdict behavior, hook/guard behavior, journal/reconciliation semantics, package output, security, data safety, crash safety, atomic-write/locking/order semantics, public formats, and every documented interface not explicitly approved for deletion. A newly discovered live consumer blocks that cut: stop, report, replan — never force an LOC target.
+
+**Safety:** never delete untracked or ignored data (`bench/runs`, `bench/data`, `target/`, vendored builds/models, caches). `git rm` tracked paths only. No push, merge, release, publish, deployed-config change, or destructive history operation (`git reset --hard`, `git worktree remove --force`) without explicit approval. No automatic merge of lane branches. Rollback is `git revert <sha>` at commit granularity on an isolated, unpushed branch. Ask first for: a newly discovered public/documented capability outside the approved Rust / agent-tier / `kb-verify.sh` groups, untracked/user-data deletion, or any capability whose caller proof is weak.
+
+**Peer-owned, untouched by every lane:** `tests/improvement-eval.test.mjs` and `bench/improvement/**` belong to a peer session. Never create, edit, delete, or re-scan them, and never treat their absence as a failure. Check presence only with `git ls-files tests/improvement-eval.test.mjs bench/improvement` — no filesystem walks.
+
+## Mandatory bootstrap (runs before any test or cut)
+
+1. **Freeze the execution base after a clean-tree check.** The historical `c16b91f8b57408266f7f7116a4e1f5b922a32e21` is context, **not** the execution base. In the primary tree, require `git status --porcelain` empty and `git rev-parse HEAD` on the intended branch, then use that HEAD as `BASE` for every worktree. Never rebase or reset to reach it; if HEAD moved unexpectedly, stop and report.
+2. **Toolchain, mise-first, no new package scripts.** `mise install`; install CI-parity deps with `HEIMDALL_NO_BUILD=1 npm ci || npm install`. Never add or edit `package.json` scripts for any lane (mise tasks `test`, `typecheck`, `bench-test`, `embed-index-test` are the only runners). Never `npx` a tool that mise already provides for the same job (`mise run typecheck` over `npx tsc`).
+3. **Canonical gates at the frozen base.** `mise run test` and `mise run typecheck` must both run green and their output must be recorded verbatim before cutting. Treat any pre-existing failure as a blocker to report, not as background noise.
+4. **Focused and full suites.** Each lane declares its focused suites (below); run them at the frozen base, then run `mise run test` (full) once per lane before its first cut. Focused-suite result without a green full run is not evidence.
+5. **Affected fallback.** If a focused suite cannot run (daemon absent, tree-sitter python missing, graftd binary absent, L3 self-skip), fall back to the full `mise run test` for the affected area, and if that also skips, record the gate as `not-verified` with the reason. Never promote a skip to a pass, and never assume green from a cached earlier run.
+6. **No-cache policy.** Fresh `HEIMDALL_NO_BUILD=1 npm ci || npm install` at bootstrap; no reuse of prior `npm test` output, prior pack JSON, prior metric files, or stale worktree state (`heimdall-c11` is dirty and off-limits). Every claimed-green gate is a run made against the SHA being reported.
+7. **Safe parallelism.** Only the lane map below runs concurrently. One writer per worktree; no two commands mutate the same tree at once; resource-heavy daemon/tree-sitter suites are serialized per machine, not fanned out. Lane worktrees live at `/Users/arihantdeva/.pi/worktrees/heimdall-bloat-<lane>`, branches `bloat/<lane>`; the primary tree is never written by a lane.
+8. **GitHub workflow parity.** Mirror `.github/workflows/ci.yml`: Node 22, `HEIMDALL_NO_BUILD=1 npm ci || npm install`, `npm test`, `npm run typecheck`, macOS primary (Linux leg and the tree-sitter `HEIMDALL_PYTHON` venv exist for parity checks). CI intentionally has no bench job — bench runs locally via `mise run bench-test` / `mise run embed-index-test`.
+9. **Audit gaps explicitly.** Maintain a gate table in the run report: gate → `verified` (command + output ref) / `skipped` (reason) / `not-verified`. Any gap is named; nothing is assumed green because CI or a previous session said so.
+
+## Metrics (identical commands before and after, immutable files)
+
+Counts come from git objects only — `git ls-tree`/`git ls-files`/`git cat-file` — never a filesystem walk and never a symlink target. Local-disk-only content is never counted as repository reduction.
+
+```bash
+STATE=~/.pi/worktrees/heimdall-bloat-state    # outside the repo; nothing metric-related is committed
+mkdir -p "$STATE"
+capture() {  # $1 = output path; run inside the frozen tree; refuses to overwrite an existing file
+  out=$1
+  L() { git grep -c '' HEAD -- "$@" 2>/dev/null | awk -F: '{s+=$NF} END {print s+0}'; }   # lines from git blobs
+  F() { git ls-files -- "$@" | wc -l | tr -d ' '; }
+  B() { git ls-tree -r -l HEAD -- "$@" | awk '{s+=$4} END {print s+0}'; }
+  EX=':(exclude)rs/heimdall-embed/model/ :(exclude)bench/tests/ :(exclude)bench/runs/ :(exclude)bench/data/ :(exclude)*.test.mjs :(exclude)*.test.ts :(exclude)test_*.py :(exclude)*_test.py :(exclude)*/fixtures/*'
+  PK=$(npm pack --dry-run --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s)[0];console.log(j.entryCount,j.size,j.unpackedSize)})')
+  TS=$(mise run test 2>&1 | rg -o 'pass [0-9]+' | tail -1 | awk '{print $2}')   # node --test prints `# pass N` or `ℹ pass N`
+  DEP=$(git show HEAD:package.json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const p=JSON.parse(s);console.log(Object.keys(p.dependencies||{}).length,Object.keys(p.devDependencies||{}).length)})')
+  set -- $PK; e=$1; pb=$2; ub=$3
+  set -- $DEP; rt=$1; dv=$2
+  ( set -o noclobber; printf '{"sha":"%s","M1_files":%s,"M2_bytes":%s,"M3_lines":%s,"M4_maintained_lines":%s,"M5_tests_lines":%s,"M6_vendor_lines":%s,"M7_pack_entries":%s,"M7_pack_bytes":%s,"M7_unpacked_bytes":%s,"M8_runtime_deps":%s,"M8_dev_deps":%s,"M9_tests_pass":%s}\n' \
+      "$(git rev-parse HEAD)" "$(F)" "$(B)" "$(L)" "$(L bin/ extensions/ types/ rs/ bench/ docs/ $EX)" "$(L tests/ bench/tests/)" "$(L vendor/)" "$e" "$pb" "$ub" "$rt" "$dv" "$TS" > "$out" ) \
+    || { echo "REFUSING: $out exists — capture files are immutable"; return 1; }
+  cat "$out"
+}
+capture "$STATE/metrics-before.json"    # once, at the frozen base, after the clean-tree check
+capture "$STATE/metrics-after.json"     # once, at the final SHA; before.json is never rewritten or reused as output
+```
+
+- `M4` (maintained source lines) is the approved boundary: tracked non-vendor code under `bin/ extensions/ types/ rs/ bench/ docs/`, excluding generated model data, fixtures, and test files. `M5` (tests) is reported separately and never folded into `M4`. `M6` is vendored lines. Generated text = `M3 − M4 − M5 − M6`.
+- `M3 − M4` must stay positive; a negative or zero delta means the exclusion filter is broken — fix the pathspec before recording anything.
+- Report maintained / tests / generated / vendor / local-disk measures separately, plus tracked files, tracked bytes, dependency counts, npm pack contents and bytes, and deletions per lane (`git diff --shortstat "$BASE..bloat/<lane>"` per lane).
+- Known, accepted measurement ceilings (state them in the report): `git grep -c ''` counts newlines per blob, so a file lacking a trailing newline undercounts by one and binary or CRLF content is counted by git's rules; `git ls-tree -r -l` reports blob sizes, so `M2` is git content bytes rather than working-tree bytes; `npm pack` and the test-count run read the working tree and are the only non-git-object measures. `git grep` skips binaries and yields nothing for `M4` if the pathspec form is unsupported — if `M4` is `0`, fix the pathspec, do not record it.
+- If the peer's `bench/improvement/**` files land between the two captures, say so in the report instead of silently attributing the delta to this plan.
+
+## Lane protocol (applies to every lane; not repeated below)
+
+- Caller scan per candidate, at the lane's current SHA, before deleting:
+  ```bash
+  rg --no-ignore -n "<symbol-or-path>" bin extensions tests types bench docs README.md AGENTS.md CHANGELOG.md CONTRIBUTING.md mise.toml .github package.json config launchd demo.tape | rg -v '^docs/superpowers/|^bench/(runs|data)/'
+  ```
+- Delete condition is **zero live execution consumers** — no runtime import, no script/package/launchd/CI invocation, no dynamic or template-emitted reference, no `files[]` entry — not zero textual hits. Enumerate and classify every textual hit `keep | rewrite | delete` in the lane report; a hit that is an unexplained live consumer means STOP and replan.
+- Deletions use `git rm` on tracked paths only. Do not remove ignored/untracked paths, do not follow or delete symlink targets, do not touch `docs/superpowers/**` history.
+- Lane close = focused suites pass with 0 failures + `mise exec -- git diff --check` silent + one commit `refactor(<lane>): …` + a lane report (hit classifications, focused test counts before/after, frozen sweep list where applicable, skipped items and reasons). A lane that cuts nothing closes with `no cut: <reason>` and no commit.
+- Base SHA is defined inline in every standalone block (`BASE=$(git rev-parse HEAD)` frozen at bootstrap, or the literal recorded SHA); no block depends on shell state from an earlier step.
+
+## Lane map (exclusive ownership; no two concurrent writers touch the same file)
+
+| Lane | Worktree / branch | Owns these paths only | Depends on |
+|---|---|---|---|
+| A1 | `heimdall-bloat-a1` / `bloat/a1-verify-dead-path` | `bin/kb_search_verify.py`, `tests/kb-verify.test.mjs` | — |
+| A2 | `heimdall-bloat-a2` / `bloat/a2-dead-exports` | `bin/lib/enforcement-rules.mjs`, `bin/lib/facts-cli.mjs`, plus zero-caller sweep over `bin/lib/{depth,sink,hints,extract,lock,facts,health-score,index-bootstrap,ingest-email,mcp-server}.mjs` — must exclude every D-owned file | — |
+| B1 | `heimdall-bloat-b1` / `bloat/b1-rust-workspace` | `Cargo.toml`, `Cargo.lock`, `.cargo/config.toml`, `rs/**`, `mise.toml`, `README.md`, `docs/setup.md`, `CHANGELOG.md` | — |
+| B2 | `heimdall-bloat-b2` / `bloat/b2-agent-tier` | `bin/lib/tier.mjs`, `bin/lib/agent-memory.mjs`, `tests/tier.test.mjs`, `config/heimdall.yaml.example`, `docs/adapters.md` | — |
+| B3 | `heimdall-bloat-b3` / `bloat/b3-kb-verify` | `bin/kb-verify.sh`, `tests/kbverify_insert_probe.py` | peer portable-eval evidence (see B3) |
+| E1 | `heimdall-bloat-e1` / `bloat/e1-orphans` | `bin/render-explainer.py`, `docs/render-{comparison,infrastructure,demo-video}.py`, `assets/explainer.png`, `docs/heimdall-comparison.png`, `docs/heimdall-infrastructure.png`, `docs/heimdall-demo.mp4`, `kernels` | — |
+| C | `heimdall-bloat-c` / `bloat/c-guard-dedup` | `extensions/kb-search-guard.ts`, `extensions/lib/kb-guard-core.mjs`, `extensions/lib/kb-guard-core.d.mts` (delete only if typecheck still passes), `tests/guard.test.mjs` | — |
+| D | `heimdall-bloat-d` / `bloat/d-hotspots` | `bin/lib/{setup,cli-main,journal,graft-build,adapters,reconcile}.mjs`, `bin/kb-search.sh` | A2's frozen sweep list (must name none of these files) |
+| E2 | `heimdall-bloat-e2` / `bloat/e2-manifests` | `package.json`, `.gitignore`, `AGENTS.md` | **all cutting lanes**: A1, A2, B1, B2, B3, E1, C, D |
+
+Concurrency: A1, A2, B1, B2, E1, C run concurrently. B3 runs only once its gate is satisfied. D starts only after A2 records its frozen sweep list. E2 runs last and serially, and repeats once after D so the final tree is reconciled against every lane. Merging is a separate, explicitly approved step — lanes never merge themselves.
+
+## Lanes
+
+**A1 — dead `kb_search_verify.py` execution path.** Delete the CLI path only: `STOP`/`toks()`, `get_node()`, `GRAFT`, `handle_stale()`, `freshness_token()`, `content_score()`, `main()` and its `__main__` tail; narrow the import line to what remains. **`extract_paths` stays live in full** (consumed by `bin/kb-stale-scan.py`, including the brace-group and space-extension logic) and `HOME`/`_HOME_ABS`/`HOME_RE` stay; delete the `sqlite3` import with its last user, and rewrite the module docstring to "path extraction for stale-node rehoming". Delete the `tests/kb-verify.test.mjs` helpers and tests that exclusively cover the removed CLI path; keep the `extract_paths` test. Focused: `mise exec -- python3 -m py_compile bin/kb-stale-scan.py`, an `extract_paths` import smoke, an `assert not hasattr(m,'main')`, and `mise exec -- node --test tests/kb-verify.test.mjs`.
+
+**A2 — dead exports, empty statement, zero-caller sweep.** Delete `claudeHooksFragment` and `assetsDir` from `bin/lib/enforcement-rules.mjs` with their now-unused `node:path`/`node:url` imports and the doc sentence claiming adapters embed a per-harness mapping; delete the `const { } = {}` empty statement in `bin/lib/facts-cli.mjs` (live, consumed by `bench/ingest.py`). Sweep the ten named library files for symbols with zero callers outside their own file and outside `docs/superpowers/**`; **freeze and record that sweep target list in the lane report before D starts**, and confirm it names none of the seven D-owned files. Forcing a cut is forbidden — record `no cut` per file that yields nothing. Focused: `mise exec -- node --test tests/adapters.test.mjs tests/adapters-mcp-entry.test.mjs tests/init.test.mjs tests/init-e2e.test.mjs tests/cli-contract.test.mjs tests/graft-build.test.mjs tests/health-score.test.mjs tests/index-bootstrap.test.mjs tests/ingest-email.test.mjs tests/mcp-server.test.mjs`, plus an `enforcement-rules` export-surface check (`ruleBlock`, `RULES_VERSION` only) and a `facts-cli.mjs` smoke run.
+
+**B1 — Rust search/embed workspace.** Delete `Cargo.toml`, `Cargo.lock`, `.cargo/config.toml`, `rs/**` (including tracked `rs/heimdall-embed/model/**` generated artifacts), then remove only the Rust lines from `mise.toml`, `README.md`, `docs/setup.md`, `CHANGELOG.md` — keep every Node/Bun/Python task and strip only the Rust step of a mixed task. Any executable, packaged, dynamic, or template consumer of the Rust workspace inside `bin/`, `extensions/`, `tests/`, `bench/`, `.github/`, or `package.json` blocks the deletion (STOP). Leave ignored/local `target/` and model artifacts on disk. Focused + full: `mise run test`, `mise run typecheck`, zero-reference scan, `git diff --check`.
+
+**B2 — parked agent tier.** Characterize first: write the smallest test (extend the closest existing file, no new harness) that pushes a `memory.tier` config through the same setup/CLI validation path and records the current outcome. If removing the documented key would make an existing user config a hard parse/validation failure, keep tolerant handling or STOP and replan. Then `git rm` `bin/lib/tier.mjs`, `bin/lib/agent-memory.mjs`, `tests/tier.test.mjs` and delete only the tier lines from `config/heimdall.yaml.example` (rest of the `memory:` block stays) and `docs/adapters.md`. No shim, no deprecation stub. Record the deleted test count by counting `test(` declarations in the file **before** deletion — never a remembered figure. Focused + full: `mise run test`, `mise run typecheck`, zero-reference scan.
+
+**B3 — zero-caller `kb-verify.sh` (gated).** This deletion waits for the peer's portable-eval evidence at `tests/improvement-eval.test.mjs` / `bench/improvement/**`; those paths are peer-owned and untouched. Confirm the evidence exists and reports the equivalent coverage, then re-run the caller scan for `kb-verify\.sh|kbverify_insert_probe` (any invocation from launchd, `.github`, `mise.toml`, another script, or a template/package reference blocks the cut) and re-read `.github/workflows/ci.yml` to confirm the script's `~/.heimdall/venv` dependency never entered CI before claiming no CI change is needed. If the evidence is absent or inconclusive, park the lane, change nothing, and report `B3 blocked: awaiting peer portable eval`. Focused: `mise exec -- node --test tests/` and `git diff --check`.
+
+**E1 — orphan generators/assets and the dangling `kernels` symlink.** Per-artifact reader scan first. Delete `bin/render-explainer.py`, `docs/render-comparison.py`, `docs/render-infrastructure.py`, `docs/render-demo-video.py`, `assets/explainer.png`, `docs/heimdall-comparison.png`, `docs/heimdall-infrastructure.png`, `docs/heimdall-demo.mp4`, and the tracked dangling symlink `kernels` (`git rm` the link only; never `rm -rf` the `/tmp` target). **Keep** `bin/render-demo.py`, `demo.tape`, `assets/demo.gif`, `docs/heimdall_compare.dot`, `docs/heimdall_compare.png` — live readers exist; note the `heimdall_compare.*` (underscore, live) vs `heimdall-comparison.*` (hyphen, orphan) trap. If no tracked `examples/**` files exist, record the approved "obsolete examples" item as vacuous and change nothing. Focused + full: existence checks for the kept assets, zero-reference scan, `mise run test`, `git diff --check`.
+
+**C — guard dedup, gated on characterized behavior.** Map both files first; if they share no decision logic (only types/config), close with `no cut: no shared decision logic`. Otherwise characterize tool vocabulary, escalation thresholds, and reset behavior against `extensions/lib/kb-guard-core.mjs` exports with three added tests in `tests/guard.test.mjs`, then prove sensitivity by flipping one asserted constant (record the failure output), restoring it, and re-running green. Dedup only if the combined `wc -l` of the extension and core module is net-negative; if not, `git checkout -- .` and skip. Re-verify identical guard assertions, full suite, typecheck, and that `extensions/lib/kb-guard-core.mjs` still ships in the tarball (extensions import it at runtime); delete `kb-guard-core.d.mts` only if typecheck still passes, otherwise restore it.
+
+**D — hotspot audits (skip unless net-negative).** Start only after A2's frozen sweep list is recorded and verified to exclude all seven D-owned files. Inventory symbols per file, caller-map each candidate, and cut only zero-caller internals (outside the defining file and `docs/superpowers/**`) or inline copies replaceable by an already-tested sibling helper. No new abstraction, files, renamed exports, or signature changes. Per file: if maintained LOC did not go down, `git checkout -- <file>` and record `skip`. Focused: `mise exec -- node --test tests/setup.test.mjs tests/init.test.mjs tests/init-e2e.test.mjs tests/e2e-fixture.test.mjs tests/cli-contract.test.mjs tests/reconcile.test.mjs tests/edge-matrix.test.mjs tests/c11-observability.test.mjs tests/insert-retention.test.mjs tests/facts.test.mjs tests/fact-history.test.mjs tests/health-score.test.mjs tests/graft-build.test.mjs tests/graftd-binary.test.mjs tests/adapters.test.mjs tests/kb-search.test.mjs tests/kb-search-identity.test.mjs`, `bash -n bin/kb-search.sh`, `git diff --check`, commit one file at a time. Any behavior change is a behavior change: characterization test first, recorded failure, then the minimal edit.
+
+**E2 — package, ignore, and docs reconciliation (serialized, last).** After **all** cutting lanes (A1, A2, B1, B2, B3, E1, C, D) are committed and reviewed, re-scan for now-dangling references, then: delete only the `.gitignore` blocks whose covered paths no longer exist (keep `vendor/graft/**`, `/graft/`, `*.tgz`, `.pi-subagents/`, `node_modules/`); remove a `package.json` `files[]` entry only if the path it protects exists nowhere in the tree (keep `!bin/render-demo.py` — its target is intentionally kept and intentionally unpacked — and confirm the guard core module still ships); update only the `AGENTS.md` rows that name deleted paths, without restructuring. Verify with `npm pack --dry-run --json` (no deleted path, guard core present, entries recorded), `mise run test`, `mise run typecheck`, `git diff --check`. Repeat the whole task once after D if D landed later, recording the SHA it ran against. Removing an ignore rule never licenses deleting the ignored files.
+
+## Integration, final checks, and reviews
+
+1. **Integration is approval-gated.** Merging lane branches into an integration worktree, and any push/release/publish, requires explicit approval; do not merge automatically. Until approved, each lane stands alone with its own green gates.
+2. **Final consumer checks** at the frozen integration SHA: the whole-repo scan for every removed symbol/path (expect zero live refs; `docs/superpowers/**` and `bench/runs|data` excluded by construction and stated as such), template/dynamic checks (template-emitted `HeimdallPlugin` text stays live, `node bin/heimdall.js --help`, `bash -n` over `bin/*.sh`, `python3 -m py_compile` over `bin/**/*.py`), `npm pack --dry-run --json`, implicated Python/benchmark tests only if `git diff --name-only "$BASE..HEAD"` actually touches `bench/**`, and `bin/kb-health.sh` / `heimdall doctor` run or recorded as `not-verified` with the reason.
+3. **Three independent adversarial review passes**, each a fresh reviewer receiving raw evidence only — `git diff "$BASE..SHA"`, gate outputs, pack JSON, metric files — never another reviewer's verdict or reasoning. Severity scale: **HIGH** = invariant/public-behavior/data-safety break, missing live-caller proof, or failing required gate; **MEDIUM** = verification or process gap that could mask a defect; **LOW** = cosmetic/docs. Fix HIGH and accepted MEDIUM findings in the owning lane worktree and re-run every gate the fix affects; completion requires zero open HIGH, and a pass that raises HIGH is replaced by a fresh pass, not reused.
+4. **Final locked verification** on a frozen SHA with nothing uncommitted: `npm pack --dry-run`, `mise run test`, `mise run typecheck`, `git diff --check`, plus the coverage line `verified / checked-fine / not-checked`. The completion report carries FINAL_SHA, base SHA, per-lane deletions, the separated before/after metric table read from `metrics-before.json` / `metrics-after.json`, pack before/after, dependency counts, the three review dispositions, the audit-gap table, and the rollback path (`git revert` at commit granularity; nothing pushed, merged, or released).
+
+## Self-check
+
+- Scope, owned paths, dependencies, safety gates, verification, and the three independent reviews are preserved from the approved spec; only corrections are folded in.
+- No repeated command boilerplate: the caller scan, lane close, and metrics capture are each defined once.
+- `before.json` is written once at the frozen base and never overwritten; the historical `c16b91f` SHA is context only.
+- Maintained-source, tests, generated, vendor, and local-disk measures stay separate; counts come from git objects, not filesystem walks or symlink targets.
+- Live `extract_paths` and the `demo.gif` / `render-demo.py` / `heimdall_compare.{dot,png}` assets are preserved; ignored data is never deleted; peer-owned eval paths are untouched.
+- No TBD/TODO; every deletion names its scan and its stop condition; no candidate is promised against a failing caller check.

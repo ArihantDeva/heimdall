@@ -5,6 +5,11 @@
 // 4. interleaved read tool calls do NOT reset the chain
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createGuard, GREP_TOOLS, RESET_TOOLS } from "../extensions/lib/kb-guard-core.mjs";
 
 const t = (name, fn) => test(name, fn);
@@ -357,4 +362,102 @@ t("SCOPE10: realistic agent patterns — scoped repo search chains never warn", 
   assert.equal(g.note("bash", { command: "cd ~/x && rg --no-ignore foo" }), null);
   assert.equal(g.note("bash", { command: "cat f | grep x" }), null); // has path token f
   assert.equal(g.note("read", { path: "/a/b.ts" }), null);
+});
+
+
+// ── Lane C characterization (2026-09-16): pin the behavior the dedup question
+// turns on — the exact tool vocabulary on both sides, and the exact escalation
+// timing of the hook's chain>=3 / chain>=9 ladder. ──────────────────────────
+
+
+
+const HOOK = join(dirname(dirname(fileURLToPath(import.meta.url))), "bin", "heimdall-hook.mjs");
+
+/** The hook is a one-shot CLI: one spawn per event, sharing a session id so its
+ * chain file accumulates. It keys that file off $HOME — so give each chain a
+ * temp HOME. Returns the per-event stdout ("" when the event printed nothing).
+ * ponytail: ~12 spawns per chain; a socket-mode daemon would be faster, but the
+ * hook contract IS process-per-event, so testing it any other way tests nothing. */
+function withTempHome(fn) {
+  const home = mkdtempSync(join(tmpdir(), "heimdall-guard-"));
+  const feed = (event) => {
+    const r = spawnSync(process.execPath, [HOOK], {
+      input: JSON.stringify(event),
+      encoding: "utf8",
+      env: { ...process.env, HOME: home, CLAUDE_SESSION_ID: "guard-test-lane-c" },
+      timeout: 60_000,
+    });
+    assert.equal(r.status, 0, r.stderr); // hook must never break the harness
+    return r.stdout.trim();
+  };
+  try {
+    return fn(feed);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+t("CHAR1: core vocabulary — GREP_TOOLS and RESET_TOOLS are exact sets", () => {
+  assert.deepEqual([...GREP_TOOLS].sort(), ["bash", "find", "grep", "ls", "read"]);
+  assert.deepEqual([...RESET_TOOLS].sort(), ["kb_search", "kb_sync"]);
+});
+
+t("CHAR2: hook vocabulary — bash-family counts and warns, Read/mcp reset, others ignored", () => {
+  withTempHome((hook) => {
+    assert.equal(hook({ tool_name: "Bash" }), ""); // chain 1
+    assert.equal(hook({ tool_name: "Grep" }), ""); // chain 2
+    assert.match(hook({ tool_name: "Bash" }), /kb_search/); // chain 3 → warn
+
+    // `read`/`Read` and the MCP kb_* names are RESET tools here (unlike the
+    // extension, where `read` counts as discovery).
+    hook({ tool_name: "Read" });
+    assert.equal(hook({ tool_name: "Bash" }), ""); // chain 1 after reset
+    assert.equal(hook({ tool_name: "Grep" }), ""); // chain 2 after reset
+    hook({ tool_name: "mcp__heimdall__kb_search" });
+    assert.equal(hook({ tool_name: "Bash" }), ""); // reset again — silent
+  });
+});
+
+t("CHAR3: hook escalation ladder — silent to 3, warn 3..8, deeper warning from 9", () => {
+  withTempHome((hook) => {
+    const out = Array.from({ length: 12 }, () => hook({ tool_name: "Bash" }));
+    const msg = (line) => JSON.parse(line).hookSpecificOutput.additionalContext;
+    for (let i = 0; i < 2; i++) assert.equal(out[i], "", `action ${i + 1} must be silent`);
+    for (let i = 2; i < 8; i++) {
+      assert.match(msg(out[i]), /^\[heimdall\] \d+ search actions without kb_search/);
+    }
+    for (let i = 8; i < 12; i++) {
+      assert.match(msg(out[i]), /^\[heimdall\] chain=\d+: you are deep in filesystem-discovery territory/);
+    }
+  });
+});
+
+t("CHAR4: core escalation timing is 3-warn / 4-escalate / 5-block (hook needs 9+)", () => {
+  const g = createGuard();
+  const kinds = [];
+  for (let i = 0; i < 6; i++) {
+    const v = g.note("read", {});
+    kinds.push(v === null ? "null" : typeof v === "string" ? (v.includes("⚠️") ? "warn" : "escalate") : "block");
+  }
+  assert.deepEqual(kinds, ["null", "null", "warn", "escalate", "block", "block"]);
+});
+
+t("CHAR5: hook is NOT scope-aware and has no pause — core is — so no shared ladder", () => {
+  withTempHome((hook) => {
+    // Scoped searches (explicit paths) count in the hook and warn at 3; the core
+    // treats the same commands as legitimate scoped work and stays silent.
+    const scoped = { tool_name: "Bash", command: "rg --no-ignore foo /repo/bin" };
+    assert.equal(hook(scoped), ""); // 1
+    assert.equal(hook(scoped), ""); // 2
+    assert.match(hook(scoped), /kb_search/); // 3 → hook fires
+    const g = createGuard();
+    assert.equal(g.note("bash", { command: "rg --no-ignore foo /repo/bin" }), null); // scoped → silent
+    assert.equal(g.note("bash", { command: "rg --no-ignore foo /repo/bin" }), null);
+    assert.equal(g.note("bash", { command: "rg --no-ignore foo /repo/bin" }), null);
+
+    // Hook's "read" is a RESET tool; core counts a pathless read as discovery.
+    assert.equal(g.note("read", {}), null); // 1 — counted, silent
+    // No pause surface on the hook: kb_guard_pause is an unknown tool → ignored.
+    assert.equal(hook({ tool_name: "kb_guard_pause" }), "");
+  });
 });

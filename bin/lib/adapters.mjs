@@ -13,7 +13,6 @@ import { ruleBlock, RULES_VERSION } from "./enforcement-rules.mjs";
 const HOME = () => os.homedir();
 
 const MARKER_OPEN = `<!-- heimdall:enforcement v${RULES_VERSION} -->`;
-const MARKER_CLOSE = "<!-- /heimdall:enforcement -->";
 
 function ensure(dir) {
 	mkdirSync(dir, { recursive: true });
@@ -62,7 +61,6 @@ function mergeJson(jsonPath, patch) {
 
 // adapters.mjs lives at <root>/bin/lib/ → lib=1×dirname, bin=2×, package root=3×.
 const HERE_LIB = dirname(fileURLToPath(import.meta.url));
-const pkgBinDir = () => dirname(HERE_LIB);
 const pkgRoot = () => dirname(dirname(HERE_LIB));
 
 /** Install bin/heimdall-hook.mjs as ~/.local/bin/heimdall-hook executable shim. */

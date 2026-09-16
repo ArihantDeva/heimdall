@@ -1,10 +1,7 @@
 // graft-build.mjs — build/probe/install the graftd C++ daemon.
 // ESM, node built-ins only. Must NOT import setup.mjs (setup.mjs imports this).
 import { spawnSync } from "node:child_process";
-import {
-  existsSync, mkdirSync, mkdtempSync, copyFileSync, renameSync, chmodSync,
-  unlinkSync, openSync, appendFileSync, writeSync, closeSync,
-} from "node:fs";
+import { existsSync, mkdirSync, copyFileSync, renameSync, chmodSync, unlinkSync, appendFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
