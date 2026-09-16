@@ -58,19 +58,31 @@ Test-count reconciliation, verified by running each file in both trees:
 
 ## Stack verification (bloat + parallel performance work)
 
-A separate session was developing speed/accuracy evaluation work on `fix/open-issues-11-15`
-concurrently. This campaign's branch was merged onto that branch's tip (`efa4942`) and the
-combined tree was gated, so the two efforts are known to compose:
+A separate session develops the speed/accuracy evaluation work on `fix/open-issues-11-15`
+concurrently. This campaign's branch was merged onto that branch's tip and the combined tree
+was gated, so the two efforts are known to compose.
 
-| Gate | Combined tree (`ec049b6`) |
+**Why this PR is stacked rather than based on `main`:** bloat depends on the fixes branch.
+Rebasing bloat directly onto `main` was attempted and **conflicts in `bin/kb-search.sh`**,
+because that file's current shape is produced by the fixes branch (#16) and the A1 lane edits it.
+Stacking is therefore a real dependency, not a convenience — and it means this PR cannot merge
+before the fixes branch lands.
+
+| Gate | Combined tree (`f76f59a`, on peer tip `ae11133`) |
 |---|---|
-| `npm test` | `ℹ tests 435`, `ℹ pass 434`, `ℹ fail 0`, rc 0 |
+| `npm test` | `ℹ tests 437`, `ℹ pass 436`, `ℹ fail 0`, rc 0 |
 | `npm run typecheck` | rc 0 |
 | `git diff --check` | silent |
-| `npm pack --dry-run --json` | 201 entries, 613,447 B; no deleted path present; guard core shipped |
+| `mise run verify:improvement` (peer's speed/accuracy gate) | rc 0 — `speed depth n=100 p50=106.0ms p95=114.8ms repeat-spread=1.00x`, `accuracy mrr=0.889`, `no regression against frozen baseline` |
+| `npm pack --dry-run --json` | 201 entries; no deleted path present; guard core shipped |
 
-The merge was conflict-free. Test totals differ between trees because the parallel branch adds
-its own suites (365 standalone vs 435 combined).
+The merge was conflict-free. The performance gate passing on the combined tree is the meaningful
+result: the bloat deletions do not regress the measured speed or accuracy the parallel branch
+is tracking. Test totals differ between trees because the parallel branch adds its own suites
+(365 standalone vs 437 combined).
+
+File-level overlap between this branch's own commits and the parallel branch is **empty** for the
+performance work itself; the only shared files come from the fixes branch this PR is stacked on.
 
 ## Adversarial reviews (fresh reviewers, raw evidence only)
 
