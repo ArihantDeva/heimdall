@@ -56,6 +56,22 @@ The −64,418 line figure is dominated by ~61k lines of **tracked generated toke
 Test-count reconciliation, verified by running each file in both trees:
 374 − 12 (`tests/tier.test.mjs` deleted whole) − 3 (content-verdict tests in `tests/kb-verify.test.mjs`; its 3 `extract_paths` tests kept) + 5 (new guard characterization tests) + 1 (`tests/init.test.mjs` stale-`memory.tier` config contract) = **365**.
 
+## Stack verification (bloat + parallel performance work)
+
+A separate session was developing speed/accuracy evaluation work on `fix/open-issues-11-15`
+concurrently. This campaign's branch was merged onto that branch's tip (`efa4942`) and the
+combined tree was gated, so the two efforts are known to compose:
+
+| Gate | Combined tree (`ec049b6`) |
+|---|---|
+| `npm test` | `ℹ tests 435`, `ℹ pass 434`, `ℹ fail 0`, rc 0 |
+| `npm run typecheck` | rc 0 |
+| `git diff --check` | silent |
+| `npm pack --dry-run --json` | 201 entries, 613,447 B; no deleted path present; guard core shipped |
+
+The merge was conflict-free. Test totals differ between trees because the parallel branch adds
+its own suites (365 standalone vs 435 combined).
+
 ## Adversarial reviews (fresh reviewers, raw evidence only)
 
 - **Pass 1 (bounded, 3 angles):** correctness, safety, simplicity — no HIGH, no MEDIUM defect. One real accounting error found in this report (test arithmetic) and one stale doc reference; both corrected.
