@@ -22,22 +22,15 @@ cost dominates, not the JS/Python boundary — no profile evidence supports it).
 
 ## Candidates
 
-### 1. Accuracy lane measures fixtures, not live retrieval — close this gap first
-The accuracy lane currently scores `bench/improvement/fixtures.mjs`, a frozen
-labeled set. That proves the scoring arithmetic and gate validity, **not** that
-real retrieval has improved. Until it exercises the real retrieval path, no
-accuracy claim about Heimdall is supported by this gate.
-- Measure: recall@k / nDCG / MRR over a pinned corpus with labels, retrieved
-  through the real path (`graft` + `kb-search.sh`, or the embed-index query path
-  the insert-probe uses).
-- Blocker: the live `graft` daemon is machine-local, and `bench/analysis.md`
-  records a CPU-only build crash after ~5 embeds. Start with the scratch-index
-  query path (proven portable in `tests/portable-coverage.test.mjs`), which
-  needs no daemon.
-- Note: `bench/` already has a LongMemEval harness with `cycle1` as a frozen
-  comparative subset — reuse it rather than building a second corpus.
+### 1. ~~Accuracy lane measures fixtures, not live retrieval~~ — DONE (101dae6)
+Closed. `bench/improvement/retrieval-lane.mjs` now scores real retrieval through
+`embed-index`'s `query()` in a scratch index: mrr 0.889, recall@1 0.889, n=9.
+Remaining gap, still open: this is a small synthetic corpus, not the real
+knowledge base, so it shows the lane works — not that product retrieval quality
+improved. Next real step is reusing `bench/`'s LongMemEval `cycle1` subset (a
+frozen comparative corpus with committed runs) through the same lane.
 
-### 2. `depth` probe is re-paid on every cold start
+### 2. `depth` probe is still re-paid on every cold start
 `capability()` caches in `_cachedCap`, process-lifetime only. Every CLI
 invocation re-runs the probe (measured ~54ms of the ~115ms `depth` call).
 - Measure: `depth` p50 with a warm cached capability signal.
@@ -84,7 +77,7 @@ portable assertions were ported to `tests/portable-coverage.test.mjs`.
 
 - Test counts and measurements in these notes are point-in-time observations,
   not invariants. Re-measure before quoting: the count moves with every landed
-  test (399 at `196d9ed`, 405 at `8c73441`).
+  test (399 at `196d9ed`, 405 at `8c73441`, 438 at `661eff4`).
 
 - Metric contract is fixed; do not redefine a metric to make a candidate pass.
 - One bounded change per cycle; profile before optimizing.

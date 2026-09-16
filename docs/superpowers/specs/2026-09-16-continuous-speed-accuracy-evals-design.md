@@ -81,15 +81,31 @@ Existing scratch-HOME precedent to follow: `tests/init-e2e.test.mjs` (mkdtemp HO
 
 Back-to-back cycles while Pi runs (user-chosen; no periodic timer). Local commits only — no push, PR, release, or publish. Scoped work on DeepSeek V4.1 Flash only (user-chosen, no fallback). Durable checkpoint: `.until-done/tasks.yaml` + raw artifacts under `/tmp/heimdall-improvement-20260916/` + kb memory entries.
 
+A cycle is: pick the top executable entry from `bench/improvement/BACKLOG.md` → profile → RED test → smallest change → measure against the frozen baseline → three independent adversarial reviews → local commit. A rejected experiment is recorded in BACKLOG.md with the measurement that rejected it. The backlog is the durable handoff: a future cycle starts there, not from memory of this one.
+
+Known limits of the mechanism, stated rather than implied: cycles run only while Pi runs (no daemon; nothing happens while the host sleeps), and the gate refuses to make speed claims on a loaded machine, so a busy host produces no speed progress — only accuracy and simplification progress.
+
+## What was actually measured (2026-09-16)
+
+| Claim | Evidence |
+|---|---|
+| Accuracy lane measures real retrieval | `mrr 0.889, recall@1 0.889, n=9` through `embed-index`'s `query()` in a scratch index (was `0.450` scoring literals) |
+| The accuracy lane can fail | validity test degrades the corpus and requires recall@1 `< 0.5`; it initially FAILED at 0.889 because ranking rode on descriptive filenames, which is how the `doc-NN.md` naming rule was found |
+| Speed improvement | capability() 2 python spawns → 1; paired hyperfine 148.1±10.3 → 114.6±7.4ms and 146.0±23.4 → 124.9±20.0ms |
+| Gate fails on degradation | exit 1 on degraded accuracy, degraded speed, workload mismatch, malformed artifacts, and noisy measurements; exit 0 on 3/3 consecutive clean runs |
+| Gate can compare across commits | fixed after review found `commit` in workload identity made every cross-commit comparison refuse |
+
+Not measured, and therefore not claimed: product retrieval quality on a real corpus (the lane proves a small scratch corpus is retrievable), any live-workflow latency (`kb_search`, reconcile, insert throughput), and any native-port benefit.
+
 ## Risks and rollback
 
 - Vendor `vendor/graft` FTS levers (from `bench/analysis.md`) change vendored code and interact with config keys (`rrf_k_const`, fused-gate thresholds) — requires its own approval, not part of this design's scope.
 - Graft CPU-only daemon crash blocks long runs; short-fixture evals must not depend on it.
-- Machine noise: performance comparisons only within one controlled machine, identical fixture and cache state.
+- Machine noise: performance comparisons only within one controlled machine, identical fixture and cache state. The gate enforces this by refusing to judge when repeats disagree by >1.25x (p50 and p95 checked separately).
 - Rollback: per-lane commits, no remote writes, revert via git.
 
-## Open items before RED
+## Resolved during implementation
 
-1. User runs `/until-done cancel`, then contract re-locks with the corrected verifyCommand.
-2. User reviews this design.
-3. Decision on the first optimization candidate (accuracy: vendor FTS OR-join — needs separate approval; speed: in-repo items measurable without vendor changes).
+1. ~~User runs `/until-done cancel`, then contract re-locks with the corrected verifyCommand.~~ Done — re-locked as `mise -C /Users/arihantdeva/Repos/heimdall run verify:improvement`.
+2. User reviewed and approved the eval-first approach.
+3. First optimization landed (capability probe); next candidates ranked in `bench/improvement/BACKLOG.md`.
