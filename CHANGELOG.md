@@ -1,18 +1,37 @@
 # Changelog
 
-## Unreleased
+## 0.11.0 — 2026-09-16
+
+Deletions, not features. Five fixes reported against 0.10.0 (each with a
+regression test that failed on 0.10.0 and passes now) plus a code-reduction
+pass. No published API is removed: everything deleted below was either
+unreachable, never shipped in the tarball, or duplicated.
 
 ### Removed
 
 - **Rust hybrid search/embed workspace** (`rs/heimdall-search`,
   `rs/heimdall-embed`, `Cargo.toml`/`Cargo.lock`/`.cargo/`, and the tracked
   generated tokenizer/model artifacts under `rs/heimdall-embed/model/`).
-  Nothing invoked the crates; retrieval is the per-repo graft + global-semantic
-  merge in `bin/kb-search.sh`. The 0.10.0 `--hybrid` CLI mode and the RRF
-  fusion described below are therefore no longer present in the tree.
+  Nothing invoked the crates, and `files[]` never shipped them — the
+  `--hybrid` mode and RRF fusion described under 0.10.0 lived only inside that
+  unpublished binary. Retrieval is the per-repo graft + global-semantic merge
+  in `bin/kb-search.sh`.
+- **Parked agent tier** (`bin/lib/tier.mjs`, `bin/lib/agent-memory.mjs`). No
+  runtime ever constructed the LLM the tier required, so the memory-variant
+  selection was unreachable. A config still carrying `memory.tier` keeps
+  loading (unknown keys pass through untouched); `tests/init.test.mjs` pins
+  that contract.
+- **Dead `kb_search_verify.py` CLI/verdict path** (~220 lines). Its
+  `extract_paths` helper stays live for `bin/kb-stale-scan.py`; the retired
+  graft-retrieve CLI it wrapped had no callers.
+- **Orphan generators and assets** — four zero-reader render scripts, three
+  unreferenced images, one unreferenced video, and a dangling `kernels`
+  symlink that pointed at a nonexistent `/tmp` path.
+- **Dead exports, unused imports, and indirection** across `bin/lib` and
+  `bin/kb-search.sh`, plus a redundant `extensions/lib/kb-guard-core.d.mts`.
 
-Five fixes reported against 0.10.0. Each has a regression test that failed on
-0.10.0 and passes now.
+Code reduction: **−3,148 maintained source lines (−22%)**, 27 fewer tracked
+files, −20.9% tracked bytes.
 
 ### Fixed
 
@@ -23,10 +42,10 @@ Five fixes reported against 0.10.0. Each has a regression test that failed on
   OpenCode. The MCP protocol tests missed it because they spawn
   `heimdall.js mcp` directly instead of launching the config the adapters
   write; `tests/adapters-mcp-entry.test.mjs` now does the latter. Existing
-  installations are repaired by re-running `heimdall init --harness <name>`:
-  the Codex writer now replaces its own TOML table rather than skipping it when
-  present, which previously left the broken args in place forever while the
-  other adapters overwrote theirs.
+  installations are repaired by re-running
+  `heimdall init --harness <name>`: the Codex writer now replaces its own TOML
+  table rather than skipping it when present, which previously left the broken
+  args in place forever while the other adapters overwrote theirs.
 - **The npm package could not do AST extraction.** `files[]` omitted
   `vendor/graphify/`, which `bin/lib/heimdall_extract.py` imports at runtime,
   so every installed copy silently settled at file depth. Related: `capability()`
