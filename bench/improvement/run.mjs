@@ -53,12 +53,33 @@ function cliEnv(home, python) {
  * only way to distinguish "your change is slower" from "your laptop is busy".
  */
 export function measureAnchor() {
-  const samples = Array.from({ length: 5 }, () => {
+  const samples = Array.from({ length: 15 }, () => {
     const started = process.hrtime.bigint();
     spawnSync(process.execPath, ["-e", ""], { stdio: "ignore", timeout: 30_000 });
     return Number(process.hrtime.bigint() - started) / 1e6;
   });
   return summarizeTimings(samples).p50;
+}
+
+/**
+ * The anchor is taken twice, before and after the target workload, and the
+ * LOWER of the two is used.
+ *
+ * Review finding: measuring it only at the end made the runner's own load part
+ * of the reading — 200+ spawned processes inflate bare-node startup, so an
+ * honest run could be refused (observed 37.9ms -> 66.4ms on unchanged code,
+ * while the target p50 ratio was 0.99x). Sample count was raised from 5 to 15
+ * for the same reason: 5 readings at load 15-30 spread 2.27x.
+ */
+export function measureAnchorPair() {
+  const before = measureAnchor();
+  return { before, after: null };
+}
+
+/** Complete an anchor pair by taking the quieter reading. */
+export function minAnchor(pair) {
+  const values = [pair?.before, pair?.after].filter((v) => typeof v === "number" && Number.isFinite(v));
+  return values.length ? Math.min(...values) : null;
 }
 
 function extractCapability(stdout) {
@@ -97,6 +118,10 @@ function timeOne(repo, home, proj, python) {
  */
 export function runSpeedWorkload({ repo, home, proj, reps = 5, samples = null, samples2 = null, python = DEFAULT_PYTHON }) {
   const fixed = samples !== null;
+  // Anchor BEFORE the target workload: measuring it only at the end made the
+  // runner's own 200+ spawned processes inflate the reading and refuse honest
+  // runs (review finding B3). The quieter of the two readings is used.
+  const anchorBefore = fixed ? null : measureAnchor();
   const measured = fixed ? samples : Array.from({ length: reps }, () => timeOne(repo, home, proj, python).ms);
   const distribution = summarizeTimings(measured);
   if (distribution.n === 0) throw new Error("speed workload produced no samples");
@@ -117,6 +142,7 @@ export function runSpeedWorkload({ repo, home, proj, reps = 5, samples = null, s
       ? true
       : Math.max(tailDisagreement, 1 / tailDisagreement) <= MAX_DISAGREEMENT;
   const capability = fixed ? "fixed-samples" : timeOne(repo, home, proj, python).capability;
+  const anchorAfter = fixed ? null : measureAnchor();
   return {
     command: "depth",
     distribution,
@@ -125,7 +151,8 @@ export function runSpeedWorkload({ repo, home, proj, reps = 5, samples = null, s
     speedReliable,
     tailDisagreement,
     tailReliable,
-    anchor: fixed ? null : measureAnchor(),
+    anchor: fixed ? null : minAnchor({ before: anchorBefore, after: anchorAfter }),
+    anchorReadings: fixed ? null : { before: anchorBefore, after: anchorAfter },
     capability,
     workload: {
       commit: gitCommit(repo),

@@ -62,6 +62,28 @@ function runCheck([label, cmd, args]) {
   return r.status === 0;
 }
 
+// Every reliability field the gate reads. Kept as one function so adding a new
+// field to runSpeedWorkload without forwarding it is a single-line change here
+// instead of a silent dead guard downstream.
+const RELIABILITY_FIELDS = [
+  "disagreement",
+  "speedReliable",
+  "tailDisagreement",
+  "tailReliable",
+  "anchor",
+  "anchorReadings",
+];
+
+function reliability(speed) {
+  const out = {};
+  for (const field of RELIABILITY_FIELDS) out[field] = speed[field];
+  const missing = RELIABILITY_FIELDS.filter((f) => out[f] === undefined);
+  if (missing.length) {
+    throw new Error(`speed workload did not report ${missing.join(", ")} — the gate would read undefined`);
+  }
+  return out;
+}
+
 function measure() {
   const home = mkdtempSync(join(tmpdir(), "heimdall-gate-"));
   const proj = join(home, "proj");
@@ -73,13 +95,12 @@ function measure() {
     return {
       workload: speed.workload,
       speed: { depth: speed.distribution },
-      // Reliability must travel with the measurement: without these fields the
-      // gate's noise check reads `undefined` and silently treats a polluted
-      // measurement as trustworthy (observed: load average 520 produced
-      // p50=169ms against a quiet-machine 116ms for identical code).
-      disagreement: speed.disagreement,
-      speedReliable: speed.speedReliable,
-      anchor: speed.anchor,
+      // Reliability must travel with the measurement. This used to be a hand-
+      // written list of fields, and review found `tailReliable`/`tailDisagreement`
+      // missing from it — the tail guard was dead code reading `undefined`
+      // (`speedReliable` had already been fixed by hand for the same reason).
+      // Spreading the measurement stops the next field from being forgotten.
+      ...reliability(speed),
       // Accuracy is measured on REAL retrieval (scratch index, real query
       // path), not on literals — review found the first version scored
       // hand-written arrays with zero product imports.

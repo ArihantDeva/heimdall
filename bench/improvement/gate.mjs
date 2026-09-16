@@ -8,11 +8,24 @@
 import { compareMetrics, sameWorkload } from "./eval.mjs";
 import { validateArtifact } from "./validate.mjs";
 import { SPEED_TOLERANCE, MAX_DISAGREEMENT, ANCHOR_TOLERANCE } from "./run.mjs";
+import { MIN_SAMPLES_FOR } from "./eval.mjs";
 
 /** Metrics the candidate must still report; a shrinking set is not a pass. */
 function missingKeys(baseline, candidate) {
+  const problems = [];
   const cand = candidate.accuracy ?? {};
-  return Object.keys(baseline.accuracy ?? {}).filter((key) => !(key in cand));
+  for (const key of Object.keys(baseline.accuracy ?? {})) {
+    if (!(key in cand)) problems.push(key);
+  }
+  // Speed cell names are part of the contract too: review found renaming the
+  // cell (`speed:{other:...}`) made the whole speed lane vanish from the
+  // comparison while the gate returned ok:true.
+  const baseCells = Object.keys(baseline.speed ?? {});
+  const candCells = Object.keys(candidate.speed ?? {});
+  for (const key of baseCells) {
+    if (!candCells.includes(key)) problems.push(`speed.${key}`);
+  }
+  return problems;
 }
 
 /**
@@ -76,16 +89,27 @@ function tailReasons(baseline, candidate) {
   const reasons = [];
   if (candidate.tailReliable === false) {
     const spread = typeof candidate.tailDisagreement === "number" ? `${candidate.tailDisagreement.toFixed(2)}x` : "unknown";
-    // Not a pass either: no tail claim can be made, and silently returning []
-    // would read as "tail is fine".
     return [`speed tail unmeasurable: repeat runs disagreed by ${spread} (max ${MAX_DISAGREEMENT}x) — no p95 claim is possible`];
   }
   for (const key of Object.keys(baseline.speed ?? {})) {
     const b = baseline.speed[key];
     const c = candidate.speed?.[key];
+    if (!c) continue;
+    // A null p95 is NOT a pass. Review finding B1: with n below the sample
+    // floor the p95 is null, the old code `continue`d past it, and an identical
+    // tail regression was refused at n=100 but accepted at n=20 — silently.
+    // If the baseline can state a tail and the candidate cannot, the candidate
+    // has not shown the tail is fine; that is a refusal, not a green.
+    if (typeof b.p95 === "number" && typeof c.p95 !== "number") {
+      reasons.push(
+        `speed tail unmeasurable for ${key}: baseline p95=${b.p95}ms but this run reported none ` +
+          `(n=${c.n}; a p95 needs >=${MIN_SAMPLES_FOR.p95} samples) — raise HEIMDALL_EVAL_REPS or report no tail claim`,
+      );
+      continue;
+    }
+    if (typeof b.p95 !== "number" || typeof c.p95 !== "number") continue;
     // Improving the median while making 1-in-20 calls far slower is not an
     // improvement; p95 gets the same tolerance as p50.
-    if (!c || typeof b.p95 !== "number" || typeof c.p95 !== "number") continue;
     if (c.p95 > b.p95 * SPEED_TOLERANCE) {
       reasons.push(
         `SPEED TAIL REGRESSION ${key}: p95 ${b.p95}ms -> ${c.p95}ms (threshold ${SPEED_TOLERANCE}x)`,
@@ -99,13 +123,22 @@ function tailReasons(baseline, candidate) {
  * Machine-load anchoring: refuses speed claims when the whole machine is slow.
  *
  * The baseline records a fixed anchor (bare node startup). If this run's anchor
- * is inflated beyond the same tolerance, the environment changed — every
- * latency number is suspect, including a suspiciously fast one.
+ * is inflated beyond the tolerance, the environment changed — every latency
+ * number is suspect, including a suspiciously fast one.
+ *
+ * A missing or non-numeric anchor on EITHER side is a refusal, not a skip:
+ * review found `NaN`/`0`/`-1`/`"999"`/absent all disabled the guard and returned
+ * ok:true, and the fast path is exactly where the anchor is easiest to break.
  */
 function anchorReasons(baseline, candidate) {
   const b = baseline.anchor;
   const c = candidate.anchor;
-  if (typeof b !== "number" || typeof c !== "number" || b <= 0) return [];
+  const usable = (v) => typeof v === "number" && Number.isFinite(v) && v > 0;
+  if (b === undefined && c === undefined) {
+    return ["no machine-load anchor recorded on either side — speed comparability is unproven"];
+  }
+  if (!usable(b)) return [`baseline anchor is not usable (${String(b)}) — no speed claim is possible`];
+  if (!usable(c)) return [`candidate anchor is not usable (${String(c)}) — no speed claim is possible`];
   if (c > b * ANCHOR_TOLERANCE) {
     return [
       `machine load changed: baseline anchor ${b.toFixed(1)}ms -> ${c.toFixed(1)}ms ` +

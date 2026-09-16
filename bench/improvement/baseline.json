@@ -1,6 +1,6 @@
 {
   "workload": {
-    "commit": "afc336e",
+    "commit": "c80145e",
     "corpus": "scratch-fixture",
     "env": "darwin",
     "cache": "cold",
@@ -9,14 +9,20 @@
   "speed": {
     "depth": {
       "n": 100,
-      "p50": 102.790208,
-      "p95": 143.23177354999999,
+      "p50": 115.334229,
+      "p95": 133.96021459999997,
       "p99": null
     }
   },
-  "disagreement": 0.9828270801825792,
+  "disagreement": 0.9665938287930117,
   "speedReliable": true,
-  "anchor": 37.859333,
+  "tailDisagreement": 0.9105911203877693,
+  "tailReliable": true,
+  "anchor": 42.827334,
+  "anchorReadings": {
+    "before": 42.827334,
+    "after": 43.736292
+  },
   "accuracy": {
     "mrr": 0.8888888888888888,
     "recall@1": 0.8888888888888888,

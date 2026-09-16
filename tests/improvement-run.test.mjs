@@ -35,15 +35,18 @@ const UNSTABLE = [1, 9, 4, 40, 2, 70, 1, 30, 3, 100];
 const THREE = UNSTABLE.slice(0, 3);
 
 const WL = { commit: "a", corpus: "c", env: "darwin", cache: "cold" };
-const ACC = { mrr: 0.5, "recall@1": 0.5, n: 6, labels: "sha256:aaaa" };
-const SPEED = { depth: { n: 20, p50: 100, p95: 150, p99: null } };
+const ACC = { mrr: 0.5, "recall@1": 0.5, n: 6, labels: "sha256:aaaa", perQuery: [] };
+// p95 is null: n=20 cannot support a tail claim (MIN_SAMPLES_FOR.p95 = 100), so
+// these fixtures model an honest small run rather than an impossible one.
+const SPEED = { depth: { n: 20, p50: 100, p95: null, p99: null } };
+const RELIABILITY = { anchor: 40, speedReliable: true, tailReliable: true, tailDisagreement: 1, disagreement: 1 };
 
 function candidate(extra) {
-  return { workload: WL, speed: SPEED, accuracy: ACC, capability: "graph", ...extra };
+  return { workload: WL, speed: SPEED, accuracy: ACC, capability: "graph", ...RELIABILITY, ...extra };
 }
 
 function baseline(extra) {
-  return { workload: WL, speed: SPEED, accuracy: ACC, capability: "graph", ...extra };
+  return { workload: WL, speed: SPEED, accuracy: ACC, capability: "graph", ...RELIABILITY, ...extra };
 }
 
 test("speed workload measures the real CLI in a scratch HOME", () => {
@@ -84,6 +87,7 @@ test("GATE PASSES on an intact workload (no false alarm)", () => {
     workload: { commit: "base", corpus: "fixture-v1", env: "darwin", cache: "cold" },
     speed: SPEED,
     capability: "graph",
+    ...RELIABILITY,
   };
   const verdict = gate(
     { ...shared, accuracy: ACC },
@@ -93,12 +97,9 @@ test("GATE PASSES on an intact workload (no false alarm)", () => {
 });
 
 test("VALIDITY: GATE FAILS on a deliberately degraded accuracy candidate", () => {
-  const degraded = {
-    workload: WL,
-    speed: SPEED,
-    capability: "graph",
-    accuracy: { mrr: 0.1, "recall@1": 0, n: 6, labels: "sha256:aaaa" },
-  };
+  const degraded = candidate({
+    accuracy: { mrr: 0.1, "recall@1": 0, n: 6, labels: "sha256:aaaa", perQuery: [] },
+  });
   const verdict = gate(baseline(), degraded);
   assert.equal(verdict.ok, false, "a degraded candidate must fail the gate");
   assert.ok(verdict.reasons.some((r) => r.includes("REGRESSION")));

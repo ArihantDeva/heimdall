@@ -20,8 +20,8 @@ const WL = { corpus: "c1", env: "darwin", cache: "cold" };
 const ACC = { mrr: 0.5, "recall@1": 0.5, "ndcg@1": 0.5, n: 6, labels: "sha256:aaaa" };
 const SPEED = { depth: { n: 20, p50: 100, p95: 150, p99: null } };
 
-const baseline = (over = {}) => ({ workload: WL, accuracy: ACC, speed: SPEED, capability: "graph", ...over });
-const candidate = (over = {}) => ({ workload: WL, accuracy: ACC, speed: SPEED, capability: "graph", ...over });
+const baseline = (over = {}) => ({ workload: WL, accuracy: ACC, speed: SPEED, capability: "graph", anchor: 40, ...over });
+const candidate = (over = {}) => ({ workload: WL, accuracy: ACC, speed: SPEED, capability: "graph", anchor: 40, ...over });
 
 const refused = (verdict) => assert.equal(verdict.ok, false, `expected refusal, got ${JSON.stringify(verdict)}`);
 const accepted = (verdict) => assert.equal(verdict.ok, true, `expected acceptance, got ${JSON.stringify(verdict)}`);
@@ -169,6 +169,56 @@ test("a disappearing query is caught", () => {
   refused(verdict);
 });
 
+// --- review round 3: tail claim honesty, anchor robustness ------------------
+
+test("a missing p95 against a baseline that HAS one is refused, not skipped", () => {
+  // Finding B1: at n<100 the p95 is null; the old code `continue`d, so the same
+  // tail regression was refused at n=100 and silently accepted at n=20.
+  const verdict = gate(
+    baseline(),
+    candidate({ speed: { depth: { n: 20, p50: 100, p95: null, p99: null } } }),
+  );
+  refused(verdict);
+  assert.ok(
+    verdict.reasons.some((r) => /tail unmeasurable/.test(r)),
+    `a suppressed tail claim must be refused: ${JSON.stringify(verdict.reasons)}`,
+  );
+});
+
+test("the tail guard is reachable — an unreliable tail is refused end to end", () => {
+  // Finding B2: tailReliable was computed but never forwarded, so the gate read
+  // undefined and judged p95 anyway. This asserts the field actually arrives.
+  const verdict = gate(baseline(), candidate({ tailReliable: false, tailDisagreement: 3 }));
+  refused(verdict);
+  assert.ok(verdict.reasons.some((r) => /tail unmeasurable/.test(r)));
+});
+
+test("a non-numeric anchor refuses instead of disabling the guard", () => {
+  for (const bad of [NaN, 0, -1, "999", null]) {
+    const verdict = gate(baseline({ anchor: 40 }), candidate({ anchor: bad }));
+    refused(verdict);
+    assert.ok(
+      verdict.reasons.some((r) => /anchor/.test(r)),
+      `anchor ${String(bad)} must refuse: ${JSON.stringify(verdict.reasons)}`,
+    );
+  }
+});
+
+test("a missing anchor on both sides refuses rather than assuming comparability", () => {
+  refused(gate(baseline({ anchor: undefined }), candidate({ anchor: undefined })));
+});
+
+test("a renamed speed cell is refused instead of vanishing from the comparison", () => {
+  const verdict = gate(baseline(), candidate({ speed: { other: SPEED.depth } }));
+  refused(verdict);
+  assert.ok(verdict.reasons.some((r) => /no longer report|speed\.depth/.test(r)));
+});
+
+test("an inverted or negative tail percentile is refused", () => {
+  refused(gate(baseline(), candidate({ speed: { depth: { n: 100, p50: 100, p95: 50, p99: null } } })));
+  refused(gate(baseline(), candidate({ speed: { depth: { n: 100, p50: 100, p95: -500, p99: null } } })));
+});
+
 // --- machine load: the noise guard cannot see a sustained slowdown ----------
 
 test("a uniformly slow machine is refused, not reported as a code regression", () => {
@@ -194,11 +244,6 @@ test("a uniformly slow machine is refused, not reported as a code regression", (
 test("a comparable machine is judged normally", () => {
   const verdict = gate(baseline({ anchor: 40 }), candidate({ anchor: 42 }));
   accepted(verdict);
-});
-
-test("a missing anchor on either side does not fake a refusal", () => {
-  accepted(gate(baseline(), candidate()));
-  accepted(gate(baseline({ anchor: 40 }), candidate({ anchor: undefined })));
 });
 
 // --- finding 4: a crashing CLI must never look fast -------------------------

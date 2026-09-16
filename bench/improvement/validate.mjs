@@ -46,6 +46,17 @@ function speedShape(speed, label) {
     if (typeof cell.p50 !== "number" || !Number.isFinite(cell.p50) || cell.p50 <= 0) {
       problems.push(`${label}: speed.${key}.p50 is not a positive finite number (${cell.p50})`);
     }
+    // Tail percentiles are validated too. Review found a negative p95 passed
+    // ("nothing to compare") and p99 was never checked anywhere.
+    for (const p of ["p95", "p99"]) {
+      const v = cell[p];
+      if (v === null || v === undefined) continue; // null = "no claim", checked by the gate
+      if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) {
+        problems.push(`${label}: speed.${key}.${p} is not a positive finite number (${v})`);
+      } else if (typeof cell.p50 === "number" && v < cell.p50) {
+        problems.push(`${label}: speed.${key}.${p} (${v}) is below p50 (${cell.p50}) — percentile inverted`);
+      }
+    }
   }
   return problems;
 }
