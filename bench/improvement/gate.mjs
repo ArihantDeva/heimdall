@@ -5,57 +5,47 @@
 //
 // Constants (SPEED_TOLERANCE, MAX_DISAGREEMENT) live in run.mjs and are
 // imported here so there is exactly one source for each threshold.
-import { compareMetrics, sameWorkload, NON_METRIC_KEYS } from "./eval.mjs";
+import { compareMetrics, sameWorkload } from "./eval.mjs";
+import { validateArtifact } from "./validate.mjs";
 import { SPEED_TOLERANCE, MAX_DISAGREEMENT, ANCHOR_TOLERANCE } from "./run.mjs";
-
-export function validateArtifact(artifact, label) {
-  if (!artifact || typeof artifact !== "object") return [`${label}: not an object`];
-  return [...accuracyShape(artifact.accuracy, label), ...speedShape(artifact.speed, label)];
-}
-
-function accuracyShape(accuracy, label) {
-  if (!accuracy || typeof accuracy !== "object" || Object.keys(accuracy).length === 0) {
-    return [`${label}: no accuracy metrics`];
-  }
-  const problems = [];
-  for (const [key, value] of Object.entries(accuracy)) {
-    if (NON_METRIC_KEYS.has(key)) continue;
-    // per-query detail is evidence payload, not a scalar metric.
-    if (Array.isArray(value)) continue;
-    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
-      problems.push(`${label}: accuracy.${key} is not a finite non-negative number (${value})`);
-    }
-  }
-  if (!Number.isFinite(accuracy.n) || accuracy.n <= 0) {
-    problems.push(`${label}: accuracy.n must be a positive number (${accuracy.n})`);
-  }
-  return problems;
-}
-
-function speedShape(speed, label) {
-  if (!speed || typeof speed !== "object" || Object.keys(speed).length === 0) {
-    return [`${label}: no speed measurements`];
-  }
-  const problems = [];
-  for (const [key, cell] of Object.entries(speed)) {
-    if (!cell || typeof cell !== "object") {
-      problems.push(`${label}: speed.${key} is not a measurement`);
-      continue;
-    }
-    if (!Number.isFinite(cell.n) || cell.n <= 0) {
-      problems.push(`${label}: speed.${key}.n must be positive (${cell.n})`);
-    }
-    if (typeof cell.p50 !== "number" || !Number.isFinite(cell.p50) || cell.p50 <= 0) {
-      problems.push(`${label}: speed.${key}.p50 is not a positive finite number (${cell.p50})`);
-    }
-  }
-  return problems;
-}
 
 /** Metrics the candidate must still report; a shrinking set is not a pass. */
 function missingKeys(baseline, candidate) {
   const cand = candidate.accuracy ?? {};
   return Object.keys(baseline.accuracy ?? {}).filter((key) => !(key in cand));
+}
+
+/**
+ * An unchanged metric over a SHIFTED per-query slice is not an unchanged
+ * result. Review showed a per-query swap (one query 1.0 -> 0.5, another
+ * 0.0 -> 0.5) keeps every average identical while real performance moved in two
+ * places. Averages hid it; per-query comparison does not.
+ */
+function perQueryReasons(baseline, candidate) {
+  const b = baseline.accuracy?.perQuery;
+  const c = candidate.accuracy?.perQuery;
+  if (!Array.isArray(b) || b.length === 0) return [];
+  if (!Array.isArray(c) || c.length !== b.length) {
+    return [`per-query detail missing or the query count changed (${b.length} -> ${c?.length ?? 0})`];
+  }
+  const byId = new Map(c.map((q) => [q.id, q]));
+  const reasons = [];
+  for (const before of b) {
+    const after = byId.get(before.id);
+    if (!after) {
+      reasons.push(`query "${before.id}" disappeared from the candidate`);
+      continue;
+    }
+    for (const [key, value] of Object.entries(before.metrics ?? {})) {
+      const now = after.metrics?.[key];
+      if (typeof now === "number" && typeof value === "number" && now < value) {
+        reasons.push(
+          `PER-QUERY REGRESSION ${before.id}.${key}: ${value} -> ${now}`,
+        );
+      }
+    }
+  }
+  return reasons;
 }
 
 function speedReasons(baseline, candidate) {
@@ -161,12 +151,22 @@ export function gate(baseline, candidate) {
   }
   const shape = [...validateArtifact(baseline, "baseline"), ...validateArtifact(candidate, "candidate")];
   if (shape.length) return { ok: false, reasons: shape };
+  // Sample count is part of comparability: 9 queries and 1 query are not the
+  // same measurement, even when every average matches. Review found n shrinking
+  // to 1 passing the gate.
+  if (baseline.accuracy?.n !== candidate.accuracy?.n) {
+    return {
+      ok: false,
+      reasons: [`query count changed: ${baseline.accuracy?.n} -> ${candidate.accuracy?.n}`],
+    };
+  }
   const gone = missingKeys(baseline, candidate);
   if (gone.length) return { ok: false, reasons: [`candidate no longer reports: ${gone.join(", ")}`] };
   const speed = speedReasons(baseline, candidate);
   const anchor = anchorReasons(baseline, candidate);
   const reasons = [
     ...compareMetrics(baseline.accuracy ?? {}, candidate.accuracy ?? {}),
+    ...perQueryReasons(baseline, candidate),
     // When the machine-load anchor fails, EVERY latency number is suspect, so
     // no speed claim is made at all — reporting a p50 "regression" from a
     // loaded machine asserts a code change that the measurement cannot support.

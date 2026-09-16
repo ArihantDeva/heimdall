@@ -4,23 +4,20 @@
 // Labels are frozen BEFORE any measurement: `gold` names the document that must
 // be found for each query, chosen from the document text, not from what a run
 // returned. Editing a label moves `hash`, which the gate reports as a changed
-// corpus rather than as an improvement (that was a review finding: labels were
+// corpus rather than as an improvement (a review finding: labels were
 // previously unhashed, so reordering a fixture moved the metrics silently).
 //
-// Design notes:
-//   · documents are short and topically disjoint, so a correct semantic index
-//     separates them cleanly and a broken one cannot pass by accident
-//   · two queries are deliberately lexical near-misses (both mention "guard")
-//     so the lane can distinguish real ranking from keyword luck
-//   · one query has no matching document, to keep the "must not promote" case
-import { createHash } from "node:crypto";
-
 // NOTE on filenames: insert_card() embeds `relative-path + body`, so a
 // descriptive filename leaks the answer into the vector and a query can match
 // on the name alone. Discovered while writing the validity test: scrambling
 // every document body left recall@1 unchanged at 0.889, because the ranking was
 // riding on the filenames. Neutral names keep the ONLY signal in the content,
 // which is what this lane claims to measure.
+import { createHash } from "node:crypto";
+
+/** Sentinel gold for a query that must find nothing. */
+export const NO_SUCH_DOCUMENT = "__no_such_document__";
+
 const DOCS = [
   {
     name: "doc-01.md",
@@ -67,7 +64,7 @@ const QUERIES = [
   { id: "convergence", text: "what style of reconciliation keeps the graph matching the disk", gold: ["doc-06.md"] },
   { id: "duplication-near-miss", text: "a second guard implementation behaved inconsistently", gold: ["doc-07.md"] },
   { id: "baseline", text: "what must be true before a baseline is recorded", gold: ["doc-08.md"] },
-  { id: "unanswerable-must-not-promote", text: "quarterly revenue recognition policy for aircraft leasing", gold: ["__no_such_document__"] },
+  { id: "unanswerable-must-not-promote", text: "quarterly revenue recognition policy for aircraft leasing", gold: [NO_SUCH_DOCUMENT] },
 ];
 
 export const RETRIEVAL_CASE = {
@@ -84,7 +81,13 @@ export function hashCase(docs = DOCS, queries = QUERIES) {
   return `sha256:${createHash("sha256").update(canonical).digest("hex").slice(0, 16)}`;
 }
 
-/** Integrity: no duplicate document names, no query without gold, no empty set. */
+/**
+ * Integrity: no duplicate document names, no query without gold, no empty set,
+ * and every gold id must actually exist in the corpus (or be the explicit
+ * no-match sentinel). Review found that a typo'd gold id (`doc-06.mdd`)
+ * validated as fine, quietly lowered recall, and would have surfaced later as a
+ * fake "retrieval regression" — a label bug masquerading as a product bug.
+ */
 export function validateCase(docs = DOCS, queries = QUERIES) {
   const problems = [];
   if (!docs.length) problems.push("no documents");
@@ -96,6 +99,11 @@ export function validateCase(docs = DOCS, queries = QUERIES) {
   }
   for (const q of queries) {
     if (!q.gold.length) problems.push(`${q.id}: no gold`);
+    for (const g of q.gold) {
+      if (g !== NO_SUCH_DOCUMENT && !names.has(g)) {
+        problems.push(`${q.id}: gold "${g}" is not a document in the corpus`);
+      }
+    }
   }
   return problems;
 }

@@ -12,10 +12,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { gate, validateArtifact } from "../bench/improvement/gate.mjs";
+import { gate } from "../bench/improvement/gate.mjs";
+import { validateArtifact } from "../bench/improvement/validate.mjs";
 import { compareMetrics } from "../bench/improvement/eval.mjs";
 import { validateCase, hashCase, RETRIEVAL_CASE } from "../bench/improvement/retrieval-case.mjs";
-
 const WL = { corpus: "c1", env: "darwin", cache: "cold" };
 const ACC = { mrr: 0.5, "recall@1": 0.5, "ndcg@1": 0.5, n: 6, labels: "sha256:aaaa" };
 const SPEED = { depth: { n: 20, p50: 100, p95: 150, p99: null } };
@@ -116,6 +116,57 @@ test("hashCase is stable for the same case and changes when a label moves", () =
 test("an empty case is rejected by the validator", () => {
   assert.ok(validateCase([], []).length > 0, "empty case must not validate");
   assert.deepEqual(validateCase(RETRIEVAL_CASE.docs, RETRIEVAL_CASE.queries), []);
+});
+
+// --- review round 2: gold integrity, sample count, per-query slices ---------
+
+test("a gold id that is not in the corpus is a label error, not a regression", () => {
+  const docs = [{ name: "a.md", text: "t" }];
+  const bad = [{ id: "q", text: "t", gold: ["a.mdd"] }];
+  const problems = validateCase(docs, bad);
+  assert.ok(
+    problems.some((p) => /not a document in the corpus/.test(p)),
+    `a typo'd gold id must be caught: ${JSON.stringify(problems)}`,
+  );
+});
+
+test("the no-match sentinel is a legal gold label", () => {
+  assert.deepEqual(validateCase(RETRIEVAL_CASE.docs, RETRIEVAL_CASE.queries), []);
+});
+
+test("a candidate measuring fewer queries is refused even with identical averages", () => {
+  const acc = { ...ACC, n: 9, perQuery: [] };
+  const verdict = gate(
+    baseline({ accuracy: acc }),
+    candidate({ accuracy: { ...acc, n: 1 } }),
+  );
+  refused(verdict);
+  assert.ok(verdict.reasons.some((r) => /query count changed/.test(r)));
+});
+
+test("a per-query slice swap is caught even when every average is identical", () => {
+  // one query improves, another regresses, averages unchanged.
+  const mk = (x, y) => ({
+    ...ACC,
+    perQuery: [
+      { id: "x", ranked: [], metrics: { mrr: x, "recall@1": x } },
+      { id: "y", ranked: [], metrics: { mrr: y, "recall@1": y } },
+    ],
+  });
+  const verdict = gate(baseline({ accuracy: mk(1, 0) }), candidate({ accuracy: mk(0.5, 0.5) }));
+  refused(verdict);
+  assert.ok(
+    verdict.reasons.some((r) => /PER-QUERY REGRESSION x/.test(r)),
+    `a masked per-query regression must surface: ${JSON.stringify(verdict.reasons)}`,
+  );
+});
+
+test("a disappearing query is caught", () => {
+  const mk = (qs) => ({ ...ACC, perQuery: qs });
+  const before = mk([{ id: "x", ranked: [], metrics: { mrr: 1 } }]);
+  const after = mk([{ id: "z", ranked: [], metrics: { mrr: 1 } }]);
+  const verdict = gate(baseline({ accuracy: before }), candidate({ accuracy: after }));
+  refused(verdict);
 });
 
 // --- machine load: the noise guard cannot see a sustained slowdown ----------

@@ -86,15 +86,24 @@ test("timings: n=10 supports p50 but must NOT claim p95/p99", () => {
   assert.equal(s.p99, null, "a p99 from 10 samples is not a measurement");
 });
 
-test("timings: 20+ samples support a p95, 100+ support a p99", () => {
+test("timings: n=20 still cannot support p95 — it is the second-highest sample", () => {
+  // Observed on identical code: n=20 produced p95=191ms then p95=386ms, a 2x
+  // swing from the same source. At n=20 the 95th percentile interpolates
+  // between the top two samples, so it tracks the max, not a tail.
   const twenty = summarizeTimings(Array.from({ length: 20 }, (_, i) => i + 1));
   assert.equal(twenty.n, 20);
-  assert.ok(twenty.p95 > twenty.p50, "p95 above p50 with 20 samples");
-  assert.equal(twenty.p99, null, "p99 still unsupported at n=20");
+  assert.equal(twenty.p95, null, "p95 needs ~100 samples to be estimable");
+  assert.equal(twenty.p99, null);
+  assert.ok(twenty.p50 > 0, "the median is still reported");
+});
 
+test("timings: 100+ samples support a p95, 500+ support a p99", () => {
   const hundred = summarizeTimings(Array.from({ length: 100 }, (_, i) => i + 1));
-  assert.equal(hundred.n, 100);
-  assert.ok(hundred.p99 >= hundred.p95, "p99 above p95 with 100 samples");
+  assert.ok(hundred.p95 > hundred.p50, "p95 above p50 at n=100");
+  assert.equal(hundred.p99, null, "p99 still unsupported at n=100");
+
+  const fiveHundred = summarizeTimings(Array.from({ length: 500 }, (_, i) => i + 1));
+  assert.ok(fiveHundred.p99 >= fiveHundred.p95, "p99 above p95 at n=500");
 });
 
 test("timings: a single sample cannot support a p99 claim", () => {

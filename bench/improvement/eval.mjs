@@ -99,11 +99,12 @@ function percentile(sorted, q) {
   return sorted[lower] + weight * (sorted[upper] - sorted[lower]);
 }
 
-// Minimum samples for a percentile claim. A p95 needs ~20 observations and a
-// p99 needs ~100 before the number means anything; below that the "p95" is
-// just the maximum wearing a statistical label. Returning null is the honest
-// answer, and the gate treats null as "no claim" rather than "fast".
-export const MIN_SAMPLES_FOR = { p95: 20, p99: 100 };
+// Minimum samples for a percentile claim. A p95 needs ~100 observations: at
+// n=20 the "p95" is the second-highest sample, i.e. the max with a statistical
+// label, and it swung 191ms -> 386ms between runs of IDENTICAL code. A p99 needs
+// ~500. Below the floor the value is null, which the gate treats as "no claim"
+// rather than "fast".
+export const MIN_SAMPLES_FOR = { p95: 100, p99: 500 };
 
 /**
  * Latency distribution with its sample count.

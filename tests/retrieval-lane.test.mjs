@@ -77,12 +77,14 @@ test("REAL retrieval: the lane finds gold documents through the product path", (
     const r = runRetrievalWorkload({ repo, home, python: PY });
     assert.equal(r.n, RETRIEVAL_CASE.queries.length);
     assert.ok(r.perQuery.length === r.n, "per-query detail is retained");
-    // A correct index over topically-disjoint documents must find the gold
-    // document for the answerable queries. This is a real measurement of the
-    // embedding + query path, not a literal.
-    assert.ok(
-      r["recall@1"] >= 0.75,
-      `real retrieval found gold first for only ${(r["recall@1"] * 100).toFixed(0)}% of queries: ` +
+    // Exact expectation, not a floor. A `>= 0.75` bar left only 0.028 of
+    // headroom above the current 0.778/0.889, so a single gold-label typo would
+    // red the suite and read as a retrieval regression. Pin the measured value:
+    // any movement is then a real, named change to this corpus.
+    assert.equal(
+      Number(r["recall@1"].toFixed(3)),
+      0.889,
+      `real retrieval changed: got recall@1=${r["recall@1"]} — ` +
         JSON.stringify(r.perQuery.map((q) => [q.id, q.ranked.slice(0, 2)])),
     );
   });

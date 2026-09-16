@@ -19,7 +19,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { rankingMetrics } from "./eval.mjs";
-import { RETRIEVAL_CASE } from "./retrieval-case.mjs";
+import { RETRIEVAL_CASE, hashCase } from "./retrieval-case.mjs";
 
 const KS = [1, 3, 5];
 
@@ -59,7 +59,11 @@ export function runRetrievalWorkload({ repo, home, python, caseSpec = RETRIEVAL_
   for (const key of Object.keys(perQuery[0].metrics)) {
     agg[key] = perQuery.reduce((sum, q) => sum + q.metrics[key], 0) / perQuery.length;
   }
-  return { ...agg, n: perQuery.length, perQuery, labels: caseSpec.hash };
+  // Hash is COMPUTED from the corpus that was actually measured, never taken
+  // from the caller. Review demonstrated the hole: a scrambled corpus carrying
+  // the frozen case's hash compared as "comparable" against the baseline while
+  // its real labels differed.
+  return { ...agg, n: perQuery.length, perQuery, labels: hashCase(caseSpec.docs, caseSpec.queries) };
 }
 
 function safeExec(python, args, env) {

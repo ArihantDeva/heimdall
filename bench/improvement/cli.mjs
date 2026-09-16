@@ -22,11 +22,13 @@ import { DEFAULT_PYTHON as PYTHON } from "./run.mjs";
 
 const REPO = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const BASELINE = join(REPO, "bench", "improvement", "baseline.json");
-// Sample count for a speed claim. 20 is the minimum that supports a p95 (see
-// MIN_SAMPLES_FOR in eval.mjs); the runner measures the process twice so it can
-// also detect machine noise and refuse to gate on it. Override with
-// HEIMDALL_EVAL_REPS for a quick smoke run; keep >=20 for a real claim.
-const REPS = Number(process.env.HEIMDALL_EVAL_REPS ?? 20);
+// Sample count for a speed claim. 100 is the minimum that supports a p95 (see
+// MIN_SAMPLES_FOR in eval.mjs); at n=20 the "p95" tracked the maximum and swung
+// 191ms -> 386ms on identical code. The runner measures the process twice so it
+// can also detect machine noise and refuse to gate on it. Override with
+// HEIMDALL_EVAL_REPS for a quick smoke run — but a run below 100 cannot make a
+// tail claim, and the gate reports that honestly rather than guessing.
+const REPS = Number(process.env.HEIMDALL_EVAL_REPS ?? 100);
 
 // A loaded machine must never become the baseline: the anchor is a fixed
 // machine-only workload (bare node startup), and a baseline recorded while it
