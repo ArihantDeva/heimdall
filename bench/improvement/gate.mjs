@@ -10,6 +10,19 @@ import { validateArtifact } from "./validate.mjs";
 import { SPEED_TOLERANCE, MAX_DISAGREEMENT, ANCHOR_TOLERANCE } from "./run.mjs";
 import { MIN_SAMPLES_FOR } from "./eval.mjs";
 
+/**
+ * Speed cells that are evidence, not targets of comparison.
+ *
+ * `depthRepeat` is the SECOND batch of the same measurement — the evidence
+ * behind the disagreement figure. Comparing it like an independent workload
+ * would compare one run's noise against another's and report a "regression"
+ * that is pure variance.
+ */
+const EVIDENCE_CELLS = new Set(["depthRepeat"]);
+
+const comparedSpeedCells = (speed) =>
+  Object.keys(speed ?? {}).filter((key) => !EVIDENCE_CELLS.has(key));
+
 /** Metrics the candidate must still report; a shrinking set is not a pass. */
 function missingKeys(baseline, candidate) {
   const problems = [];
@@ -20,7 +33,7 @@ function missingKeys(baseline, candidate) {
   // Speed cell names are part of the contract too: review found renaming the
   // cell (`speed:{other:...}`) made the whole speed lane vanish from the
   // comparison while the gate returned ok:true.
-  const baseCells = Object.keys(baseline.speed ?? {});
+  const baseCells = comparedSpeedCells(baseline.speed);
   const candCells = Object.keys(candidate.speed ?? {});
   for (const key of baseCells) {
     if (!candCells.includes(key)) problems.push(`speed.${key}`);
@@ -72,7 +85,7 @@ function speedReasons(baseline, candidate) {
     ];
   }
   const reasons = [];
-  for (const key of Object.keys(baseline.speed ?? {})) {
+  for (const key of comparedSpeedCells(baseline.speed)) {
     const b = baseline.speed[key];
     const c = candidate.speed?.[key];
     if (!c || typeof b.p50 !== "number" || typeof c.p50 !== "number") continue;
@@ -91,7 +104,7 @@ function tailReasons(baseline, candidate) {
     const spread = typeof candidate.tailDisagreement === "number" ? `${candidate.tailDisagreement.toFixed(2)}x` : "unknown";
     return [`speed tail unmeasurable: repeat runs disagreed by ${spread} (max ${MAX_DISAGREEMENT}x) — no p95 claim is possible`];
   }
-  for (const key of Object.keys(baseline.speed ?? {})) {
+  for (const key of comparedSpeedCells(baseline.speed)) {
     const b = baseline.speed[key];
     const c = candidate.speed?.[key];
     if (!c) continue;

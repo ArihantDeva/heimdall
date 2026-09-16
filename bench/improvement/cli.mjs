@@ -94,7 +94,10 @@ function measure() {
     const speed = runSpeedWorkload({ repo: REPO, home, proj, reps: REPS });
     return {
       workload: speed.workload,
-      speed: { depth: speed.distribution },
+      // Both batches are recorded, not just the one compared: the second
+      // distribution is the evidence behind the disagreement figure, and
+      // storing only the first left "uncertainty" as a bare ratio.
+      speed: { depth: speed.distribution, depthRepeat: speed.repeat },
       // Reliability must travel with the measurement. This used to be a hand-
       // written list of fields, and review found `tailReliable`/`tailDisagreement`
       // missing from it — the tail guard was dead code reading `undefined`
