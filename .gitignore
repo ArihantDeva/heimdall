@@ -25,3 +25,9 @@ vendor/graft/graft.db*
 vendor/graft/build/
 vendor/graft/models/
 vendor/graft/third_party/
+
+# rust build artifacts (from any vendored/past cargo workspace)
+target/
+
+# exported ONNX model — local 127 MB blob, regenerable, never committed
+rs/**/model/
