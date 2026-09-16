@@ -1,20 +1,20 @@
 {
   "workload": {
-    "commit": "4eed256",
+    "commit": "185f34d",
     "corpus": "scratch-fixture",
-    "reps": 20,
     "env": "darwin",
-    "cache": "cold"
+    "cache": "cold",
+    "reps": 20
   },
   "speed": {
     "depth": {
       "n": 20,
-      "p50": 119.09747949999999,
-      "p95": 177.3418256,
+      "p50": 131.664854,
+      "p95": 212.55505415000005,
       "p99": null
     }
   },
-  "disagreement": 0.9952774987148238,
+  "disagreement": 0.827434810355693,
   "speedReliable": true,
   "accuracy": {
     "mrr": 0.45,
@@ -22,7 +22,8 @@
     "ndcg@1": 0.16666666666666666,
     "recall@5": 0.8333333333333334,
     "ndcg@5": 0.5466070113248191,
-    "n": 6
+    "n": 6,
+    "labels": "sha256:a80b038847ab9677"
   },
   "capability": "graph"
 }

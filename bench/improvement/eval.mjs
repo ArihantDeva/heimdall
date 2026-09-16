@@ -25,6 +25,9 @@
 //    20-sample candidate, which is how MIN_SAMPLES_FOR forced more reps.
 const WORKLOAD_KEYS = ["corpus", "hardware", "cache", "env"];
 
+/** Accuracy fields that are bookkeeping, not metrics. */
+export const NON_METRIC_KEYS = new Set(["n", "labels"]);
+
 function dcg(relevances) {
   return relevances.reduce((sum, rel, i) => sum + rel / Math.log2(i + 2), 0);
 }
@@ -67,7 +70,18 @@ export function compareMetrics(baseline, candidate) {
   }
   const drops = [];
   for (const key of shared) {
-    const delta = candidate[key] - baseline[key];
+    // Bookkeeping fields are compared elsewhere (n by the shape validator,
+    // labels by labelReasons) and are not metrics.
+    if (NON_METRIC_KEYS.has(key)) continue;
+    const c = candidate[key];
+    // An explicitly-undefined or NaN value is not "no regression": `NaN < 0`
+    // and `undefined < 0` are both false, so a candidate reporting garbage used
+    // to pass. Unusable values are reported as such.
+    if (typeof c !== "number" || !Number.isFinite(c)) {
+      drops.push(`UNUSABLE ${key}: candidate value is ${String(c)}`);
+      continue;
+    }
+    const delta = c - baseline[key];
     if (delta < 0) {
       drops.push(
         `REGRESSION ${key}: ${baseline[key]} -> ${candidate[key]} (${delta.toFixed(3)})`,

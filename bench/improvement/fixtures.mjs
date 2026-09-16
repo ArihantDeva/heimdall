@@ -15,6 +15,8 @@
 //                                 rather than promote the top hit
 //   · near-miss-token           — lexical overlap without relevance
 
+import { createHash } from "node:crypto";
+
 export const FIXTURES = [
   {
     id: "gold-first",
@@ -55,6 +57,7 @@ export const FIXTURES = [
  */
 export function validateFixtures(fixtures = FIXTURES) {
   const problems = [];
+  if (fixtures.length === 0) return ["no fixtures at all — the accuracy lane would measure nothing"];
   for (const f of fixtures) {
     if (!f.gold.length) problems.push(`${f.id}: no gold labels`);
     const dupes = f.ranked.filter((id, i) => f.ranked.indexOf(id) !== i);
@@ -62,4 +65,16 @@ export function validateFixtures(fixtures = FIXTURES) {
     if (new Set(f.gold).size !== f.gold.length) problems.push(`${f.id}: duplicate gold ids`);
   }
   return problems;
+}
+
+/**
+ * Content hash of the label set. Recorded in the measurement artifact so that
+ * editing a label is visible as a change of corpus rather than an invisible
+ * improvement: without this, reordering a fixture's `ranked` array moved the
+ * metrics and the gate still went green, because the baseline had been built
+ * from the previous labels.
+ */
+export function fixturesHash(fixtures = FIXTURES) {
+  const canonical = fixtures.map((f) => `${f.id}|${f.ranked.join(",")}|${f.gold.join(",")}`).join("\n");
+  return `sha256:${createHash("sha256").update(canonical).digest("hex").slice(0, 16)}`;
 }

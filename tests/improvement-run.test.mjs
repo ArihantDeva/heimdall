@@ -33,6 +33,18 @@ function scratch() {
 const UNSTABLE = [1, 9, 4, 40, 2, 70, 1, 30, 3, 100];
 const THREE = UNSTABLE.slice(0, 3);
 
+const WL = { commit: "a", corpus: "c", env: "darwin", cache: "cold" };
+const ACC = { mrr: 0.5, "recall@1": 0.5, n: 6, labels: "sha256:aaaa" };
+const SPEED = { depth: { n: 20, p50: 100, p95: 150, p99: null } };
+
+function candidate(extra) {
+  return { workload: WL, speed: SPEED, accuracy: ACC, capability: "graph", ...extra };
+}
+
+function baseline(extra) {
+  return { workload: WL, speed: SPEED, accuracy: ACC, capability: "graph", ...extra };
+}
+
 test("speed workload measures the real CLI in a scratch HOME", () => {
   const s = scratch();
   try {
@@ -68,48 +80,33 @@ test("accuracy workload scores the real verdict path against held-out labels", (
 });
 
 test("GATE PASSES on an intact workload (no false alarm)", () => {
-  const s = scratch();
-  try {
-    const measured = runAccuracyWorkload({});
-    const baseline = {
-      workload: { commit: "base", corpus: "fixture-v1", reps: 3 },
-      accuracy: measured,
-    };
-    const candidate = {
-      workload: { commit: "base", corpus: "fixture-v1", reps: 3 },
-      accuracy: runAccuracyWorkload({}),
-    };
-    const verdict = gate(baseline, candidate);
-    assert.equal(verdict.ok, true, JSON.stringify(verdict));
-  } finally {
-    s.cleanup();
-  }
+  const shared = {
+    workload: { commit: "base", corpus: "fixture-v1", env: "darwin", cache: "cold" },
+    speed: SPEED,
+    capability: "graph",
+  };
+  const verdict = gate(
+    { ...shared, accuracy: runAccuracyWorkload({}) },
+    { ...shared, accuracy: runAccuracyWorkload({}) },
+  );
+  assert.equal(verdict.ok, true, JSON.stringify(verdict));
 });
 
 test("VALIDITY: GATE FAILS on a deliberately degraded accuracy candidate", () => {
-  const baseline = {
-    workload: { commit: "base", corpus: "fixture-v1", reps: 3 },
-    accuracy: { "recall@1": 1, mrr: 1 },
-  };
   const degraded = {
-    workload: { commit: "base", corpus: "fixture-v1", reps: 3 },
-    accuracy: { "recall@1": 0, mrr: 0.1 },
+    workload: WL,
+    speed: SPEED,
+    capability: "graph",
+    accuracy: { mrr: 0.1, "recall@1": 0, n: 6, labels: "sha256:aaaa" },
   };
-  const verdict = gate(baseline, degraded);
+  const verdict = gate(baseline(), degraded);
   assert.equal(verdict.ok, false, "a degraded candidate must fail the gate");
   assert.ok(verdict.reasons.some((r) => r.includes("REGRESSION")));
 });
 
 test("VALIDITY: GATE FAILS on a deliberately degraded speed candidate", () => {
-  const baseline = {
-    workload: { commit: "base", corpus: "fixture-v1", reps: 3 },
-    speed: { depth: { n: 3, p50: 10, p95: 20, p99: 20 } },
-  };
-  const degraded = {
-    workload: { commit: "base", corpus: "fixture-v1", reps: 3 },
-    speed: { depth: { n: 3, p50: 400, p95: 900, p99: 900 } },
-  };
-  const verdict = gate(baseline, degraded);
+  const degraded = candidate({ speed: { depth: { n: 20, p50: 400, p95: 900, p99: 900 } } });
+  const verdict = gate(baseline(), degraded);
   assert.equal(verdict.ok, false, "a candidate several times slower must fail the gate");
   assert.ok(verdict.reasons.some((r) => /speed/i.test(r)));
 });
@@ -128,17 +125,7 @@ test("GATE REFUSES to compare numbers from different workloads", () => {
   assert.ok(verdict.reasons.some((r) => /workload/i.test(r)));
 });
 
-const WL = { commit: "a", corpus: "c", env: "darwin", cache: "cold" };
-const ACC = { mrr: 0.5, "recall@1": 0.5 };
-const SPEED = { depth: { n: 20, p50: 100, p95: 150, p99: null } };
-
-function candidate(extra) {
-  return { workload: WL, speed: SPEED, accuracy: ACC, ...extra };
-}
-
-function baseline(extra) {
-  return { workload: WL, speed: SPEED, accuracy: ACC, ...extra };
-}
+const WL_LEGACY = { commit: "a", corpus: "c", env: "darwin", cache: "cold" };
 
 test("GATE refuses to judge a measurement taken on a noisy machine", () => {
   // Observed for real: load average 520 produced p50=169ms against a
@@ -155,8 +142,9 @@ test("GATE passes a clean, unchanged candidate", () => {
 });
 
 test("GATE catches a candidate that dropped its accuracy metrics entirely", () => {
-  // A candidate that reports no metrics has not proven no regression.
+  // A candidate that reports no metrics has not proven no regression. The
+  // hardened validator reports the missing shape directly.
   const verdict = gate(baseline(), candidate({ accuracy: {} }));
   assert.equal(verdict.ok, false);
-  assert.ok(verdict.reasons.some((r) => /no accuracy cells/i.test(r)));
+  assert.ok(verdict.reasons.some((r) => /no accuracy metrics|candidate reports no accuracy/i.test(r)));
 });
