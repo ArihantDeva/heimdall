@@ -51,7 +51,15 @@ let _cachedCap;
  * graph depth on machines where every extraction then failed at import and
  * silently settled at file depth — and since capability is stamped into the
  * journal as cap_max, the upgrade stopped being re-reported. So the probe runs
- * the real bridge import, not a proxy for it.
+ * the real bridge over a real file and requires symbol nodes back.
+ *
+ * ponytail: `max` means "this python can extract AT LEAST ONE language at
+ * L2/L3", not "every language". Grammars are imported lazily per language, so a
+ * python with only tree-sitter-python reports graph while a .go file still
+ * settles at file depth. Per-language capability would mean probing all 16
+ * bindings on every call for a per-file answer the depth ladder does not
+ * actually key on. Upgrade path if that ever matters: probe per extension and
+ * record the language set instead of one max.
  *
  * root: package root holding vendor/. Defaults to this checkout; the npm
  * tarball must ship vendor/graphify/ for this to pass after install.

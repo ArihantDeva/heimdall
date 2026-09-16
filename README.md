@@ -385,7 +385,7 @@ The concurrency tests are the point: if the single-writer or idempotency propert
 
 - Node ≥ 22.5 (the journal uses the built-in `node:sqlite`), `bash`, `python3`
 - macOS today (launchd daemon management); Linux works with a manual daemon
-- tree-sitter-capable python for L2/L3 (`HEIMDALL_PYTHON` env, or `~/.heimdall/venv/bin/python3`, or `python3` in PATH)
+- tree-sitter-capable python for L2/L3 (`HEIMDALL_PYTHON` env, or `~/.heimdall/venv/bin/python3`, or `python3` in PATH). The probe extracts a real file and requires symbols back, so this reports what the bridge can actually do rather than what imports. Note it is per-python, not per-language: only the grammars you install produce symbol depth, and a language without its binding settles at file depth.
 - Runtime npm deps: **zero** — `typebox`/`typescript`/`@types/node` are dev-only
 - Graft backend for `search`/`doctor` (built from `vendor/graft/`)
 

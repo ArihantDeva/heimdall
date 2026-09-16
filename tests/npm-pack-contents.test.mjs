@@ -82,19 +82,53 @@ test("issue #12: the packed artifact performs a real L2 extraction", (t) => {
 // tree_sitter?", so a machine with tree-sitter but no graphify was told it
 // could reach graph depth while every file settled at file depth — and because
 // cap_max is stamped into the journal, the upgrade stopped being re-reported.
-test("issue #12: capability() does not claim graph depth without the graphify bridge", () => {
+test("issue #12: capability() does not claim graph depth without the graphify bridge", (t) => {
   const py = pythonWithTreeSitter();
-  if (!py) return; // no tree-sitter here: the interesting branch is unreachable
+  if (!py) return t.skip("no tree-sitter python here — the probe cannot be exercised");
 
   const emptyRoot = mkdtempSync(join(tmpdir(), "heimdall-vendorless-"));
   try {
     // Same python, same tree-sitter, no vendor/ directory to import graphify from.
     const degraded = capability({ ...process.env, HEIMDALL_PYTHON: py }, { fresh: true, root: emptyRoot });
     assert.equal(degraded.max, "file", "claimed AST depth with no extraction bridge present");
-    assert.match(degraded.reason, /graphify/i, "the reason must name the missing bridge, not blame tree-sitter");
+    assert.match(degraded.reason, /bridge|graphify|grammar/i, "the reason must name what is missing");
 
     const real = capability({ ...process.env, HEIMDALL_PYTHON: py }, { fresh: true });
     assert.equal(real.max, "graph", "this checkout vendors graphify — graph depth must be reported");
     assert.match(real.reason, /graphify/i);
   } finally { rmSync(emptyRoot, { recursive: true, force: true }); }
+});
+
+// The probe must prove a grammar actually works, not merely that a stdlib module
+// imports. Grammars are imported lazily inside the extractors, and the bridge
+// turns those failures into error rows the caller degrades to file depth — so an
+// import-only probe answered "graph" on a machine where every non-Python file
+// silently fell back. This runs the probe against a python that can import
+// tree_sitter but has no language binding, the exact machine that was lied to.
+test("issue #12: capability() refuses graph depth when a grammar is missing", (t) => {
+  const py = pythonWithTreeSitter();
+  if (!py) return t.skip("no tree-sitter python here — the probe cannot be exercised");
+
+  const dir = mkdtempSync(join(tmpdir(), "heimdall-tsonly-"));
+  try {
+    const venv = join(dir, "venv");
+    execFileSync(py, ["-m", "venv", venv], { stdio: "ignore" });
+    const bare = join(venv, "bin", "python3");
+    try {
+      execFileSync(bare, ["-m", "pip", "install", "--quiet", "tree-sitter"], { stdio: "ignore", timeout: 180_000 });
+    } catch {
+      // Offline: the grammar-missing branch is unverifiable, not broken.
+      return t.skip("cannot install tree-sitter offline — grammar-missing branch unverifiable");
+    }
+    execFileSync(bare, ["-c", "import tree_sitter"], { stdio: "ignore" }); // the old probe's bar
+
+    const cap = capability({ ...process.env, HEIMDALL_PYTHON: bare }, { fresh: true });
+
+    assert.equal(
+      cap.max,
+      "file",
+      `a python that cannot produce symbol nodes was reported graph-capable (reason: ${cap.reason})`,
+    );
+    assert.match(cap.reason, /grammar|binding|symbol|bridge/i, "the reason should name what is missing");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
