@@ -82,6 +82,10 @@ portable assertions were ported to `tests/portable-coverage.test.mjs`.
 
 ## Rules for a cycle
 
+- Test counts and measurements in these notes are point-in-time observations,
+  not invariants. Re-measure before quoting: the count moves with every landed
+  test (399 at `196d9ed`, 405 at `8c73441`).
+
 - Metric contract is fixed; do not redefine a metric to make a candidate pass.
 - One bounded change per cycle; profile before optimizing.
 - Report every slice, including failures; never cherry-pick.

@@ -111,14 +111,28 @@ test("timings: no samples is not a zero-latency result", () => {
   assert.equal(s.p50, null);
 });
 
-test("workload: timings from different workloads or environments are not comparable", () => {
+test("workload: sample counts do not break comparability, distinct conditions do", () => {
   const a = { commit: "abc123", corpus: "sha256:deadbeef", reps: 10 };
   const same = { commit: "abc123", corpus: "sha256:deadbeef", reps: 10 };
-  const otherCommit = { commit: "fff999", corpus: "sha256:deadbeef", reps: 10 };
   const otherCorpus = { commit: "abc123", corpus: "sha256:ffffffff", reps: 10 };
   assert.equal(sameWorkload(a, same), true);
-  assert.equal(sameWorkload(a, otherCommit), false);
   assert.equal(sameWorkload(a, otherCorpus), false);
+});
+
+test("workload: different commits ARE comparable — that is the point of a baseline", () => {
+  // Regression test for a real defect: `commit` was in the workload identity,
+  // so after every commit the gate reported "workload mismatch" and could
+  // never measure a change. Verified failing at 8c73441 vs a 4eed256 baseline.
+  const baseline = { commit: "4eed256", corpus: "c1", env: "darwin", cache: "cold" };
+  const candidate = { commit: "8c73441", corpus: "c1", env: "darwin", cache: "cold" };
+  assert.equal(sameWorkload(baseline, candidate), true);
+});
+
+test("workload: a different corpus or environment is NOT comparable", () => {
+  const baseline = { commit: "a", corpus: "c1", env: "darwin", cache: "cold" };
+  assert.equal(sameWorkload(baseline, { commit: "a", corpus: "c2", env: "darwin", cache: "cold" }), false);
+  assert.equal(sameWorkload(baseline, { commit: "a", corpus: "c1", env: "linux", cache: "cold" }), false);
+  assert.equal(sameWorkload(baseline, { commit: "a", corpus: "c1", env: "darwin", cache: "warm" }), false);
 });
 
 test("workload: sample count is a measurement parameter, not workload identity", () => {

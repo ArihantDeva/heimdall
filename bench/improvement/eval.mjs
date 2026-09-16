@@ -11,13 +11,19 @@
 //   · a distribution claim needs more than one sample
 //   · numbers from different workloads are never comparable
 
-// Workload identity: what makes two measurements comparable. `reps` is
-// deliberately NOT here — it is a measurement parameter, not a property of the
-// workload, and treating it as identity made a 5-sample baseline incomparable
-// with a 20-sample candidate (which is how MIN_SAMPLES_FOR forced more reps).
-// What must match is the thing being measured: the code, the corpus, the
-// hardware, and the cache state.
-const WORKLOAD_KEYS = ["commit", "corpus", "hardware", "cache", "env"];
+// Workload identity: what makes two measurements comparable. Only the
+// CONDITIONS of measurement belong here.
+//
+// Not here, deliberately:
+//  · `commit` — the entire purpose of a baseline is comparing different code
+//    against it. Including the commit made the gate fail with "workload
+//    mismatch" after every commit (observed at 8c73441 against a 4eed256
+//    baseline), i.e. it was structurally incapable of measuring change. It is
+//    still RECORDED in the artifact as provenance.
+//  · `reps` — a measurement parameter, not a property of the workload. It was
+//    wrongly included and made a 5-sample baseline incomparable with a
+//    20-sample candidate, which is how MIN_SAMPLES_FOR forced more reps.
+const WORKLOAD_KEYS = ["corpus", "hardware", "cache", "env"];
 
 function dcg(relevances) {
   return relevances.reduce((sum, rel, i) => sum + rel / Math.log2(i + 2), 0);
