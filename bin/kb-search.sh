@@ -103,11 +103,10 @@ if [ "$BACKEND" = "mnemosyne" ]; then
 	run_mnemosyne
 fi
 
-# (No legacy verifier wiring here. kb_search_verify.py is retained as history —
-# it targeted the retired global `graft retrieve` daemon API — and the wrapper
-# that would have invoked it had no callers, so it was dead code. Both backends
-# above compute their own verdicts; its STRONG is a separate content-heuristic
-# and is not what search emits.)
+# (No legacy verifier wiring here. The `kb_search_verify.py` graft-retrieve CLI
+# targeted the retired global `graft retrieve` daemon API and had no callers, so
+# it was deleted; only its extract_paths() helper survives, for the stale scan.
+# Both backends above compute their own verdicts in-process.)
 echo "== retrieve (per-repo graft + global semantic): $Q"
 if [ ! -x "$GRAFT" ]; then
 	# Not a tool failure: a fresh/unconfigured machine has validly zero results.
