@@ -130,10 +130,6 @@ function runDoctor() {
   return sh(BIN("kb-health.sh"), []);
 }
 
-function configPath() {
-  return join(os.homedir(), ".heimdall", "config.json");
-}
-
 function writeConfig(harness) {
   mkdirSync(dirname(configPath()), { recursive: true });
   const cfg = existsSync(configPath())
@@ -144,6 +140,7 @@ function writeConfig(harness) {
 }
 
 import { installAdapter, detectHarnesses, KNOWN_HARNESSES } from "./adapters.mjs";
+import { configPath } from "./depth.mjs";
 
 function runInit(args) {
   if (args.includes("--detect")) {
