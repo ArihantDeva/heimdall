@@ -1,44 +1,14 @@
 #!/usr/bin/env python3
-"""kb_search_verify.py — verify + enrich graft retrieve results so agents can trust them.
-Input: argv[1]=retrieve JSON  [2]=label  [3]=scope  [4]=N  [5]=query
-Per candidate: fetch full node (body), lexical coverage vs query tokens, path existence.
-Output: ranked lines — verdict (STRONG/WEAK/STALE/NOPATH), coverage %, path, title, score.
+"""kb_search_verify.py — path extraction for stale-node rehoming.
+
+extract_paths() is the shared path-anchor logic: bin/kb-stale-scan.py imports it
+so the stale scan and search agree on which home-anchored paths a node names.
+
+Historically this module also held a `graft retrieve` verdict CLI; that path
+targets the retired global daemon API, nothing invoked it, and it was deleted.
+Live verdicts are computed in-process by bin/kb-search.sh.
 """
-import json, os, re, sqlite3, subprocess, sys, tempfile, time
-
-STOP = {
-    "the", "and", "for", "with", "from", "that", "this", "have", "are", "was",
-    "you", "your", "not", "but", "its", "all", "can", "has", "had", "she",
-    "her", "him", "his", "our", "their", "them", "who", "whom", "which",
-    "what", "when", "where", "why", "how", "into", "than", "then", "they",
-}
-
-
-def toks(s):
-    return set(
-        t for t in re.findall(r"[a-zA-Z0-9_\-\./]{3,}", (s or "").lower())
-        if t not in STOP
-    )
-
-
-def get_node(id_hex):
-    # selftest:<path> ids bypass the daemon: body is read straight from disk so
-    # content-aware verdicts are testable without graft running.
-    if id_hex.startswith("selftest:"):
-        path = id_hex[len("selftest:"):].rsplit(":", 1)[0]
-        try:
-            with open(path, "r", errors="replace") as f:
-                return {"body": f.read(262144), "title": os.path.basename(path)}
-        except Exception:
-            return {"body": "", "title": ""}
-    try:
-        out = subprocess.run(
-            [GRAFT, "get", id_hex], capture_output=True, text=True, timeout=15
-        ).stdout
-        return (json.loads(out).get("result") or {})
-    except Exception:
-        return {}
-
+import os, re
 
 HOME = os.path.expanduser("~")
 # Home-anchored forms: ~/... shorthand and the /Users/<name>/... absolute form
@@ -47,9 +17,6 @@ HOME = os.path.expanduser("~")
 # tilde sits where the optional prefix expects the abs prefix.
 _HOME_ABS = "/Users/" if os.path.isdir("/Users") else HOME + "/"
 HOME_RE = re.compile(r"~/[^\s\"]+|" + re.escape(_HOME_ABS) + r"[^\s\"]+")
-# graft via absolute path (env-overridable) — never PATH-resolved: a shadowed
-# graft binary could delete memory nodes from inside a search (supply-chain guard)
-GRAFT = os.environ.get("GRAFT", os.path.join(HOME, ".local", "bin", "graft"))
 
 
 def extract_paths(text):
@@ -99,173 +66,3 @@ def extract_paths(text):
             if tok.startswith(_HOME_ABS) and tok not in paths:
                 paths.append(tok)
     return paths
-
-
-def handle_stale(id_hex, title, path, body):
-    """STALE node: anchor path is gone. Desktop gets reorganized aggressively, so
-    first try a deterministic rehome (kb-rehome.sh — bounded basename search in
-    known roots; exactly one hit → rebuild the node with the corrected path).
-    If truly gone or ambiguous: append the full node to stale-removals.log
-    (recoverable), then delete it so dead anchors stop ranking.
-    Returns (verdict, path_or_newpath)."""
-    bodyf = None
-    try:
-        with tempfile.NamedTemporaryFile("w", suffix=".body", delete=False) as f:
-            f.write(body or "")
-            bodyf = f.name
-        r = subprocess.run(
-            [os.path.join(os.path.dirname(os.path.realpath(__file__)), "kb-rehome.sh"),
-             id_hex, path, title or "", bodyf],
-            capture_output=True, text=True, timeout=25,
-        )
-        out = r.stdout.strip()
-    except Exception:
-        out = "NOTFOUND"
-    finally:
-        if bodyf:
-            try:
-                os.unlink(bodyf)
-            except OSError:
-                pass
-    if out.startswith("REBUILT "):
-        return "REBUILT", out.split(" ", 1)[1]
-    log = os.path.expanduser("~/knowledge-base/stale-removals.log")
-    try:
-        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        with open(log, "a") as f:
-            f.write(f"{stamp} | {id_hex} | {path} | {out}\n  title: {title}\n  body: {(body or '').replace(chr(10), ' ⏎ ')}\n")
-    except Exception:
-        pass
-    try:
-        subprocess.run([GRAFT, "delete", id_hex], capture_output=True, text=True, timeout=15)
-        return "REMOVED", path
-    except Exception:
-        return "STALE", path
-
-
-def freshness_token(path):
-    """Freshness (zvec-grep port, P2): as_of age + possibly_stale from the
-    indexed snapshot's card mtime in global.db vs the file on disk. No card
-    row, missing db, or dead path => empty token (freshness unknown)."""
-    db = os.path.expanduser("~/.heimdall/global.db")
-    if not os.path.exists(db) or not os.path.exists(path):
-        return ""
-    try:
-        con = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
-        row = con.execute("SELECT mtime FROM cards WHERE path=?", (path,)).fetchone()
-        con.close()
-    except Exception:
-        return ""
-    if not row:
-        return ""
-    age = max(0.0, time.time() - row[0])
-    as_of = "%.1fh" % (age / 3600) if age < 86400 * 14 else "%.1fd" % (age / 86400)
-    try:
-        stale = os.path.getmtime(path) - row[0] > 1.0
-    except OSError:
-        stale = False
-    return "as_of=%s %s" % (as_of, "possibly_stale" if stale else "fresh")
-
-
-def content_score(path, query_tokens):
-    """Lexical coverage of query tokens against the anchored file's content.
-    None = cannot read (binary/missing/oversized) -> fall back to path+body
-    verdict only. Caps read at 256KB."""
-    if not path or not query_tokens:
-        return None
-    try:
-        if os.path.getsize(path) > 262144:
-            return None
-        with open(path, "rb") as f:
-            raw = f.read(262144)
-        if b"\x00" in raw[:1024]:
-            return None
-        text = raw.decode("utf-8", errors="replace").lower()
-        return sum(1 for t in query_tokens if t in text) / len(query_tokens)
-    except OSError:
-        return None
-
-
-def main():
-    try:
-        r_ = json.loads(sys.argv[1]).get("result") or {}
-        res = r_.get("results") or r_.get("nodes") or []
-    except Exception:
-        res = []
-    label = sys.argv[2]
-    scope = sys.argv[3]
-    try:
-        N = max(0, int(sys.argv[4]))
-    except ValueError:
-        N = 6
-    query = sys.argv[5] if len(sys.argv) > 5 else ""
-    qt = toks(query)
-
-    if scope:
-        res = [r for r in res if scope.lower() in ((r.get("title") or "") + " " + (r.get("body") or "")).lower()]
-    clean = [r for r in res if "unclassified" not in (r.get("title") or "").lower()
-             and "auto-sync" not in (r.get("title") or "").lower()]
-    if clean:
-        res = clean
-    if res:
-        top = max(abs(r.get("score", 0)) for r in res)
-        res = [r for r in res if abs(r.get("score", 0)) >= top * 0.3]
-    if N == 0 or not res:
-        print("  (no %s)" % label)
-        return
-
-    rows = []
-    for r in res[: max(N * 2, 8)]:
-        node = get_node(r.get("id_hex") or "")
-        node.update(r)
-        title = node.get("title") or ""
-        body = node.get("body") or ""
-        hay = (title + " " + body).lower()
-        cov = (sum(1 for t in qt if t in hay) / len(qt)) if qt else 0.0
-        paths = extract_paths(body or title)
-        # selftest ids anchor the path explicitly — trust it over prose extraction
-        if (r.get("id_hex") or "").startswith("selftest:"):
-            paths = [r["id_hex"][len("selftest:"):].rsplit(":", 1)[0]]
-        alive = [p for p in paths if os.path.exists(p)]
-        path = alive[0] if alive else (paths[0] if paths else "")
-        if alive:
-            cs = content_score(path, qt)
-            eff = cs if cs is not None else cov
-            # 0.5 threshold: heuristic, uncalibrated — half the query tokens must
-            # appear in file content. Tune only with a labeled hit set.
-            verdict = "STRONG" if eff >= 0.5 else "WEAK"
-        elif paths:
-            verdict = "STALE"
-        else:
-            verdict = "NOPATH"
-        if verdict == "STALE" and r.get("id_hex"):
-            # Deterministic self-heal: rehome if the file moved, else log + delete.
-            verdict, path = handle_stale(r["id_hex"], title, path, body)
-        vrank = {"STRONG": 0, "REBUILT": 0, "WEAK": 1, "STALE": 2, "REMOVED": 2, "NOPATH": 3}[verdict]
-        # Sort primarily by the daemon's semantic score (it already captures semantic
-        # similarity; cov/verdict is a trust label, not a relevance ranking). Verdict
-        # only breaks ties. This keeps the true STRONG hit on top instead of burying
-        # it under a junk node whose tokens happen to lexically overlap.
-        rows.append((-(r.get("score") or 0), vrank, verdict, cov, path, title, cs if alive else None))
-
-    # dedupe by path — prefer the non-auto-sync ("edited") node for the same path
-    seen = {}
-    for row in rows:
-        key = row[4] or row[5]
-        if key not in seen:
-            seen[key] = row
-        elif "edited" not in row[5].lower() and "edited" in seen[key][5].lower():
-            seen[key] = row
-    rows = sorted(seen.values(), key=lambda x: (x[0], x[1]))[:N]
-
-    print("  [%s — verified: STRONG=lex+path, REBUILT=path moved+node rebuilt, WEAK=semantic-only, STALE=path gone (auto-removed), REMOVED=deleted just now]" % label)
-    for i, (vrank, nsc, verdict, cov, path, title, cs) in enumerate(rows):
-        p = ("  " + path) if path else ""
-        cs_s = " content:%d%%" % int(cs * 100) if cs is not None else ""
-        fr = freshness_token(path) if path else ""
-        fr_s = (" " + fr) if fr else ""
-        print("  %2d. [%-6s] cov%02d%%%s%s  %s — %s" % (i + 1, verdict, int(cov * 100), cs_s, fr_s, p, title))
-
-
-if __name__ == "__main__":
-    main()
