@@ -207,6 +207,12 @@ function loadGuardReasons(baseline, candidate) {
 function capabilityReasons(baseline, candidate) {
   const b = baseline.capability;
   const c = candidate.capability;
+  // `fixed-samples` is a marker for a contract-test artifact, not a capability
+  // verdict. Comparing it against a real probe result produces nonsense in both
+  // directions (review: "CAPABILITY REGRESSION: fixed-samples -> graph", which
+  // reads as a downgrade while the extraction depth actually RISES). Such a pair
+  // is incomparable, so say that instead of inventing a verdict.
+  const isMarker = (v) => v === "fixed-samples";
   // A missing capability record on either side is a refusal, not a skip. The
   // anchor guard was hardened for exactly this reason after review; capability
   // was left with the old `if (b === undefined) return []` behaviour, which
@@ -218,7 +224,13 @@ function capabilityReasons(baseline, candidate) {
   if (c === undefined || c === null) {
     return [`capability missing (baseline ${b}) — the probe produced no verdict, so depth is unproven`];
   }
-  if (c !== b && c !== "fixed-samples") {
+  if (isMarker(b) !== isMarker(c)) {
+    return [
+      `capability not comparable: baseline ${b} vs candidate ${c} — ` +
+        `a fixed-samples artifact cannot be compared with a real probe result`,
+    ];
+  }
+  if (c !== b && !isMarker(c)) {
     // A `file` verdict is only a DOWNGRADE if it was actually determined. A
     // probe that timed out (common under load) also reports `file`, and review
     // reproduced the gate announcing "CAPABILITY REGRESSION: graph -> file"

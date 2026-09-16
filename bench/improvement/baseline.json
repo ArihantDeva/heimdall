@@ -1,6 +1,6 @@
 {
   "workload": {
-    "commit": "9b766db",
+    "commit": "cfe128c",
     "corpus": "scratch-fixture",
     "env": "darwin",
     "cache": "cold",
@@ -9,31 +9,33 @@
   "speed": {
     "depth": {
       "n": 100,
-      "p50": 109.110625,
-      "p95": 129.99888189999996,
+      "p50": 108.5897295,
+      "p95": 126.20693125,
       "p99": null
     },
     "depthRepeat": {
       "n": 100,
-      "p50": 105.89156299999999,
-      "p95": 113.32491909999999,
+      "p50": 105.07356250000001,
+      "p95": 110.715567,
       "p99": null
     }
   },
-  "disagreement": 0.9704972636716176,
+  "disagreement": 0.9676197093759222,
   "speedReliable": true,
-  "tailDisagreement": 0.8717376445373876,
+  "tailDisagreement": 0.8772542514379533,
   "tailReliable": true,
-  "anchor": 40.100333,
+  "anchor": 39.183,
   "anchorReadings": {
-    "before": 40.872459,
-    "after": 40.100333
+    "before": 39.612375,
+    "after": 39.183
   },
   "load": {
     "cores": 8,
-    "load1": 8.2021484375,
-    "load1PerCpu": 1.0252685546875
+    "load1": 7.9248046875,
+    "load1PerCpu": 0.9906005859375
   },
+  "capabilityDetermined": true,
+  "capabilityReason": "tree-sitter + graphify extractors available",
   "accuracy": {
     "mrr": 0.8888888888888888,
     "recall@1": 0.8888888888888888,

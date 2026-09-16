@@ -324,6 +324,22 @@ test("a missing or garbage baseline load refuses instead of disabling the guard"
   }
 });
 
+test("a fixed-samples baseline is incomparable, not a capability downgrade", () => {
+  // Review's secondary note: comparing a contract-test artifact against a real
+  // probe result produced "CAPABILITY REGRESSION: fixed-samples -> graph" — a
+  // downgrade message while extraction depth actually RISES.
+  const verdict = gate(
+    baseline({ capability: "fixed-samples" }),
+    candidate({ capability: "graph", capabilityDetermined: true }),
+  );
+  refused(verdict);
+  assert.ok(
+    verdict.reasons.some((r) => /not comparable/.test(r)),
+    `must say incomparable, not downgrade: ${JSON.stringify(verdict.reasons)}`,
+  );
+  assert.ok(!verdict.reasons.some((r) => /CAPABILITY REGRESSION/.test(r)));
+});
+
 // --- machine load: the noise guard cannot see a sustained slowdown ----------
 
 test("a uniformly slow machine is refused, not reported as a code regression", () => {
