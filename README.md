@@ -225,7 +225,6 @@ If Heimdall saved you a rebuild, a star helps other agents' humans find it.
    kb-search.sh → graft ask per repo (per-repo code graphs, --json) + embed-index.py query (global semantic)
                 → merged, deduped → verdict pass in-process (STRONG / WEAK / NOPATH)
                 → optional graft explore (graph walk of related work) → printed, ranked
-   (kb_search_verify.py targets the retired global `graft retrieve` daemon API; kept for history.)
 ```
 
 **Core invariants** (each has a test):
@@ -272,7 +271,7 @@ Extraction is tree-sitter AST parsing via a Python bridge, **not an LLM call**: 
 | **Hints** | `bin/lib/hints.mjs` | the one channel a non-writer may use (append-only, atomic, torn-line tolerant) |
 | **Sink** | `bin/lib/sink.mjs` | projection targets: `GraftSink` (CLI) and `MemorySink` (tests/dry-run) |
 | **Ranked search** | `bin/kb-search.sh` | top-k hybrid (per-repo `graft ask` + global semantic) merged + verdict pass in-process, `--scope` filter |
-| **Trust verification** | `bin/kb-search.sh` verdict pass | both backends compute verdicts in-process: STRONG requires card-to-file identity (size + mtime vs `~/.heimdall/global.db`) plus query coverage in the hit's text; two stats per hit, no file reads. `bin/kb_search_verify.py` is retained as history only — it targeted the retired global `graft retrieve` API and nothing invokes it |
+| **Trust verification** | `bin/kb-search.sh` verdict pass | both backends compute verdicts in-process: STRONG requires card-to-file identity (size + mtime vs `~/.heimdall/global.db`) plus query coverage in the hit's text; two stats per hit, no file reads |
 | **Stale pruning** | `bin/kb-stale-scan.py`, `bin/kb-rehome.sh` | full-graph sweep: deterministic rehome or log+delete |
 | **Health & telemetry** | `bin/kb-health.sh`, `bin/telemetry.sh` | daemon health, index freshness, usage stats (kb_* calls/24h, hit rate, est. time saved) |
 | **Bootstrap** | `bin/sync-edits.sh`, `bin/seed-graft.sh` | replay session edit logs → hints; seed inventory TSV into Graft |
@@ -366,7 +365,7 @@ the card tree lives.
 ## Testing
 
 ```bash
-npm test            # full suite (166 tests)
+npm test            # full suite (365 tests)
 npm run typecheck   # extensions typecheck
 ```
 
