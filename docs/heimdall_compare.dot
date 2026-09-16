@@ -27,7 +27,8 @@ digraph heimdall_compare {
         label="Heimdall  —  agent memory layer (MIT)";
         style="rounded,filled"; fillcolor="#fff4e6"; color="#d97706"; fontcolor="#d97706";
         h_watch [label="kb-autosync\nsession watcher"];
-        h_verify [label="kb_search_verify\ntrust verdicts\nSTRONG / WEAK / STALE / REBUILT"];
+        h_verify [label="kb-search.sh
+verdict pass\nSTRONG / WEAK / NOPATH"];
         h_walk [label="graph walk\n(related work)"];
         h_guard [label="kb-search-guard\ngrep-habit guard"];
         h_watch -> h_verify;
