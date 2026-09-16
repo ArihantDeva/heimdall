@@ -4,7 +4,6 @@
 // this behind an interface is what lets the invariant tests run without a
 // graft daemon, and is what makes "backends are pluggable" true in practice
 // rather than as an aspiration.
-import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";

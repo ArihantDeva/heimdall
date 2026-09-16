@@ -12,7 +12,7 @@ import { homedir } from "node:os";
 const BIN_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** Depth-bounded git-repo discovery. Skips node_modules/.git/vendor/hidden dirs except .git itself. */
-export function discoverRepos(root, { maxDepth = 3, maxRepos = 200 } = {}) {
+function discoverRepos(root, { maxDepth = 3, maxRepos = 200 } = {}) {
 	const out = [];
 	const SKIP = new Set(["node_modules", ".venv", "venv", "dist", "build", "__pycache__", ".cache"]);
 	const walk = (dir, depth) => {

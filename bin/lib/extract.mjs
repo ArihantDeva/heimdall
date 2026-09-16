@@ -28,7 +28,7 @@ const LANG_BY_EXT = {
   ".json": "json", ".toml": "toml", ".sql": "sql", ".html": "html", ".css": "css",
 };
 
-export const languageOf = (path) => LANG_BY_EXT[extname(path).toLowerCase()] ?? "text";
+const languageOf = (path) => LANG_BY_EXT[extname(path).toLowerCase()] ?? "text";
 
 /**
  * Node ids must be unique across the whole graph. graphify derives ids from the
