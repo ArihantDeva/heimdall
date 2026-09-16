@@ -29,9 +29,29 @@ Five fixes reported against 0.10.0. Each has a regression test that failed on
   existence plus query-token overlap, and a semantic hit's body is synthesized
   as `semantic hit [<path>]` — so the path alone scored full coverage and a
   stale card could still label a live-but-changed file STRONG. STRONG now
-  requires card-to-file identity (size and mtime vs `~/.heimdall/global.db`),
-  which is one `stat` per hit and opens nothing. Hits that cannot be verified
-  are WEAK and carry the reason on their own line.
+  requires card-to-file identity: the file is a regular file (not a directory
+  or symlink) whose size and mtime still match the `cards` row in
+  `~/.heimdall/global.db`. That is two stats per hit and opens nothing, and the
+  mtime comparison is symmetric and exact — the same test `embed-index.py` uses
+  to decide a file is unchanged. The mnemosyne backend, which has no cards to
+  check, now reports WEAK with the reason instead of claiming STRONG from a
+  path plus matching tokens, so one word no longer means two things depending
+  on which backend answered. Hits that cannot be verified are WEAK and carry
+  the reason on their own line.
+- **`capability()` reported AST depth it could not deliver.** The probe
+  imported `graphify.extract` — a stdlib-only module — while every language
+  grammar is imported lazily inside the extractors and its failure is turned
+  into error rows that settle at file depth. A python with tree-sitter and no
+  language binding was therefore told `graph` while every non-Python file fell
+  back, and because `cap_max` is stamped into the journal the missing upgrade
+  stopped being re-reported. The probe now extracts a real file and requires
+  symbol nodes back. Note the ceiling it documents: `max` is per-python, not
+  per-language — only the grammars you install produce symbol depth.
+- **Documents promised a `windsurf` harness that does not exist.** The README,
+  `AGENTS.md`, `docs/adapters.md` and the CLI usage string all listed
+  `--harness windsurf`, but no writer is registered, so the documented command
+  threw. The claims are removed rather than satisfied with an unverifiable
+  config format; `docs/adapters.md` records why and what adding it back needs.
 - **Declaration facts lost their predicate.** The `declaration` pattern put the
   subject in capture group 1 and the predicate in group 2, while the extractor
   read only `m[1]` — so `X is allowed` and `X is not allowed` both became
