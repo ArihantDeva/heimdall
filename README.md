@@ -9,6 +9,10 @@
 
 **Your agent keeps rebuilding work you already did. Heimdall makes it stop.**
 
+<p align="center">
+  <a href="https://raw.githubusercontent.com/ArihantDeva/heimdall/main/docs/assets/demo.mp4"><img alt="Heimdall demo" src="https://raw.githubusercontent.com/ArihantDeva/heimdall/main/docs/assets/demo.png" width="720"></a>
+</p>
+
 Heimdall gives AI coding agents **persistent memory across every repository and project you work on** so the question *"did I already solve this in another project?"* gets answered by one verified search instead of twenty minutes of grep, `find`, and `ls` loops.
 
 ## The problem it solves

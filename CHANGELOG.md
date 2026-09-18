@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.12.1 — 2026-09-18
+
+### Added
+
+- **Gallery preview**: `video` + `image` fields in `package.json` pointing at the
+  demo capture (`docs/assets/demo.mp4`, `demo.png`), so the pi.dev package
+  gallery renders an autoplaying preview for @arihantdeva/heimdall. Assets also
+  embedded in the README.
+
 ## 0.12.0 — 2026-09-18
 
 ### Added
