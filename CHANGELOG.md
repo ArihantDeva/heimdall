@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.12.0 — 2026-09-18
+
+### Added
+
+- **Pi native package**: `package.json` now carries a `pi` manifest
+  (`extensions: ["./extensions"]`) and the `pi-package` keyword, so pi loads the
+  four kb extensions straight from the npm/git package (`pi install
+  npm:@arihantdeva/heimdall`) with no file copying. `@earendil-works/pi-coding-agent`
+  and `typebox` declared as `peerDependencies` with `"*"` (pi bundles/aliases both).
+- `heimdall init --harness pi` now detects a package-managed install
+  (`~/.pi/agent/npm` / `.pi/npm` containing a heimdall `package.json` with a `pi`
+  manifest) and wires only the rules block — previously it would copy the same
+  extension files pi already loads from the package, double-registering tools.
+
 ## 0.11.0 — 2026-09-16
 
 Deletions, not features. Five fixes reported against 0.10.0 (each with a

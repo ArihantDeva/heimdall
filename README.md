@@ -309,6 +309,19 @@ HEIMDALL_NO_AUTOINIT=1 npm i -g @arihantdeva/heimdall   # skip auto-setup
 
 `npm i -g` runs a best-effort postinstall that auto-wires every detected harness (never fails the install; opt out with `HEIMDALL_NO_AUTOINIT=1`).
 
+### Pi native package
+
+Heimdall is also a **pi native package** — install it through pi itself and the four
+extensions (`kb_search` / `kb_insert` / `kb_sync` tools, kb-orient, kb-autosync,
+kb-search-guard) load directly from the package, no file copying:
+
+```bash
+pi install npm:@arihantdeva/heimdall        # or: pi install git:github.com/ArihantDeva/heimdall
+```
+
+`heimdall init --harness pi` stays for global-install wiring; it detects a
+package-managed install and wires only the rules block (no duplicate extensions).
+
 | Harness | Command | Rules file | MCP | Guard hook |
 |---|---|---|---|---|
 | **Claude Code** | `init --harness claude-code` | `~/.claude/CLAUDE.md` | ✅ `settings.json` | ✅ PostToolUse hook |

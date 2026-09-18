@@ -31,3 +31,4 @@ target/
 
 # exported ONNX model — local 127 MB blob, regenerable, never committed
 rs/**/model/
+*.tgz

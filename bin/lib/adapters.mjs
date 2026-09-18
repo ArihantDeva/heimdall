@@ -99,6 +99,23 @@ function resolveCli() {
 // pi auto-discovers extensions from ~/.pi/agent/extensions/. The heimdall npm
 // package ships kb-tools.ts / kb-search-guard.ts / kb-autosync.ts / kb-orient.ts.
 function writePi(home) {
+	// If heimdall is already installed as a pi package (pi manifest in its
+	// package.json, under ~/.pi/agent/npm or a project .pi/npm), pi loads the
+	// extensions from the package itself — copying duplicates them. Wire the
+	// rules block only.
+	const npmRoots = [join(home, ".pi", "agent", "npm", "node_modules"), join(home, ".pi", "npm", "node_modules")];
+	for (const root of npmRoots) {
+		for (const name of ["@arihantdeva/heimdall", "heimdall"]) {
+			const manifest = join(root, name, "package.json");
+			if (!existsSync(manifest)) continue;
+			try {
+				if (JSON.parse(readFileSync(manifest, "utf8"))?.pi?.extensions?.length) {
+					upsertMarkdownBlock(join(home, ".pi", "agent", "AGENTS.md"));
+					return "pi (package-managed — extensions loaded by pi, rules wired)";
+				}
+			} catch { /* unreadable manifest — fall through to copy */ }
+		}
+	}
 	const pkgExtensions = join(pkgRoot(), "extensions");
 	const targetDir = ensure(join(home, ".pi", "agent", "extensions"));
 	const libTarget = ensure(join(targetDir, "lib"));
