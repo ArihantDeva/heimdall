@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.3 — 2026-09-19
+
+### Fixed
+
+- **CI build broken since 0.12.0**: adding `peerDependencies`
+  (`@earendil-works/pi-coding-agent`, `typebox`) without regenerating
+  `package-lock.json` made `npm ci` fail with "Missing: @earendil-works/
+  pi-coding-agent@0.85.1 from lock file" on every CI run. Lockfile regenerated
+  with `npm install --package-lock-only`.
+
 ## 0.12.2 — 2026-09-18
 
 ### Fixed

@@ -1,6 +1,6 @@
 {
   "name": "@arihantdeva/heimdall",
-  "version": "0.12.2",
+  "version": "0.12.3",
   "description": "Verified, self-healing knowledge layer for AI coding agents: cross-repo memory with trust verdicts, zero-token CPU-only indexing, hybrid retrieval",
   "license": "MIT",
   "keywords": [
