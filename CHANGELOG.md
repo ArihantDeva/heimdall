@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.12.4 — 2026-09-19
+
+### Fixed
+
+- **graftd build fails on macOS hosts with a broken CommandLine Tools libc++**:
+  some CLT installs ship a stub `usr/include/c++/v1` (a handful of headers, no
+  `<array>`) that clang resolves ahead of the SDK's real libc++, so graftd
+  configure+build dies with `'array' file not found` even under `-isysroot`.
+  `graft-build.mjs` now probes the compiler with a one-line `#include <array>`
+  before configuring; when the probe fails but the active SDK has a real
+  `c++/v1`, it injects `-DCMAKE_CXX_FLAGS=-isystem <sdk>/usr/include/c++/v1`.
+  Verified: fresh `npm pack` → graftd builds and runs on the affected machine.
+
 ## 0.12.3 — 2026-09-19
 
 ### Fixed

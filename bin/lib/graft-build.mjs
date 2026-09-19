@@ -1,7 +1,7 @@
 // graft-build.mjs — build/probe/install the graftd C++ daemon.
 // ESM, node built-ins only. Must NOT import setup.mjs (setup.mjs imports this).
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, copyFileSync, renameSync, chmodSync, unlinkSync, appendFileSync } from "node:fs";
+import { spawnSync, execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, copyFileSync, renameSync, chmodSync, unlinkSync, appendFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
@@ -174,6 +174,29 @@ export function buildGraftd({
       configureArgs.push(`-DGRAFT_LLAMA_CPP_SOURCE_DIR=${llamaSourceDir}`);
     }
     configureArgs.push(...accelCmakeFlags(accel));
+
+    // Broken-CLT libc++ workaround: some CommandLine Tools installs ship a
+    // stub usr/include/c++/v1 (a handful of headers, no <array> etc.) that
+    // shadows the real libc++ in the SDK, so bare <c++ header> compiles fail
+    // with "'array' file not found" even with -isysroot. Detect it cheaply:
+    // compile a one-line <array> probe; if it fails but the SDK's c++/v1 has
+    // <array>, pass the SDK include via CXXFLAGS so every TU (graft + llama)
+    // sees real libc++.
+    if (process.platform === "darwin" && tc.compiler) {
+      const sdkRoot = env.SDKROOT || (() => { try { return execFileSync("xcrun", ["--show-sdk-path"], { encoding: "utf8", env }).trim(); } catch { return null; } })();
+      const probeSrc = join(home, ".heimdall", "build", "cxx-probe.cpp");
+      try {
+        mkdirSync(dirname(probeSrc), { recursive: true });
+        writeFileSync(probeSrc, "#include <array>\nint main() { return 0; }\n");
+        const probe = spawnSync(tc.compiler, [probeSrc, "-o", join(dirname(probeSrc), "cxx-probe.out")], {
+          encoding: "utf8", timeout: 30_000, env,
+        });
+        if (probe.status !== 0 && sdkRoot && existsSync(join(sdkRoot, "usr", "include", "c++", "v1", "array"))) {
+          configureArgs.push(`-DCMAKE_CXX_FLAGS=-isystem ${join(sdkRoot, "usr", "include", "c++", "v1")}`);
+          appendLog(`[heimdall] broken CLT libc++ detected — injecting SDK c++/v1 include\n`);
+        }
+      } catch { /* probe failure is non-fatal; build proceeds and reports normally */ }
+    }
 
     const timeoutLeft1 = resolvedTimeoutMs - (Date.now() - t0);
     if (timeoutLeft1 <= 0) {
