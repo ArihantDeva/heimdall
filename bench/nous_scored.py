@@ -83,8 +83,15 @@ DEFAULT_RUBRIC = "The response must contain the correct answer."
 
 def _keys() -> list[tuple[str, str]]:
     import json as j
-    auth = j.loads(pathlib.Path.home().joinpath(
-        ".pi", "agent", "auth.json").read_text())
+    import stat
+    auth_path = pathlib.Path.home().joinpath(".pi", "agent", "auth.json")
+    mode = auth_path.stat().st_mode
+    if mode & (stat.S_IRWXG | stat.S_IRWXO):
+        raise PermissionError(
+            f"{auth_path} must not be group/world accessible "
+            f"(found mode {oct(mode & 0o777)}); run "
+            f"'chmod 600 {auth_path}' before loading API keys")
+    auth = j.loads(auth_path.read_text())
     out = []
     for g in GATEWAYS:
         k = auth.get(g["key"])
