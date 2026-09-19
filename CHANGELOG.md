@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.2 — 2026-09-18
+
+### Fixed
+
+- Gallery `video`/`image` preview fields moved **inside the `pi` manifest**
+  (where the pi.dev gallery reads them per docs/packages.md) — the 0.12.1
+  top-level placement was ignored.
+
 ## 0.12.1 — 2026-09-18
 
 ### Added

@@ -1,6 +1,6 @@
 {
   "name": "@arihantdeva/heimdall",
-  "version": "0.12.1",
+  "version": "0.12.2",
   "description": "Verified, self-healing knowledge layer for AI coding agents: cross-repo memory with trust verdicts, zero-token CPU-only indexing, hybrid retrieval",
   "license": "MIT",
   "keywords": [
@@ -24,15 +24,15 @@
   "bugs": {
     "url": "https://github.com/ArihantDeva/heimdall/issues"
   },
-  "video": "https://raw.githubusercontent.com/ArihantDeva/heimdall/main/docs/assets/demo.mp4",
-  "image": "https://raw.githubusercontent.com/ArihantDeva/heimdall/main/docs/assets/demo.png",
   "bin": {
     "heimdall": "bin/heimdall.js"
   },
   "pi": {
     "extensions": [
       "./extensions"
-    ]
+    ],
+    "video": "https://raw.githubusercontent.com/ArihantDeva/heimdall/main/docs/assets/demo.mp4",
+    "image": "https://raw.githubusercontent.com/ArihantDeva/heimdall/main/docs/assets/demo.png"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
