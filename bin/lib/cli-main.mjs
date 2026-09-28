@@ -15,6 +15,13 @@ const USAGE = `usage: heimdall <command>
         [--accel auto|metal|cuda|cpu] [--graftd PATH] [--skip-daemon] [--detect-only]
   search "<query>" [-n N] [--scope S] [--no-explore]          ranked + verified knowledge search
   insert --title T --body B [--keywords k1,k2]                record reusable knowledge
+  insert --kind person --name N [--org O] [--role R] …       record a person in the people store
+  person add --name N [--org O] [--role R] [--aliases a,b]    add/update a person
+             [--url U] [--notes N] [--relationship R] [--last-contact D]
+  person rm --name N [--org O]                                remove a person
+  person import --kb <linkedin|substack|x|all> [--dry-run]    import people from a knowledge base
+  person list [--limit N]                                     list stored people
+  person backup                                               snapshot people.db
   ingest-email [--accounts a,b] [--limit N] [--root DIR]      index mailbox (read-only via cli-email)
   doctor                                                      daemon + index health check
 
@@ -54,6 +61,11 @@ async function runInsert(args) {
     const i = args.indexOf(f);
     return i >= 0 ? args[i + 1] : "";
   };
+  // P4: a person write dispatches BEFORE the title/body requirement below.
+  // That check is unconditional in the pre-change code, so `kb_insert
+  // --kind person --name ...` would exit 1 demanding a --title it has no use
+  // for. Order is the whole contract here.
+  if (get("--kind") === "person") return (await import("./people-cli.mjs")).runPersonInsert(args);
   const title = get("--title");
   const body = get("--body");
   const kws = (get("--keywords") || "").split(",").filter(Boolean);
@@ -457,6 +469,7 @@ export async function main(argv) {
     case "score": return await runScore(rest);
     case "depth": return runDepth(rest);
     case "hint": return runHint(rest);
+    case "person": return (await import("./people-cli.mjs")).runPersonCmd(rest);
     case "search": return runSearch(rest);
     case "insert": return await runInsert(rest);
     case "ingest-email": return await runIngestEmail(rest);

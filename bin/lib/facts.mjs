@@ -26,6 +26,11 @@ const SECRET_RES = [
 
 const isSecret = (s) => SECRET_RES.some((re) => re.test(s));
 
+// Exported (2026-09-28 retrieval spec, P4/P6) so the people store reuses the
+// SAME normalizer and the SAME secret screen rather than declaring a second
+// copy. The 2026-08-23 spec's D3 is explicit that two implementations drift, and
+// a second secret regex is a trust-boundary bug waiting to happen.
+
 // Ordered fact patterns over one normalized utterance. First match wins kind,
 // so the order below IS the precedence: preferences outrank generic
 // assertions, declarations outrank bare negations.
@@ -52,6 +57,7 @@ const DEDUP_JACCARD = 0.97;
 
 const nfkc = (s) => s.normalize("NFKC");
 const norm = (s) => nfkc(s).replace(/\s+/g, " ").trim();
+export { isSecret, norm };
 const factId = (body) => "fact-" + createHash("sha256").update(body).digest("hex").slice(0, 12);
 
 // Dedup keys are lowercase + whitespace-collapsed; provenance ([path:line])
