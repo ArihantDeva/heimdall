@@ -22,6 +22,13 @@ export function skipPath(path, home) {
     // reconcile despite living in a dotdir.
     const promptsPrefix = `${home}/.heimdall/prompts/`;
     if (path.startsWith(promptsPrefix)) return false;
+    // Session logs (spec P3, 2026-09-28) are the second fact source. Same
+    // reasoning as the prompt carve-out: they live in a dotdir, so the
+    // dotdir rule below would skip them, but the facts they carry are the
+    // point. Only .jsonl under the sessions tree, so nothing else in ~/.pi
+    // (secrets, config, git mirrors) becomes an ingest target.
+    const sessionsPrefix = `${home}/.pi/agent/sessions/`;
+    if (path.startsWith(sessionsPrefix) && path.endsWith(".jsonl")) return false;
     if (path.startsWith(`${home}/.`)) return true;
     if (path.startsWith(`${home}/Library/`)) return true;
   }

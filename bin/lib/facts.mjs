@@ -116,20 +116,53 @@ function extractFromLine(lineText, path, line, out, meta) {
   }
 }
 
+// Pi session logs. The real record shape is
+//   {"type":"message","message":{"role":"user","content":[{"type":"text","text":...}]}}
+// — the text is one level deeper than the pre-change `rec.text` this parser
+// read, and because the nested shape still parses as valid JSON, the old code
+// reported "no facts" rather than failing. A session log with no user text at
+// all is a real, common shape (an abandoned session), so the probe reports
+// what it SAW rather than whether it found anything.
+const SESSION_ROLES = new Set(["user"]);
+
+// Returns null when this file is not a session log. `sawRole` is true when a
+// message.role was observed, which is what makes the probe positive: a
+// non-session JSONL has no role, so it falls through to parsePlain instead of
+// being silently drained.
+function sessionTexts(rec) {
+  const m = rec?.message;
+  if (!m || typeof m !== "object" || typeof m.role !== "string") return null;
+  if (!SESSION_ROLES.has(m.role)) return [];
+  if (typeof m.content === "string") return [m.content];
+  if (!Array.isArray(m.content)) return [];
+  return m.content
+    .filter((b) => b && typeof b === "object" && b.type === "text" && typeof b.text === "string")
+    .map((b) => b.text);
+}
+
 function parseJsonl(buf, path, out, meta) {
   const lines = buf.toString("utf8").split("\n");
   let sawJson = false;
+  let isSession = false;
   lines.forEach((l, i) => {
     if (!l.trim()) return;
     try {
       const rec = JSON.parse(l);
       sawJson = true;
-      const text = typeof rec?.text === "string" ? rec.text : "";
-      text.split(/(?<=[.!?])\s+|\n/).forEach((u) =>
-        extractFromLine(u, path, i + 1, out, meta));
+      // Legacy flat shape, kept for the prompt-log format.
+      if (typeof rec?.text === "string") {
+        rec.text.split(/(?<=[.!?])\s+|\n/).forEach((u) =>
+          extractFromLine(u, path, i + 1, out, meta));
+        return;
+      }
+      const texts = sessionTexts(rec);
+      if (texts === null) return; // not a session record; not our business
+      isSession = true;
+      texts.forEach((t) => t.split(/(?<=[.!?])\s+|\n/).forEach((u) =>
+        extractFromLine(u, path, i + 1, out, meta)));
     } catch { /* torn/non-JSON line: skipped by design */ }
   });
-  return sawJson;
+  return sawJson ? (isSession ? "session" : "json") : false;
 }
 
 function parsePlain(buf, path, out, meta) {
@@ -153,7 +186,16 @@ export function extractFacts(buf, meta = { path: "" }) {
   meta.skippedDuplicates = meta.skippedDuplicates ?? 0;
   if (!buf || !buf.toString("utf8").trim()) return [];
   const out = [];
-  if (!parseJsonl(buf, meta.path, out, meta)) parsePlain(buf, meta.path, out, meta);
+  // "session" | "json" | false. "session" means recognised session records,
+  // so parsePlain must NOT run or the same text is extracted twice. The
+  // pre-change code only returned a boolean, so a session log ALSO fell
+  // through to parsePlain and double-extracted.
+  if (parseJsonl(buf, meta.path, out, meta) !== "session" && !out.length) {
+    // Only fall back when nothing was extracted: a non-session JSONL keeps
+    // the plain parser, and a session log with no user text yields nothing
+    // rather than being re-parsed as prose.
+    parsePlain(buf, meta.path, out, meta);
+  }
   // ponytail: dedup is per-path ONLY — cross-path dedup intentionally absent
   // (spec D4): fact ownership is namespaced by source file, so editing one
   // file retracts exactly its own nodes and two files stating the same fact

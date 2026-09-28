@@ -42,6 +42,12 @@ export const nodeIdFor = (path, rawId) => `${nsFor(path)}:${rawId}`;
 /** The capture directory (extensions/prompt-capture.ts writes here). */
 const promptsDir = () => join(homedir(), ".heimdall", "prompts") + "/";
 
+/** Pi session logs (spec P3, 2026-09-28). A second fact source, .jsonl only. */
+const sessionsDir = () => join(homedir(), ".pi", "agent", "sessions") + "/";
+
+const factSource = (path) =>
+  path.startsWith(promptsDir()) || path.startsWith(sessionsDir());
+
 /**
  * Append fact nodes + stated_in edges for opted-in paths: config facts:true,
  * or anything living under the capture directory. The flag form lets tests
@@ -133,7 +139,7 @@ export function desiredState(path, depth, opts = {}) {
   // prompt log is just another watched file).
   appendFactState(nodes, edges, buf, path, fileNodeId,
     rank(depth) >= rank("file") &&
-    (opts.facts === true || path.startsWith(promptsDir())));
+    (opts.facts === true || factSource(path)));
 
   if (rank(depth) >= rank("symbol")) {
     const bridged = opts.bridged?.get(path) ?? runBridge([path], opts.cap).get(path);
