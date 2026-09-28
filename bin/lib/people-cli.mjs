@@ -158,7 +158,7 @@ function readKb(kind) {
   return { rows: parseCsv(readFileSync(p, "utf8")), note: null };
 }
 
-const MAPPERS = { linkedin: mapLinkedIn, substack: mapSubstack, x: mapX };
+export const MAPPERS = { linkedin: mapLinkedIn, substack: mapSubstack, x: mapX };
 
 export function importKb(store, which, { dryRun = false } = {}) {
   const kinds = which === "all" ? ["linkedin", "substack", "x", "personal"] : [which];

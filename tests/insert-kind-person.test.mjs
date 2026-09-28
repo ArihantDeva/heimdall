@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { MAPPERS } from "../bin/lib/people-cli.mjs";
 import { openPeople, screenPerson, upsertPerson } from "../bin/lib/people.mjs";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -200,6 +201,52 @@ print(repr(c.execute("select notes from people").fetchone()[0]))`, db], { encodi
     assert.match(got, /hand-typed note/, "a null source value destroyed the stored note");
   } finally {
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("every mapper emits null for an absent value, through the REAL mapper", () => {
+  // MAJOR from review round 3. The previous "null preserves" test hand-rolled
+  // upsertPerson({notes: null}) and never called a mapper, so it exercised the
+  // SQL COALESCE (fixed a commit earlier) rather than the absent() helper this
+  // commit added. It passed against the vulnerable pre-fix source. "Which
+  // columns may a writer touch" is a trust boundary, so it needs a test that
+  // actually fails when a mapper regresses.
+  const emptyX = { handle: "crescely", name: "Crescely", bio: "" };
+  assert.deepEqual(MAPPERS.x(emptyX), {
+    name: "Crescely", aliases: "crescely", url: "https://x.com/crescely",
+    notes: null, identity_verified: null, confidence: null,
+    source: "x-devabuilds-follower-kb",
+  }, "mapX emitted an empty string where it must emit null");
+
+  const emptyLi = { first_name: "Jane", last_name: "Doe", slug: "", company: "",
+    position: "", linkedin_url: "", interests: "", outreach: "" };
+  const li = MAPPERS.linkedin(emptyLi);
+  for (const col of ["aliases", "org", "role", "url", "notes",
+    "identity_verified", "confidence"]) {
+    assert.equal(li[col], null, `mapLinkedIn left ${col} as an empty string`);
+  }
+
+  const emptySub = { name: "Jane", handle: "", primary_publication: "",
+    substack_url: "", bio: "", interests: "", outreach: "" };
+  const sub = MAPPERS.substack(emptySub);
+  for (const col of ["aliases", "org", "url", "notes",
+    "identity_verified", "confidence"]) {
+    assert.equal(sub[col], null, `mapSubstack left ${col} as an empty string`);
+  }
+});
+
+test("a hand-written note survives a REAL mapper round trip", () => {
+  // The end-to-end version: the real importKb shape, not a hand-rolled call.
+  const dir = mkdtempSync(join(tmpdir(), "heimdall-mapper-rt-"));
+  try {
+    const store = openPeople(join(dir, "people.db"));
+    upsertPerson(store, { name: "Crescely", notes: "met at builder meetup" });
+    upsertPerson(store, MAPPERS.x({ handle: "crescely", name: "Crescely", bio: "" }));
+    assert.equal(store.db.prepare("SELECT notes FROM people").get().notes,
+      "met at builder meetup",
+      "the real X mapper destroyed a hand-written note via the null/empty-string rule");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
