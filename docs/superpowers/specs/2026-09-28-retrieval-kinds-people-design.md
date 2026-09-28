@@ -91,7 +91,7 @@ Every row is `select count(*) from cards where path LIKE '<pattern>'` against
 | K6 | People hits are **always STRONG** and **bypass the verdict pass entirely** | Route them through the merge/verdict loop | `[review-fix 1]` **BLOCKER found:** the loop hardcodes `os.path.exists(p)` (`kb-search.sh:318`), `os.lstat(p)` + `S_ISREG` (`:371`), and emits `NOPATH / "anchor is gone from disk"` (`:397`) for a non-path string. A person hit routed through it renders NOPATH. `[review-2 #6]` the **rationale is corrected**: the first draft blamed `kb-search-guard.ts`, which has no verdict awareness at all — `:79-85` only rewrites `event.content` with a canned warning, it never parses `STRONG`/`NOPATH`. The real consumers that would misread NOPATH are `bin/lib/mcp-server.mjs:80` (stdout passthrough) and the agent-facing line format. The fix is the same: a separate emission path, not a flag. |
 | K7 | Default output reuses the existing numbered-hit line; `--long` prints full person rows | A separate people block | Every existing consumer (MCP server, `kb-search-guard.ts`, agents) keeps parsing one format. |
 | P1 | `~/.heimdall/people.db` — a **separate** store, not a `journal.db` migration | Table on the journal | A migration on the hot single-writer journal risks the reconciler for a workload with no reconcile semantics. |
-| P2 | 12 columns: `id, name, aliases, org, role, url, relationship, last_contact, notes, source, created_at, updated_at` | Flat notes-only card; normalized interactions tables | CRM-lite per user decision. No `interactions` table — not a stated need; `notes` holds that detail until it is. |
+| P2 | 12 columns: `id, name, aliases, org, role, url, relationship, last_contact, notes, source, created_at, updated_at`, PLUS two columns the source KBs carry and this store must not drop: `identity_verified` and `confidence` | Flat notes-only card; normalized interactions tables | CRM-lite per user decision. `[kb-schema 2026-09-28]` the three real KBs (below) all carry an explicit identity-verification verdict and a confidence string, and many rows are candidly unverified ("** no — no public web footprint found"). Dropping them would turn a documented unknown into a silent assertion. |
 | P3 | Match = `LIKE` over `name, aliases, org, role, notes`; the exact-match tiebreak is applied **in JS after the fetch**, not in SQL | FTS5; any SQL alias-list tiebreak | `[review-2 #3]` **BLOCKER found.** Both SQL attempts were wrong. `name = ?2` ignored aliases entirely; the `[review-fix 13]` repair `COALESCE(NULLIF(aliases,''), name) = ?2` compares the *whole comma-joined string* to the query, so it fires only when a person has **no aliases at all** — the reviewer reproduced the inverted ordering. A comma-list element match needs `(','||replace(aliases,' ','')||',') LIKE '%,'||?2||',%'`, which is one more string expression per row to save nothing. Rows are few (P3 ceiling); sorting in JS after the fetch is shorter, exact, and testable. |
 | P4 | Write via **both** `heimdall person add/rm` and `kb_insert --kind person` | One or the other | `[review-fix 20]` `runInsert` (`cli-main.mjs:52-62`) **requires** `--title`/`--body` and unconditionally materializes a fact card. Dispatch rule: `--kind person` short-circuits **before** the title/body check, writes the people row, and returns without touching `~/heimdall-notes/facts/`. The existing insert path is unchanged for every other kind. |
 | P5 | No recency on people or facts | `last_contact` as a rank signal | `last_contact` is user-maintained data, not a fact about the code. Ranking on it makes a true-but-stale person sink. |
@@ -254,6 +254,51 @@ cards) goes; `Repos/heimdall/bench/*.py` stays; `~/.bun/install/cache/
 @protobufjs/float@1.0.2@@@1/bench/` stays; `~/.config/harness-truth/bench/`
 stays. A blanket `bench` entry would have deleted all three.
 
+### Source knowledge bases `[kb-schema 2026-09-28]`
+
+User state: four people KBs exist (linkedin, personal, substack, X), same CRM-lite
+structure. **Three are on disk; the fourth is not.** Search performed: `fd -t d
+-d 4 "dossiers"` (the only three dirs on the volume containing a `dossiers/`
+tree), `fd -t d -i "KB"`, name and content greps for `substack` / `linkedin` /
+`last_contact`, and a sweep of `~/*` for `*.db`/`*.sqlite`. The fourth — a
+personal network built from messages — has **no KB, no dossiers directory, and
+no store on disk**. Candidates checked and rejected: `Network Leverage System`
+(CSV index, 0 dossiers), `equitylens-staging/scripts/pilot-outbound` (outbound
+firm prospecting, not a personal network), `linkedin-engine/data`
+(`signals.jsonl`, engagement metrics — not people), `Obsidian Vault/Jarvis`
+(`memories` table, 0 rows), `command-center/data/outreach_status.jsonl` (0
+lines). **Phase 2 imports the three that exist; the fourth is recorded as
+missing, not stubbed.**
+
+| KB | Path | Rows | Dossiers | Structured source |
+|---|---|---|---|---|
+| LinkedIn connections | `~/Desktop/Code Projects/Connections Enrichment KB/` | 1,519 | 1,524 | `enrichment.csv`, 18 cols |
+| Substack followers | `~/Desktop/Documents/Substack Deva Follower KB/` | 142 | 147 | `enrichment.csv`, 20 cols |
+| X followers | `~/Desktop/Code Projects/X DevaBuilds Follower KB/` | 44 | 18 | `raw/x_followers.json` |
+| Personal (messages) | **NOT FOUND ON DISK** | — | — | — |
+
+**Field mapping.** The KBs are the same CRM-lite shape with different column
+names; the importer maps them, it does not invent fields.
+
+| people.db | LinkedIn | Substack | X |
+|---|---|---|---|
+| `name` | `first_name` + `last_name` | `name` | `name` |
+| `org` | `company` | `primary_publication` | — |
+| `role` | `position` | — | — |
+| `url` | `linkedin_url` | `substack_url` | — |
+| `aliases` | `slug` | `handle` | `handle` |
+| `notes` | `interests` + `outreach` | `interests` + `outreach` + `bio` | `bio` |
+| `source` | `connections-enrichment-kb` | `substack-deva-follower-kb` | `x-devabuilds-follower-kb` |
+| `identity_verified` | `identity_verified` | `identity_verified` | — (absent ⇒ NULL, **not** "yes") |
+| `confidence` | `confidence` | `confidence` | — |
+
+`last_contact` and `relationship` are **not** in any source KB: they are
+hand-maintained and start NULL. An import must never invent them.
+
+`X` rows have no identity or confidence field at all. NULL means unknown, and
+the KB discipline is explicit that unverifiable is a valid recorded state —
+so the importer stores NULL rather than defaulting to a positive value.
+
 ### people.db shape
 
 ```sql
@@ -268,6 +313,8 @@ CREATE TABLE IF NOT EXISTS people (
   relationship  TEXT,
   last_contact  TEXT,                  -- ISO date, user-maintained, NOT ranked (P5)
   notes         TEXT,
+  identity_verified TEXT,             -- from the KB, verbatim; NULL = unknown
+  confidence    TEXT,                  -- from the KB, verbatim; NULL = unknown
   source        TEXT,                  -- provenance path or 'manual'
   created_at    TEXT NOT NULL,
   updated_at    TEXT NOT NULL
@@ -458,9 +505,14 @@ Gates: `npm test && npm run typecheck`, then
   `PRUNE_PREFIXES` split (E1), the `fact_kind TEXT` v4 migration,
   `kb-tools.ts` typebox param + description update.
   Verifiable alone: kinds/default-identical/recency/long/exclusions/v4 tests green.
-- **Phase 2 — people.db.** Schema, `heimdall person add/rm`,
-  `kb_insert --kind person` dispatch (P4), backup (P6).
-  Verifiable alone: people-store + insert-kind-person tests green.
+- **Phase 2 — people.db.** Schema (including `identity_verified` and
+  `confidence`), `heimdall person add/rm`, `heimdall person import --kb <name>`
+  for the three verified KBs, `kb_insert --kind person` dispatch (P4), backup
+  (P6), `--long`.
+  Verifiable alone: people-store + insert-kind-person + import tests green, and
+  `--kind person` returns real rows.
+  The fourth KB (personal, via messages) **does not exist on disk** — Phase 2
+  imports the other three and records the gap, rather than stubbing it.
 - **Phase 3 — session facts.** `facts.mjs` session probe + role filter +
   `parsePlain` suppression; **all three** gates widened; one-time backfill.
   Verifiable alone: session-facts test green **and** a non-zero fact count
@@ -475,7 +527,10 @@ Phases 1 and 2 are independent. 3 depends on neither but is useless without 1.
 
 - The `global.db` rebuild that actually drops the 186,172 excluded cards.
 - Whether `bench/` belongs in a *default* install at all, vs a bench profile.
-- Harvest from `linkedin-engine` / Obsidian vault into `people.db`.
+- [Phase 4] the 30-query set's person golds were placeholders (`Arihant Deva`,
+  `Jev`, `Heimdall`, `Ollama`) — three of which are not people. Replaced with
+  10 real names/handles from the verified on-disk KBs, so the person slice
+  measures retrieval rather than scoring a name that was never in any store.
 - `zg`/`zvec-grep` already solves meaning-based search inside a repo; whether
   `--kind code` should delegate rather than duplicate it.
 - `FACT_HISTORY_CAP = 50` vs long-running sessions.
