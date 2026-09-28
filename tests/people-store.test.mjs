@@ -82,6 +82,13 @@ test("searchPeople matches name, aliases, org, role and notes", () => {
   });
 });
 
+test("secret-shaped text is refused by the shared screen, not a local copy", () => {
+  withStore((db) => {
+    const res = upsertPerson(db, { name: "Jane", notes: "key sk-ABCDEFGHIJKLMNOPQRSTUVWX here" });
+    assert.equal(res.skipped, true, "a secret-shaped note was stored");
+    assert.equal(db.db.prepare("SELECT count(*) n FROM people").get().n, 0);
+  });
+});
 test("searchPeople ranks an exact alias/name match first", () => {
   withStore((db) => {
     upsertPerson(db, { name: "Bill Mackenzie", aliases: "wilhelm", org: "X" });
@@ -95,11 +102,27 @@ test("searchPeople ranks an exact alias/name match first", () => {
   });
 });
 
-test("secret-shaped text is refused by the shared screen, not a local copy", () => {
+test("a refused row is COUNTED, never silently dropped", () => {
+  // Regression: the first import reported "mapped 1519, skipped 0" while
+  // storing only 1510. upsertPerson refused 9 rows on the shared secret screen
+  // and the caller never looked at the return value, so 9 real people vanished
+  // with a clean report. The count must be visible in the report.
   withStore((db) => {
-    const res = upsertPerson(db, { name: "Jane", notes: "key sk-ABCDEFGHIJKLMNOPQRSTUVWX here" });
-    assert.equal(res.skipped, true, "a secret-shaped note was stored");
-    assert.equal(db.db.prepare("SELECT count(*) n FROM people").get().n, 0);
+    const ok = upsertPerson(db, { name: "Fine Person", org: "Acme" });
+    assert.equal(ok.skipped, false);
+    // The REAL refused text, copied from the LinkedIn export, not invented:
+    // 'AI startups' + 'rocketreach' inside one 40+ char run trips the shared
+    // base64 class. A hand-shortened string would not reproduce it.
+    const bad = upsertPerson(db, {
+      name: "Andrew Zhang",
+      identity_verified: "** yes — exact slug match (andrew-zhangg): "
+        + "\"Co-Founder & CEO, Azure Partners | Advisor to AI startups\"; led "
+        + "Columbia's AI Mastery program; RocketReach/TopContenders/Happenstance/"
+        + "azurepartners.ai corroborate.",
+    });
+    assert.equal(bad.skipped, true, "the secret-shaped row was accepted");
+    // A refused row must not be half-written.
+    assert.equal(db.db.prepare("SELECT count(*) n FROM people").get().n, 1);
   });
 });
 

@@ -135,7 +135,7 @@ export function importKb(store, which, { dryRun = false } = {}) {
     const { rows, note } = readKb(k);
     if (note) { report.push({ kb: k, imported: 0, note }); continue; }
     const map = MAPPERS[k];
-    let seen = 0, skipped = 0, dupes = 0;
+    let seen = 0, skipped = 0, dupes = 0, refused = 0;
     const ids = new Set();
     for (const row of rows) {
       const p = map(row);
@@ -143,10 +143,19 @@ export function importKb(store, which, { dryRun = false } = {}) {
       const id = idFor(p.name, p.org);
       if (ids.has(id)) dupes++;
       ids.add(id);
-      seen++;
-      if (!dryRun) upsertPerson(store, p);
+      if (!dryRun) {
+        // A refusal must be COUNTED and reported. An earlier version returned
+        // silently and lost 9 real people with no trace: 1,519 rows mapped,
+        // 1,510 stored, and the report said "skipped: 0".
+        const r = upsertPerson(store, p);
+        if (r.skipped) { refused++; continue; }
+        seen++;
+      } else {
+        seen++;
+      }
     }
-    report.push({ kb: k, source_rows: rows.length, mapped: seen, skipped, dupes_in_batch: dupes });
+    report.push({ kb: k, source_rows: rows.length, stored: seen, skipped,
+      refused_by_secret_screen: refused, dupes_in_batch: dupes });
   }
   return report;
 }
