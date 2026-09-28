@@ -25,7 +25,20 @@ test("FC-01 every fact carries exactly the contract keys with sane types", () =>
     jsonl([prompt("I prefer SQLite over Postgres.", 1)]), { path: PATH });
   assert.ok(facts.length >= 1, "expected at least one fact");
   for (const f of facts) {
-    assert.deepEqual(Object.keys(f).sort(), ["body", "id", "keywords", "line", "title"]);
+    // `kind` was added by the 2026-09-28 retrieval spec (K5): the
+    // preference/assertion/declaration/negation classification used to be
+    // discarded here, so `--kind decision` had no column to filter on. The
+    // contract is WIDENED, not replaced — every pre-existing key is still
+    // required. Consumers (bench/ingest.py) read named keys, never a closed
+    // set, so this is additive for them.
+    assert.deepEqual(
+      Object.keys(f).sort(),
+      ["body", "id", "keywords", "kind", "line", "title"],
+    );
+    assert.ok(
+      ["preference", "assertion", "declaration", "negation"].includes(f.kind),
+      `unexpected fact kind ${f.kind}`,
+    );
     assert.equal(typeof f.id, "string");
     assert.equal(typeof f.title, "string");
     assert.equal(typeof f.body, "string");

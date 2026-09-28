@@ -12,20 +12,81 @@
 #
 # Usage:
 #   kb-search "<query>" [-n N] [--scope S] [--no-explore]
+#                       [--kind person|decision|fact|code|all] [--recency] [--long]
 #   HEIMDALL_REPOS="~/Repos/a:~/Repos/b" kb-search "query"   # override roots
+#
+# 2026-09-28 retrieval spec: --kind/--recency/--long are ADDITIVE. With no
+# --kind (or --kind code) the behaviour and bytes are exactly what they were
+# before they existed; tests/kinds-default-identical.test.mjs pins that against
+# a committed golden. Unknown flags and unknown kinds exit 2 with the valid
+# list — the pre-change `*) shift ;;` swallowed them silently, which turned
+# `verify --deeph` into a plain `verify` here too.
 set -u
-Q="${1:?usage: kb-search \"<query>\" [-n N] [--scope S] [--no-explore]}"
+
+usage() {
+	cat >&2 <<'USAGE'
+usage: kb-search "<query>" [-n N] [--scope S] [--no-explore]
+                   [--kind person|decision|fact|code|all] [--recency] [--long]
+  --kind  filter to one kind of knowledge (default: all code hits, unchanged)
+  --recency  weight code hits by age, 0.5**(age_days/180). Default off.
+  --long   print full rows for --kind person
+USAGE
+}
+
+if [ $# -eq 0 ]; then usage; exit 2; fi
+Q="$1"
+# The empty string must be rejected explicitly: `${1:?}` cannot tell "set but
+# empty" from "set and non-empty", so `kb-search "" -n 2` ran the whole search
+# with an empty query before.
+if [ -z "$Q" ]; then usage; exit 2; fi
 shift
 N=6
 SCOPE=""
+KIND=""
+RECENCY=0
+LONG=0
 while [ $# -gt 0 ]; do
 	case "$1" in
 		-n) [ $# -ge 2 ] && { N="${2:-6}"; shift 2; } || { N=6; shift; } ;;
 		--scope) [ $# -ge 2 ] && { SCOPE="${2:-}"; shift 2; } || shift ;;
 		--no-explore) shift ;;
-		*) shift ;;
+		--kind)
+			if [ $# -lt 2 ]; then
+				echo "error: --kind requires a value" >&2
+				usage
+				exit 2
+			fi
+			KIND="$2"
+			shift 2
+			;;
+		--recency) RECENCY=1; shift ;;
+		--long) LONG=1; shift ;;
+		*)
+			echo "error: unknown option for search: $1" >&2
+			usage
+			exit 2
+			;;
 	esac
 done
+
+# Validate the kind here, in the shell, where the parsing lives. A bad value
+# fails before any backend is touched, so it costs nothing and is unambiguous.
+case "$KIND" in
+	"") ;;
+	person|decision|fact|code|all) ;;
+	*)
+		echo "error: unknown --kind '$KIND' (valid: person, decision, fact, code, all)" >&2
+		exit 2
+		;;
+esac
+
+# --long expands person rows (K7). On any other kind there is nothing to
+# expand, so it is a usage error rather than a flag that quietly does nothing.
+if [ "$LONG" = "1" ] && [ "$KIND" != "person" ]; then
+	echo "error: --long requires --kind person" >&2
+	usage
+	exit 2
+fi
 
 SELF="$(readlink -f "$0" 2>/dev/null || python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$0" 2>/dev/null || echo "$0")"
 SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd -P)"
@@ -106,7 +167,15 @@ fi
 # targeted the retired global `graft retrieve` daemon API and had no callers, so
 # it was deleted; only its extract_paths() helper survives, for the stale scan.
 # Both backends above compute their own verdicts in-process.)
-echo "== retrieve (per-repo graft + global semantic): $Q"
+# Suppressed for --kind person/fact/decision: those are answered by the
+# dispatch block below, which prints its own "retrieve (people)" / "retrieve
+# (facts)" header. Printing a header naming graft+semantic legs that never ran
+# is the same lie as showing code hits under a people question (finding 1).
+# kind=code and kind=print unchanged, so the default bytes are untouched.
+case "$KIND" in
+	person|fact|decision) ;;
+	*) echo "== retrieve (per-repo graft + global semantic): $Q" ;;
+esac
 if [ ! -x "$GRAFT" ]; then
 	# Not a tool failure: a fresh/unconfigured machine has validly zero results.
 	# Exit 0 so callers (MCP kb_search) get an answer, not isError.
@@ -137,6 +206,97 @@ if [ ${#REPO_LIST[@]} -eq 0 ] && [ -z "${SCOPE:-}" ]; then
 	# Fresh install / no indexed repos yet: valid empty answer (exit 0), with
 	# setup guidance in-band. Exit 1 here broke MCP kb_search (isError) on CI.
 	echo "No repos with a graft graph found under ~/Repos yet. Index one: cd <repo> && heimdall index (or graft build). Search returns no hits until then."
+	exit 0
+fi
+
+# ── A person/fact query never runs the code legs at all.
+# The people and fact legs are a small self-contained Python block below (they
+# need sqlite3 and $Q/$N); the main code worker never sees those kinds, because
+# this dispatch exits first. It must sit BEFORE the graft/semantic legs
+# (reviewer finding 2): a pure people query was paying ~15s of graft work whose
+# results were then discarded, and with no people.db it was printing code hits
+# under a "retrieve (people)" question (finding 1).
+if [ "$KIND" = "person" ] || [ "$KIND" = "fact" ] || [ "$KIND" = "decision" ]; then
+	python3 - "$Q" "$N" "$KIND" "$LONG" <<'PYEOF'
+import os, sqlite3, sys, shutil, tempfile
+
+q, n, kind, long_out = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4] == "1"
+home = os.path.expanduser("~")
+
+
+def rows_from(db, sql, args):
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    out = con.execute(sql, args).fetchall()
+    con.close()
+    return out
+
+
+if kind == "person":
+    db = os.path.join(home, ".heimdall", "people.db")
+    if not os.path.exists(db):
+        print('No ~/.heimdall/people.db yet. Create one with: '
+              'heimdall person add --name "Full Name"')
+        sys.exit(0)
+    like = "%" + q + "%"
+    rows = rows_from(db,
+        "SELECT * FROM people WHERE name LIKE ?1 OR aliases LIKE ?1 OR org LIKE ?1 "
+        "OR role LIKE ?1 OR notes LIKE ?1", (like,))
+    out = [{"id": r["id"], "row": dict(r)} for r in rows]
+    # Alias-exact first, in JS: a SQL compare against the comma-joined alias
+    # string is wrong (it only fires when aliases is empty), and LIKE alone
+    # ranks a partial name match above an exact alias hit.
+    needle = q.strip().lower()
+    out.sort(key=lambda h: (needle not in (h["row"]["name"] or "").lower()
+                            and needle not in (h["row"]["aliases"] or "").lower(),
+                            (h["row"]["name"] or "").lower()))
+    if out:
+        print("== retrieve (people):")
+    for i, h in enumerate(out[:n], 1):
+        r = h["row"]
+        bits = [b for b in (r.get("org"), r.get("role"), r.get("url")) if b]
+        head = " · ".join([r["name"] or "?"] + bits[:2]) if bits else (r["name"] or "?")
+        print(f" {i}. [STRONG] cov100%  people.db:{h['id']}")
+        print(f"      {head}")
+        if long_out:
+            for f in ("aliases", "relationship", "last_contact", "confidence",
+                      "identity_verified", "source", "created_at", "updated_at"):
+                if r.get(f):
+                    print(f"      {f}: {r[f]}")
+    sys.exit(0)
+
+# fact / decision. The journal has a live reconciler holding it, so copy
+# before reading; a direct open fails with 'unable to open database file'.
+src = os.path.join(home, ".heimdall", "journal.db")
+if not os.path.exists(src):
+    sys.exit(0)
+tmp = tempfile.mktemp(suffix=".db")
+try:
+    shutil.copyfile(src, tmp)
+    sql = ("SELECT node_id, path, fact_title, fact_body, fact_kind FROM owned_nodes "
+           "WHERE kind = 'fact'")
+    if kind == "decision":
+        sql += " AND fact_kind IN ('assertion','declaration')"
+    like = "%" + q + "%"
+    sql += " AND (fact_title LIKE ? OR fact_body LIKE ?)"
+    rows = rows_from(tmp, sql, (like, like))
+except Exception as e:
+    print(f"WARN: fact leg failed: {e}", file=sys.stderr)
+    rows = []
+finally:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+if rows:
+    print("== retrieve (facts):")
+for i, r in enumerate(rows[:n], 1):
+    print(f" {i}. [STRONG] cov100%  {r['path']}")
+    print(f"      {r['fact_title'] or ''}")
+    if long_out and r["fact_kind"]:
+        print(f"      kind: {r['fact_kind']}")
+sys.exit(0)
+PYEOF
 	exit 0
 fi
 
@@ -179,13 +339,16 @@ while IFS= read -r root; do
 	[ -n "$root" ] && ROOT_ARGS+=("$root")
 done <<< "$SCOPE_ROOTS"
 
-python3 - "$Q" "$N" "$SCRIPT_DIR" "${ROOT_ARGS[@]}" <<'PYEOF'
-import json, os, subprocess, sys
+python3 - "$Q" "$N" "$SCRIPT_DIR" "$KIND" "$RECENCY" "$LONG" "${ROOT_ARGS[@]}" <<'PYEOF'
+import json, os, sqlite3, subprocess, sys, time
 
 q = sys.argv[1]
 n = int(sys.argv[2])
 script_dir = sys.argv[3]
-repos = sys.argv[4:]
+kind = sys.argv[4] or "code"
+recency = sys.argv[5] == "1"
+long_out = sys.argv[6] == "1"
+repos = sys.argv[7:]
 graft = os.environ.get("GRAFT", "graft")
 from concurrent.futures import ThreadPoolExecutor
 
@@ -269,7 +432,46 @@ if os.path.exists(venv_py) and os.path.exists(os.path.expanduser("~/.heimdall/gl
 seen = {}
 for r in sorted(results, key=lambda x: -x["score"]):
     seen.setdefault(r["title"], r)
-merged = sorted(seen.values(), key=lambda x: -x["score"])[:n]
+# The `[:n]` truncation is DEFERRED when --recency is on (reviewer finding 3):
+# truncating first and weighting after means a 5-month-old file that was cut at
+# rank 7 can never be promoted back in, so the flag could only reorder the
+# survivors. Weighting must happen over the full merged set. With --recency off
+# (the default) the truncate stays exactly here, so the no-flag bytes are
+# untouched.
+merged = sorted(seen.values(), key=lambda x: -x["score"])
+if not recency:
+    merged = merged[:n]
+
+# ── --recency (spec K4, default OFF). weight = 0.5 ** (age_days / 180),
+# applied post-merge, pre-truncate. Only hits that HAVE a card mtime are
+# weighted: a graft-only hit has no card, and giving it weight 0 would silently
+# demote every lexical result to nothing on a graft-only machine. No card ⇒
+# weight 1.0 (unchanged). People/facts are untouched (K4: code cards only).
+if recency:
+    # Deliberately its own lookup rather than reusing the card_mtimes dict
+    # below: that one is populated AFTER this point, and moving it earlier
+    # would reorder the default path. One extra read-only query, only ever
+    # paid when --recency is passed.
+    mt = {}
+    if os.path.exists(db_path := os.path.expanduser("~/.heimdall/global.db")):
+        try:
+            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            hp = [r["path"] for r in merged if r.get("path")]
+            if hp:
+                qm = ",".join("?" * len(hp))
+                for p_, m_ in con.execute(
+                        f"SELECT path, mtime FROM cards WHERE path IN ({qm})", hp):
+                    mt[p_] = m_
+            con.close()
+        except Exception:
+            mt = {}
+    now = time.time()
+    for r in merged:
+        m_ = mt.get(r.get("path"))
+        if isinstance(m_, (int, float)):
+            age_days = max(0.0, now - m_) / 86400.0
+            r["score"] = r["score"] * (0.5 ** (age_days / 180.0))
+    merged = sorted(merged, key=lambda x: -x["score"])[:n]
 
 # Verdict pass: STRONG requires identity with the indexed content — the path
 # exists AND the file on disk still matches the card that was indexed (size +
