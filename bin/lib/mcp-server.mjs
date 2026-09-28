@@ -27,12 +27,24 @@ const TOOLS = [
 			properties: {
 				query: { type: "string", description: "What to look for in machine memory" },
 				n: { type: "number", description: "Max results (default 6)" },
+				kind: {
+					type: "string",
+					enum: ["person", "decision", "fact", "code", "all"],
+					description:
+						"What to look for. person = the people store; decision/fact = things you said; " +
+						"code = repos on this machine (default, unchanged); all = everything.",
+				},
 			},
 			required: ["query"],
 		},
 		run: (a) => {
 			if (typeof a.query !== "string" || !a.query.trim()) return Promise.resolve({ code: 1, text: "ERROR: query is required and must be a non-empty string" });
-			return cli(["search", String(a.query), "-n", String(Math.max(1, Math.min(50, Number(a.n) || 6)))]);
+			const args = ["search", String(a.query), "-n", String(Math.max(1, Math.min(50, Number(a.n) || 6)))];
+			// An unknown kind is rejected by kb-search.sh with exit 2; the MCP
+			// layer collapses every nonzero to isError, so the caller sees
+			// isError:true either way. That collapse is recorded, not fixed here.
+			if (a.kind) args.push("--kind", String(a.kind));
+			return cli(args);
 		},
 	},
 	{

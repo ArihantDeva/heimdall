@@ -95,7 +95,7 @@ CREATE INDEX IF NOT EXISTS fact_history_path ON fact_history(path, invalidated_a
 // SCHEMA is CREATE .*IF NOT EXISTS / guarded ALTER, so replaying is a no-op on
 // an up-to-date database and brings an old one up to date; the version stamp
 // only records how far the file has been migrated.
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 // Retention: keep at most this many history rows per source path (newest
 // win). Fact trails are dominated by line-shift noise on actively-edited
@@ -140,6 +140,18 @@ export class Journal {
       this.db.exec("ALTER TABLE owned_nodes ADD COLUMN fact_body TEXT");
       this.db.exec("ALTER TABLE fact_history ADD COLUMN fact_title TEXT");
       this.db.exec("ALTER TABLE fact_history ADD COLUMN fact_body TEXT");
+    } catch (err) {
+      if (!/duplicate column/i.test(String(err?.message))) throw err;
+    }
+    // v4 migration (2026-09-28 retrieval spec K5): the extractor's
+    // preference/assertion/declaration/negation classification was never
+    // persisted — owned_nodes.kind is the literal "fact" and the node id is
+    // `fact-<sha256>@<ns>`, so the kind is unrecoverable from the row. Without
+    // this column `--kind decision` is a silent no-op that returns every fact.
+    // Additive, nullable; pre-v4 rows backfill nothing (the classification is
+    // not in the row and is re-derived by the next reconcile).
+    try {
+      this.db.exec("ALTER TABLE owned_nodes ADD COLUMN fact_kind TEXT");
     } catch (err) {
       if (!/duplicate column/i.test(String(err?.message))) throw err;
     }
@@ -364,14 +376,14 @@ export class Journal {
       db.prepare(`DELETE FROM pending_edges WHERE path = ?`).run(o.path);
 
       const insNode = db.prepare(
-        `INSERT INTO owned_nodes (node_id, path, kind, symbol, line, label, sink_id, fact_title, fact_body)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO owned_nodes (node_id, path, kind, symbol, line, label, sink_id, fact_title, fact_body, fact_kind)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       for (const n of o.nodes) {
         insNode.run(
           n.node_id, o.path, n.kind, n.symbol ?? null,
           n.line ?? null, n.label ?? null, n.sink_id ?? null,
-          n.fact_title ?? null, n.fact_body ?? null,
+          n.fact_title ?? null, n.fact_body ?? null, n.fact_kind ?? null,
         );
       }
       const insEdge = db.prepare(

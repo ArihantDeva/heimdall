@@ -76,7 +76,13 @@ test("facts-cli: happy path prints ONE parseable JSON fact array on stdout", () 
     assert.ok(Array.isArray(facts), "stdout must decode to an array");
     assert.ok(facts.length >= 2, `want >=2 facts, got ${facts.length}`);
     for (const f of facts) {
-      assert.deepEqual(Object.keys(f).sort(), ["body", "id", "keywords", "line", "title"]);
+      // Widened by the 2026-09-28 spec (K5): `kind` carries the extractor's
+      // classification so `--kind decision` can filter on it. Additive — the
+      // JSON contract is still ONE parseable fact array, unchanged otherwise.
+      assert.deepEqual(
+        Object.keys(f).sort(),
+        ["body", "id", "keywords", "kind", "line", "title"],
+      );
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });

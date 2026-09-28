@@ -60,6 +60,10 @@ function appendFactState(nodes, edges, buf, path, fileNodeId, enabled) {
       // so the history trail can answer "what did we believe".
       fact_title: f.title,
       fact_body: f.body,
+      // journal v4 (2026-09-28 spec K5): persist the extractor's
+      // classification so `--kind decision` (assertion ∪ declaration) can be
+      // answered from the row. NULL-safe for every non-fact node.
+      fact_kind: f.kind ?? null,
       keywords: f.keywords,
       line: f.line,
     });

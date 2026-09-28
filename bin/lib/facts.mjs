@@ -83,6 +83,11 @@ function makeFact(kind, rawUtterance, path, line) {
     title: norm(rawUtterance).slice(0, MAX_TITLE),
     body,
     keywords: keywordsFor(kind, rawUtterance),
+    // The classification is carried on the fact itself (2026-09-28 spec K5).
+    // It used to be discarded here, which is why the journal had no way to
+    // answer `--kind decision`: owned_nodes.kind is the literal "fact" and
+    // the id is `fact-<sha256>`, so the kind was unrecoverable downstream.
+    kind,
     line,
   };
 }

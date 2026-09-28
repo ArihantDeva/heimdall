@@ -12,20 +12,81 @@
 #
 # Usage:
 #   kb-search "<query>" [-n N] [--scope S] [--no-explore]
+#                       [--kind person|decision|fact|code|all] [--recency] [--long]
 #   HEIMDALL_REPOS="~/Repos/a:~/Repos/b" kb-search "query"   # override roots
+#
+# 2026-09-28 retrieval spec: --kind/--recency/--long are ADDITIVE. With no
+# --kind (or --kind code) the behaviour and bytes are exactly what they were
+# before they existed; tests/kinds-default-identical.test.mjs pins that against
+# a committed golden. Unknown flags and unknown kinds exit 2 with the valid
+# list — the pre-change `*) shift ;;` swallowed them silently, which turned
+# `verify --deeph` into a plain `verify` here too.
 set -u
-Q="${1:?usage: kb-search \"<query>\" [-n N] [--scope S] [--no-explore]}"
+
+usage() {
+	cat >&2 <<'USAGE'
+usage: kb-search "<query>" [-n N] [--scope S] [--no-explore]
+                   [--kind person|decision|fact|code|all] [--recency] [--long]
+  --kind  filter to one kind of knowledge (default: all code hits, unchanged)
+  --recency  weight code hits by age, 0.5**(age_days/180). Default off.
+  --long   print full rows for --kind person
+USAGE
+}
+
+if [ $# -eq 0 ]; then usage; exit 2; fi
+Q="$1"
+# The empty string must be rejected explicitly: `${1:?}` cannot tell "set but
+# empty" from "set and non-empty", so `kb-search "" -n 2` ran the whole search
+# with an empty query before.
+if [ -z "$Q" ]; then usage; exit 2; fi
 shift
 N=6
 SCOPE=""
+KIND=""
+RECENCY=0
+LONG=0
 while [ $# -gt 0 ]; do
 	case "$1" in
 		-n) [ $# -ge 2 ] && { N="${2:-6}"; shift 2; } || { N=6; shift; } ;;
 		--scope) [ $# -ge 2 ] && { SCOPE="${2:-}"; shift 2; } || shift ;;
 		--no-explore) shift ;;
-		*) shift ;;
+		--kind)
+			if [ $# -lt 2 ]; then
+				echo "error: --kind requires a value" >&2
+				usage
+				exit 2
+			fi
+			KIND="$2"
+			shift 2
+			;;
+		--recency) RECENCY=1; shift ;;
+		--long) LONG=1; shift ;;
+		*)
+			echo "error: unknown option for search: $1" >&2
+			usage
+			exit 2
+			;;
 	esac
 done
+
+# Validate the kind here, in the shell, where the parsing lives. A bad value
+# fails before any backend is touched, so it costs nothing and is unambiguous.
+case "$KIND" in
+	"") ;;
+	person|decision|fact|code|all) ;;
+	*)
+		echo "error: unknown --kind '$KIND' (valid: person, decision, fact, code, all)" >&2
+		exit 2
+		;;
+esac
+
+# --long expands person rows (K7). On any other kind there is nothing to
+# expand, so it is a usage error rather than a flag that quietly does nothing.
+if [ "$LONG" = "1" ] && [ "$KIND" != "person" ]; then
+	echo "error: --long requires --kind person" >&2
+	usage
+	exit 2
+fi
 
 SELF="$(readlink -f "$0" 2>/dev/null || python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$0" 2>/dev/null || echo "$0")"
 SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd -P)"
@@ -179,15 +240,93 @@ while IFS= read -r root; do
 	[ -n "$root" ] && ROOT_ARGS+=("$root")
 done <<< "$SCOPE_ROOTS"
 
-python3 - "$Q" "$N" "$SCRIPT_DIR" "${ROOT_ARGS[@]}" <<'PYEOF'
-import json, os, subprocess, sys
+python3 - "$Q" "$N" "$SCRIPT_DIR" "$KIND" "$RECENCY" "$LONG" "${ROOT_ARGS[@]}" <<'PYEOF'
+import json, os, sqlite3, subprocess, sys, time
 
 q = sys.argv[1]
 n = int(sys.argv[2])
 script_dir = sys.argv[3]
-repos = sys.argv[4:]
+kind = sys.argv[4] or "code"
+recency = sys.argv[5] == "1"
+long_out = sys.argv[6] == "1"
+repos = sys.argv[7:]
 graft = os.environ.get("GRAFT", "graft")
 from concurrent.futures import ThreadPoolExecutor
+
+# ── K6: people hits are emitted by a DEDICATED path and never reach the
+# verdict pass below, which hardcodes os.path.exists(p) / os.lstat(p) and emits
+# NOPATH for anything that is not a real file. `people.db:<id>` is not a file,
+# so a person hit routed through that loop would render as a dead anchor.
+def emit_people():
+    db = os.path.expanduser("~/.heimdall/people.db")
+    if not os.path.exists(db):
+        return []
+    if kind in ("code",):
+        return []
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        con.row_factory = sqlite3.Row
+        like = "%" + q + "%"
+        rows = con.execute(
+            "SELECT * FROM people WHERE name LIKE ?1 OR aliases LIKE ?1 "
+            "OR org LIKE ?1 OR role LIKE ?1 OR notes LIKE ?1", (like,)).fetchall()
+        con.close()
+    except Exception as e:
+        # Never a bare traceback and never a silent drop (2026-08-25 lesson).
+        print(f"WARN: people leg failed: {e}", file=sys.stderr)
+        return []
+    out = []
+    for r in rows:
+        name = r["name"] or "?"
+        bits = [b for b in (r["org"], r["role"], r["url"]) if b]
+        head = " · ".join([name] + bits[:2]) if bits else name
+        out.append({"id": r["id"], "name": name, "head": head, "row": dict(r)})
+    # Alias-exact first, in JS: a SQL compare against the comma-joined alias
+    # string is wrong (it only matches when aliases is empty), and LIKE alone
+    # puts a partial name match above an exact alias hit.
+    needle = q.strip().lower()
+    out.sort(key=lambda h: (needle not in (h["name"] or "").lower()
+                            and needle not in (h["row"]["aliases"] or "").lower(),
+                            h["name"].lower()))
+    return out[:n]
+
+
+def emit_facts():
+    # Facts are NOT exempt from the verdict pass — K6 covers people only, and a
+    # fact hit anchors to its real source file. The rows come from the journal.
+    if kind not in ("fact", "decision", "all"):
+        return []
+    import shutil, tempfile
+    src = os.path.expanduser("~/.heimdall/journal.db")
+    if not os.path.exists(src):
+        return []
+    # A live reconciler holds journal.db; copy before reading (direct open
+    # fails with 'unable to open database file' under that writer).
+    tmp = tempfile.mktemp(suffix=".db")
+    try:
+        shutil.copyfile(src, tmp)
+        con = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
+        con.row_factory = sqlite3.Row
+        sql = ("SELECT node_id, path, fact_title, fact_body, fact_kind "
+               "FROM owned_nodes WHERE kind = 'fact'")
+        args = ()
+        if kind == "decision":
+            sql += " AND fact_kind IN ('assertion','declaration')"
+        like = "%" + q + "%"
+        sql += " AND (fact_title LIKE ? OR fact_body LIKE ?)"
+        rows = con.execute(sql, (like, like)).fetchall()
+        con.close()
+    except Exception as e:
+        print(f"WARN: fact leg failed: {e}", file=sys.stderr)
+        return []
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    return [{"id": r["node_id"], "title": r["fact_title"] or "",
+             "body": r["fact_body"] or "", "path": r["path"],
+             "fact_kind": r["fact_kind"]} for r in rows][:n]
 
 def ask_repo(repo):
     try:
@@ -270,6 +409,77 @@ seen = {}
 for r in sorted(results, key=lambda x: -x["score"]):
     seen.setdefault(r["title"], r)
 merged = sorted(seen.values(), key=lambda x: -x["score"])[:n]
+
+# ── --recency (spec K4, default OFF). weight = 0.5 ** (age_days / 180),
+# applied post-merge, pre-truncate. Only hits that HAVE a card mtime are
+# weighted: a graft-only hit has no card, and giving it weight 0 would silently
+# demote every lexical result to nothing on a graft-only machine. No card ⇒
+# weight 1.0 (unchanged). People/facts are untouched (K4: code cards only).
+if recency:
+    # Deliberately its own lookup rather than reusing the card_mtimes dict
+    # below: that one is populated AFTER this point, and moving it earlier
+    # would reorder the default path. One extra read-only query, only ever
+    # paid when --recency is passed.
+    mt = {}
+    if os.path.exists(db_path := os.path.expanduser("~/.heimdall/global.db")):
+        try:
+            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            hp = [r["path"] for r in merged if r.get("path")]
+            if hp:
+                qm = ",".join("?" * len(hp))
+                for p_, m_ in con.execute(
+                        f"SELECT path, mtime FROM cards WHERE path IN ({qm})", hp):
+                    mt[p_] = m_
+            con.close()
+        except Exception:
+            mt = {}
+    now = time.time()
+    for r in merged:
+        m_ = mt.get(r.get("path"))
+        if isinstance(m_, (int, float)):
+            age_days = max(0.0, now - m_) / 86400.0
+            r["score"] = r["score"] * (0.5 ** (age_days / 180.0))
+    merged = sorted(merged, key=lambda x: -x["score"])[:n]
+
+# ── K6: people are emitted here, directly, and NEVER enter the verdict loop
+# below. That loop opens with os.path.exists(p) and os.lstat(p); a
+# `people.db:<id>` anchor is not a filesystem path, so it would come out NOPATH
+# — "anchor is gone from disk" — for a person who is right there in the store.
+# Both are bound to [] up front: the early-exit below reads them on a path where
+# their own branch never ran (e.g. --kind fact never defines ppl).
+ppl = []
+facts = []
+if kind in ("person", "all"):
+    ppl = emit_people()
+    if ppl:
+        print("== retrieve (people):")
+        for i, h in enumerate(ppl, 1):
+            print(f" {i}. [STRONG] cov100%  people.db:{h['id']}")
+            print(f"      {h['head']}")
+            if long_out:
+                row = h["row"]
+                for f in ("aliases", "relationship", "last_contact", "confidence",
+                          "identity_verified", "source", "created_at", "updated_at"):
+                    v = row.get(f)
+                    if v:
+                        print(f"      {f}: {v}")
+
+if kind in ("fact", "decision", "all"):
+    facts = emit_facts()
+    if facts:
+        print("== retrieve (facts):")
+        for i, f in enumerate(facts, 1):
+            print(f" {i}. [STRONG] cov100%  {f['path']}")
+            print(f"      {f['title']}")
+            if long_out and f.get("fact_kind"):
+                print(f"      kind: {f['fact_kind']}")
+
+# A pure person/fact query answers from its own leg; running the code legs
+# first would pay ~15s of graft+semantic work whose results are discarded.
+# `code` and `all` fall through to the code path below.
+if kind in ("person", "fact", "decision"):
+    if ppl or facts:
+        sys.exit(0)
 
 # Verdict pass: STRONG requires identity with the indexed content — the path
 # exists AND the file on disk still matches the card that was indexed (size +

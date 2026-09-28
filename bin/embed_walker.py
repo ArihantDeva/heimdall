@@ -20,6 +20,27 @@ PRUNE_DIRS = {
     "DerivedData", ".expo", ".dart_tool", ".pub-cache", ".gem", ".kube",
     ".docker", ".colima", ".lima", ".orbstack",
 }
+# Path-prefix exclusions, matched against the ABSOLUTE path (2026-09-28 spec
+# E1). PRUNE_DIRS matches a BASENAME at every depth below the $HOME walk root,
+# so a bare "bench" entry would prune every dir named bench on the volume --
+# measured: heimdall's own bench/*.py, ~/.config/harness-truth/bench/, and
+# ~/.bun/install/cache/@protobufjs/float@1.0.2@@@1/bench/ (1,230 real cards).
+# These two subtrees are genuinely noise and have no such collateral:
+#   /bench/runs/              162,276 cards of LongMemEval session transcripts
+#   /.claude/file-history/      303 cards of superseded copies of real files
+# vendor/.audit/.claire stay in PRUNE_DIRS: those names are artifacts at any
+# depth and have no real-source sibling worth protecting.
+PRUNE_PREFIXES = ("/bench/runs/", "/.claude/file-history/")
+
+
+def _pruned_by_prefix(abs_path: str) -> bool:
+    """True when `abs_path` sits under a PRUNE_PREFIXES subtree.
+
+    Substring, not prefix-component: the caller passes a directory that may be
+    any descendant, and a descendant of bench/runs/ is noise just as much as
+    the subtree root is.
+    """
+    return any(p in abs_path for p in PRUNE_PREFIXES)
 # ponytail: 128KB payload cap — larger files still get indexed via their
 # 3000-char preview; the cap only bounds the sniff/read window indirectly.
 MAX_BYTES = 131_072
@@ -133,7 +154,7 @@ def discover_files(root: pathlib.Path, graft_dirs_out=None):
                     if e.is_dir(follow_symlinks=False):
                         if name == "graft" and graft_dirs_out is not None:
                             graft_dirs_out.append(pathlib.Path(e.path).parent)
-                        if name not in PRUNE_DIRS:
+                        if name not in PRUNE_DIRS and not _pruned_by_prefix(e.path):
                             stack.append(e.path)
                         continue
                     if not e.is_file(follow_symlinks=False):

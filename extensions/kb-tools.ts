@@ -31,7 +31,11 @@ export default function kbToolsExtension(pi: ExtensionAPI): void {
 		name: "kb_search",
 		label: "Knowledge Search",
 		description:
-			"Heimdall memory search: ranked, verified hits across ALL repos on this machine (lexical code graph + semantic embeddings). Use BEFORE any implementation/fix/research and INSTEAD of ls/grep/find chains for locating prior work. Every hit carries a trust verdict (STRONG/WEAK) verified against the live filesystem.",
+			"Heimdall memory search: ranked, verified hits across ALL repos on this machine (lexical code graph + semantic embeddings). " +
+			"Use BEFORE any implementation/fix/research and INSTEAD of ls/grep/find chains for locating prior work. " +
+			"Every hit carries a trust verdict (STRONG/WEAK) verified against the live filesystem. " +
+			"Pass kind to narrow: 'person' for who someone is and what they do, 'decision'/'fact' for what the user has said, " +
+			"'code' for the default repo search.",
 		promptSnippet: "Search machine knowledge for existing work before implementing",
 		promptGuidelines: [
 			"Use kb_search BEFORE any implementation, feature, or fix to find work that already exists in another project/directory — the cross-project reuse gate.",
@@ -42,10 +46,28 @@ export default function kbToolsExtension(pi: ExtensionAPI): void {
 			query: Type.String({ description: "What you're about to build or look for" }),
 			n: Type.Optional(Type.Number({ description: "Max results (default 6)" })),
 			scope: Type.Optional(Type.String({ description: "Filter by directory/path substring, e.g. poker, job" })),
+			kind: Type.Optional(
+				Type.Union(
+					[
+						Type.Literal("person"),
+						Type.Literal("decision"),
+						Type.Literal("fact"),
+						Type.Literal("code"),
+						Type.Literal("all"),
+					],
+					{
+						description:
+							"What to look for. person = the people store (who someone is, what they do). " +
+							"decision/fact = things the user said. code = repos on this machine (default). " +
+							"all = everything.",
+					},
+				),
+			),
 		}),
 		async execute(_id, params, signal) {
 			const args = [params.query, "-n", String(params.n ?? 6)];
 			if (params.scope) args.push("--scope", params.scope);
+			if (params.kind) args.push("--kind", String(params.kind));
 			const { ok, text } = await run(HEIMDALL, ["search", ...args], signal);
 			return { content: [{ type: "text", text }], details: { ok } };
 		},
