@@ -44,6 +44,11 @@ DEFAULT_QUERIES = os.path.join(REPO, "bench", "queries", "retrieval-30.jsonl")
 _HIT = re.compile(r"^\s*\d+\.\s\[(?P<verdict>[A-Z]+)\][^\n]*?(?P<path>\S+)\s*$")
 _KINDS = ("code", "fact", "person")
 
+# Set by main() from --pass-kind. Read by score_row: a fact gold may only be
+# satisfied by a hit the FACT leg produced. Before Phase 1 --kind does not
+# exist, so no fact leg runs and the slice is a structural zero by definition.
+_pass_kind = False
+
 
 def run_search(query: str, k: int, timeout: int,
                extra: list[str] | None = None) -> dict:
@@ -143,10 +148,18 @@ def score_row(row: dict, r: dict) -> bool:
     if row["slice"] == "fact":
         # Facts are NOT exempt from the verdict pass — K6 covers people only, and
         # a fact hit anchors to its real source file (the prompt/session log it
-        # was extracted from). So there is no `journal:` prefix to require; the
-        # gold is a title substring matched against the displayed body.
-        # A prefix check here would be inventing a contract the spec does not
-        # define, and would make this slice unpassable forever.
+        # was extracted from). So there is no `journal:` prefix to require.
+        #
+        # The guard is on WHERE the hit came from, not on whether it exists. A
+        # code hit's display body IS the repo-relative path, so a gold like
+        # "vendor" or "bench/runs" was satisfied by any file under vendor/ or
+        # bench/runs/ — the fact slice scored a false hit off the CODE leg. The
+        # only reliable discriminator is that a fact body is NOT a path: a fact
+        # display line is its title/proposition text. `_pass_kind` is set by the
+        # runner, so this is honest rather than guessed: before Phase 1 --kind
+        # does not exist, the fact leg never runs, and the slice is 0.
+        if not _pass_kind:
+            return False
         return any(g.lower() in b.lower() for b in bodies for g in row["golds"])
     return any(p in row["golds"] for p in paths)
 
@@ -288,9 +301,27 @@ def self_check() -> int:
     # report 0.20 with no people store in existence.
     assert score_row(row_person, mk(["/Repos/x/src/jev/mod.rs"], ["mod.rs"])) is False
     # facts are NOT prefix-anchored: a fact hit anchors to its real source file
-    # (K6 exempts people only), so a normal path + matching body IS a hit.
+    # (K6 exempts people only), so a normal path + matching body IS a hit --
+    # but ONLY when the fact leg actually ran.
+    global _pass_kind
+    _pass_kind = True
     assert score_row(row_fact, mk(["/Users/x/.pi/agent/sessions/s.jsonl"],
                                   ["the fact layer is dead"])) is True
+    # ...and with the fact leg NOT run (pre-Phase-1) NO gold can be satisfied,
+    # however path-like. This is the false positive that made fact-07
+    # ('bench/runs') score a hit off a bench/runs FILE PATH on the code leg.
+    row_pathish = {"slice": "fact", "k": 10, "golds": ["bench/runs"]}
+    _pass_kind = False
+    assert score_row(row_pathish, mk(["/r/bench/runs/2026/session_21.md"],
+                                     ["Repos/heimdall/bench/runs/..."])) is False
+    # an empty result set is never a hit
+    assert score_row(row_fact, mk([], [])) is False
+    # with the fact leg running, a path-shaped gold IS satisfiable by a real
+    # fact hit whose title mentions it — the gold is a title substring, not a
+    # path, so this is correct and must not be blocked.
+    _pass_kind = True
+    assert score_row(row_pathish, mk(["/r/sessions/s.jsonl"],
+                                     ["the bench/runs corpus is noise"])) is True
     assert score_row(row_fact, mk(["/x.py"], ["the fact layer is dead"])) is True
     assert score_row(row_fact, mk(["/x.py"], ["unrelated"])) is False
     # k truncation: a gold at position 3 is a hit for person (k=3), a miss at 4.
@@ -332,6 +363,8 @@ def main() -> int:
     assert not missing, f"unknown slice(s) in {a.queries}: {missing}"
 
     kp = kind_flag_is_wired(a.timeout)
+    global _pass_kind
+    _pass_kind = bool(a.pass_kind)
     per = score_slices(rows, a.timeout, a.pass_kind)
     report = build_report(rows, per, kp, probe.preconditions(), a.pass_kind)
 
