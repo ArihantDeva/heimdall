@@ -1,0 +1,646 @@
+{
+  "measured_at": "2026-09-28T17:01:54-0400",
+  "tree_commit": "8987edb9bfb98ecae564473a1878cd7367782ea5",
+  "kind_flag": {
+    "flag": "--kind",
+    "rc_plain": 0,
+    "rc_with_kind": 0,
+    "exits_zero": true,
+    "hits_identical": true,
+    "people_anchors_emitted": 0,
+    "wired": false,
+    "note": "unknown flags are silently swallowed by the `case` loop in bin/kb-search.sh, so exit code 0 proves nothing. Hit-set equality is also unreliable \u2014 the semantic leg's ordering varies between runs, so a same-result pair can read as `wired: true` on a tree with no --kind at all. The anchor count is the only stable signal: pre-Phase-1 it is always 0."
+  },
+  "structural_zeros": {
+    "people_db_absent": true,
+    "fact_rows_zero": false
+  },
+  "per_slice": {
+    "code": {
+      "n": 10,
+      "k": 10,
+      "hits": 3,
+      "failed_queries": [],
+      "degraded_queries": [],
+      "run_valid": true,
+      "hit_rate": 0.3,
+      "structural_zero": false,
+      "reason": "code slice is measured against bin/kb-search.sh as it exists today; golds are real paths present in global.db and on disk",
+      "preconditions": {
+        "people_db_exists": false,
+        "fact_rows_journal": 2,
+        "kind_flag_wired": false,
+        "kind_flag_rc_with_kind": 0,
+        "golds_real": [
+          {
+            "path": "/Users/arihantdeva/Repos/heimdall/bin/lib/lock.mjs",
+            "cards": 1,
+            "on_disk": true,
+            "ok": true
+          },
+          {
+            "path": "/Users/arihantdeva/Repos/heimdall/bin/lib/reconcile.mjs",
+            "cards": 1,
+            "on_disk": true,
+            "ok": true
+          },
+          {
+            "path": "/Users/arihantdeva/Repos/heimdall/bin/lib/facts.mjs",
+            "cards": 1,
+            "on_disk": true,
+            "ok": true
+          },
+          {
+            "path": "/Users/arihantdeva/Repos/heimdall/bin/embed_walker.py",
+            "cards": 1,
+            "on_disk": true,
+            "ok": true
+          },
+          {
+            "path": "/Users/arihantdeva/.pi/agent/extensions/orchestrator.ts",
+            "cards": 1,
+            "on_disk": true,
+            "ok": true
+          },
+          {
+            "path": "/Users/arihantdeva/Repos/heimdall/bin/kb-search.sh",
+            "cards": 1,
+            "on_disk": true,
+            "ok": true
+          },
+          {
+            "path": "/Users/arihantdeva/equitylens/api/core/api_key_auth.py",
+            "cards": 1,
+            "on_disk": true,
+            "ok": true
+          },
+          {
+            "path": "/Users/arihantdeva/equitylens/api/core/auth_jwt.py",
+            "cards": 1,
+            "on_disk": true,
+            "ok": true
+          },
+          {
+            "path": "/Users/arihantdeva/equitylens/api/core/auth_middleware.py",
+            "cards": 1,
+            "on_disk": true,
+            "ok": true
+          },
+          {
+            "path": "/Users/arihantdeva/Repos/heimdall/bin/lib/extract.mjs",
+            "cards": 1,
+            "on_disk": true,
+            "ok": true
+          },
+          {
+            "path": "/Users/arihantdeva/project-ultron/src/agents/conv/conv-orchestrator.ts",
+            "cards": 1,
+            "on_disk": true,
+            "ok": true
+          },
+          {
+            "path": "/Users/arihantdeva/project-ultron/src/agents/orchestrator.ts",
+            "cards": 1,
+            "on_disk": true,
+            "ok": true
+          }
+        ]
+      },
+      "detail": [
+        {
+          "qid": "code-01",
+          "query": "stale PID reclamation single writer lock O_EXCL",
+          "hit": true,
+          "rc": 0,
+          "elapsed_s": 20.8,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 1,
+          "failed": false,
+          "top_hits": [
+            "/Users/arihantdeva/Repos/heimdall/bin/lib/lock.mjs",
+            "/Users/arihantdeva/.pi/tmp/sim1/bin/lib/lock.mjs",
+            "/Users/arihantdeva/heim-build-check/package/bin/lib/lock.mjs"
+          ]
+        },
+        {
+          "qid": "code-02",
+          "query": "level triggered convergence audit drift detector owned nodes edges",
+          "hit": false,
+          "rc": 0,
+          "elapsed_s": 22.8,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 1,
+          "failed": false,
+          "top_hits": []
+        },
+        {
+          "qid": "code-03",
+          "query": "fact extraction preference assertion declaration negation patterns",
+          "hit": false,
+          "rc": 0,
+          "elapsed_s": 23.1,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 1,
+          "failed": false,
+          "top_hits": [
+            "/Users/arihantdeva/Repos/heimdall/.pi-subagents/artifacts/85df1222_scout_0_output.md",
+            "/Users/arihantdeva/Repos/agent-partner/memories/style-pref.fact.md",
+            "/Users/arihantdeva/Repos/heimdall/.pi-subagents/artifacts/10bf153c_scout_0_input.md"
+          ]
+        },
+        {
+          "qid": "code-04",
+          "query": "walk filesystem embed chunks PRUNE_DIRS basename vendor skip",
+          "hit": true,
+          "rc": 0,
+          "elapsed_s": 19.4,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 1,
+          "failed": false,
+          "top_hits": [
+            "/Users/arihantdeva/.pi/tmp/sim1/bin/embed_walker.py",
+            "/Users/arihantdeva/Repos/heimdall/bin/embed_walker.py",
+            "/Users/arihantdeva/heim-build-check/package/bin/embed_walker.py"
+          ]
+        },
+        {
+          "qid": "code-05",
+          "query": "orchestrator free fleet doctrine leg limits before_agent_start inject",
+          "hit": false,
+          "rc": 0,
+          "elapsed_s": 15.4,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 1,
+          "failed": false,
+          "top_hits": [
+            "/Users/arihantdeva/.claude/projects/-Users-arihantdeva/memory/project_pi_free_fleet_orchestrator.md",
+            "/Users/arihantdeva/.pi/agent/extensions/orchestrator.ts.bak.20260826-150511",
+            "/Users/arihantdeva/Repos/pi-harness-config/extensions/orchestrator.ts"
+          ]
+        },
+        {
+          "qid": "code-06",
+          "query": "kb_search ranked knowledge search per-repo graft graphs merge",
+          "hit": true,
+          "rc": 0,
+          "elapsed_s": 15.3,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 1,
+          "failed": false,
+          "top_hits": [
+            "/Users/arihantdeva/.local/lib/graft/src/Graft/docs/retrieval/README.md",
+            "/Users/arihantdeva/Repos/graft-cpp/src/retrieve/retrieve.c",
+            "/Users/arihantdeva/.local/lib/graft/src/Graft/integrations/claude-code/skills/recall/SKILL.md"
+          ]
+        },
+        {
+          "qid": "code-07",
+          "query": "API key authentication core router dependency",
+          "hit": false,
+          "rc": 0,
+          "elapsed_s": 16.1,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 1,
+          "failed": false,
+          "top_hits": [
+            "/Users/arihantdeva/.azure/cliextensions/communication/azure/core/pipeline/policies/_authentication_async.py",
+            "/Users/arihantdeva/.local/pipx/venvs/litellm/lib/python3.14/site-packages/azure/core/pipeline/policies/_authentication_async.py",
+            "/Users/arihantdeva/.azure/cliextensions/communication/azure/core/pipeline/policies/_authentication.py"
+          ]
+        },
+        {
+          "qid": "code-08",
+          "query": "JWT auth middleware bearer token verification",
+          "hit": false,
+          "rc": 0,
+          "elapsed_s": 15.6,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 1,
+          "failed": false,
+          "top_hits": [
+            "/Users/arihantdeva/equitylens/.claude/worktrees/safety-layer/api/core/auth_middleware.py",
+            "/Users/arihantdeva/.local/share/uv/tools/browser-use/lib/python3.12/site-packages/mcp/server/auth/middleware/bearer_auth.py",
+            "/Users/arihantdeva/equitylens/graphify-out/wiki/auth-jwt.md"
+          ]
+        },
+        {
+          "qid": "code-09",
+          "query": "desired state content hash node id namespacing path hash",
+          "hit": false,
+          "rc": 0,
+          "elapsed_s": 33.2,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 1,
+          "failed": false,
+          "top_hits": [
+            "/Users/arihantdeva/.bun/install/cache/@aws-crypto/sha256-js@5.2.0@@@1/src/knownHashes.fixture.ts",
+            "/Users/arihantdeva/Documents/curseforge/minecraft/Install/webcache2/AutofillStates/2025.6.13.84507/_metadata/verified_contents.json",
+            "/Users/arihantdeva/Documents/curseforge/minecraft/Install/webcache2/AutofillStates/2024.7.12.235938/_metadata/verified_contents.json"
+          ]
+        },
+        {
+          "qid": "code-10",
+          "query": "conversation orchestrator agent dispatch state machine",
+          "hit": false,
+          "rc": 0,
+          "elapsed_s": 17.7,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 1,
+          "failed": false,
+          "top_hits": [
+            "/Users/arihantdeva/.openhands/conversations/963fe3d495da411295584faea3c7c518/events/event-00003-212be85a-5dbd-4a14-9747-2be6ea80d7c7.json",
+            "/Users/arihantdeva/.openhands/conversations/6724a569f45e4db6b15f489821a029fd/events/event-00007-53b52c5a-1c4e-44e0-bacf-f2c9c0dffa31.json",
+            "/Users/arihantdeva/.openhands/conversations/cbd528b6cbeb4a6c906fd7bb6ea2272c/events/event-00015-56ea1de4-2c90-4115-a690-73330764c2a5.json"
+          ]
+        }
+      ]
+    },
+    "fact": {
+      "n": 10,
+      "k": 10,
+      "hits": 0,
+      "failed_queries": [],
+      "degraded_queries": [],
+      "run_valid": true,
+      "hit_rate": 0.0,
+      "structural_zero": true,
+      "reason": "journal.owned_nodes holds 2 fact row(s); the fact leg is not implemented, so those rows are not reachable through the search path and --kind is an unknown flag that is silently swallowed",
+      "preconditions": {
+        "people_db_exists": false,
+        "fact_rows_journal": 2,
+        "kind_flag_wired": false,
+        "kind_flag_rc_with_kind": 0,
+        "golds_real": "not_applicable: golds are names/titles with no backing store yet \u2014 recorded as structurally unscoreable until Phase 2/3 create people.db and fact rows"
+      },
+      "detail": [
+        {
+          "qid": "fact-01",
+          "query": "what did I say about the fact layer",
+          "hit": false,
+          "rc": 0,
+          "elapsed_s": 15.1,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 1,
+          "failed": false,
+          "top_hits": [
+            "/Users/arihantdeva/Repos/heimdall/docs/superpowers/specs/2026-08-23-fact-layer-design.md",
+            "/Users/arihantdeva/.pi/tmp/sim1/docs/superpowers/specs/2026-08-23-fact-layer-design.md",
+            "/Users/arihantdeva/arihantdeva-content/.pi-subagents/artifacts/40d19341_delegate_0_meta.json"
+          ]
+        },
+        {
+          "qid": "fact-02",
+          "query": "I decided that exclusions should be prefixes not basenames",
+          "hit": false,
+          "rc": 0,
+          "elapsed_s": 17.2,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 1,
+          "failed": false,
+          "top_hits": [
+            "/Users/arihantdeva/.claude/archive/2026-05-14-extreme-cleanup/hooks/tests/fixtures/vault/Repos/leviathan/readme.md",
+            "/Users/arihantdeva/.claude/hooks/tests/fixtures/vault/Repos/leviathan/readme.md",
+            "/Users/arihantdeva/.local/share/mise/installs/python/3.9.25/lib/python3.9/site-packages/setuptools/_vendor/backports/tarfile/compat/py38.py"
+          ]
+        },
+        {
+          "qid": "fact-03",
+          "query": "my preference about rebuilds of the global index",
+          "hit": false,
+          "rc": 0,
+          "elapsed_s": 24.9,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 1,
+          "failed": false,
+          "top_hits": [
+            "/Users/arihantdeva/.claude/file-history/f1cd7200-85e1-4a25-9688-b581afc8c0ca/c672d2d2bde2423a@v2",
+            "/Users/arihantdeva/.claude/file-history/f1cd7200-85e1-4a25-9688-b581afc8c0ca/c672d2d2bde2423a@v3",
+            "/Users/arihantdeva/equitylens/graft/api/services/analysis_index.md"
+          ]
+        },
+        {
+          "qid": "fact-04",
+          "query": "what I asserted about the recall gate being unfalsifiable",
+          "hit": false,
+          "rc": 0,
+          "elapsed_s": 14.6,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 1,
+          "failed": false,
+          "top_hits": [
+            "/Users/arihantdeva/arihantdeva-content/.pi/workflows/workflow_mrl52hge_88fbb5/tasks/task-14/analysis.md",
+            "/Users/arihantdeva/.openhands/conversations/377a808ae466407697e14e79e60fdeb3/events/event-00085-6f6467b6-acf0-41f7-9775-58e8441d397e.json",
+            "/Users/arihantdeva/.openhands/conversations/d8a1498fd4634a1b835e36312da7b4d5/events/event-00001-6a3f257f-faab-40e5-996d-927e77bfb675.json"
+          ]
+        },
+        {
+          "qid": "fact-05",
+          "query": "what I said about people harvesting from linkedin",
+          "hit": false,
+          "rc": 0,
+          "elapsed_s": 15.8,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 1,
+          "failed": false,
+          "top_hits": [
+            "/Users/arihantdeva/Repos/heimdall/bench/runs/20260823-015159/sessions/b46e15ed/session_22.md",
+            "/Users/arihantdeva/Repos/heimdall/bench/runs/20260823-133140/sessions/b46e15ed/session_22_0.md",
+            "/Users/arihantdeva/Repos/heimdall/bench/runs/20260823-155328/sessions/b46e15ed/session_22_0.md"
+          ]
+        },
+        {
+          "qid": "fact-06",
+          "query": "my declaration about default query behaviour being unchanged",
+          "hit": false,
+          "rc": 0,
+          "elapsed_s": 15.9,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 1,
+          "failed": false,
+          "top_hits": [
+            "/Users/arihantdeva/.vscode/extensions/.b7dd1a26-0e11-4bfa-a870-fd71f384c15e/out/src/sharedInterfaces/queryResult.js",
+            "/Users/arihantdeva/.vscode/extensions/ms-mssql.mssql-1.31.1/out/src/sharedInterfaces/queryResult.js",
+            "/Users/arihantdeva/.vscode/extensions/ms-mssql.mssql-1.31.1/out/src/views/queryHistoryUI.js"
+          ]
+        },
+        {
+          "qid": "fact-07",
+          "query": "what I said about the bench corpus polluting results",
+          "hit": false,
+          "rc": 0,
+          "elapsed_s": 16.9,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 1,
+          "failed": false,
+          "top_hits": [
+            "/Users/arihantdeva/equitylens/docs/superpowers/handoff/2026-05-28-cache-economics-corpus-wide.md",
+            "/Users/arihantdeva/equitylens-content/docs/superpowers/handoff/2026-05-28-cache-economics-corpus-wide.md",
+            "/Users/arihantdeva/.openhands/conversations/0657cfc2dd624966b8372a9938f6b078/events/event-00015-dd670255-7596-4068-ad98-422909765e12.json"
+          ]
+        },
+        {
+          "qid": "fact-08",
+          "query": "my preference on hit at k cutoffs for people",
+          "hit": false,
+          "rc": 0,
+          "elapsed_s": 27.4,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 1,
+          "failed": false,
+          "top_hits": [
+            "/Users/arihantdeva/Repos/heimdall/bench/runs/20260823-155328/sessions/f4f1d8a4/session_42_6.md",
+            "/Users/arihantdeva/Repos/heimdall/bench/runs/20260823-155328/sessions/37f165cf/session_19_6.md",
+            "/Users/arihantdeva/heimdall-notes/facts/2026-08-28-mvo4-kappa-squeeze-knn-threeleg-0-283-champion-vote-scheme-insensitivity-robust-.md"
+          ]
+        },
+        {
+          "qid": "fact-09",
+          "query": "what I declared about not using LLM extraction",
+          "hit": false,
+          "rc": 0,
+          "elapsed_s": 20.9,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 2,
+          "failed": false,
+          "top_hits": [
+            "/Users/arihantdeva/Desktop/Automation/job-automation/graft/profile_extraction.md",
+            "/Users/arihantdeva/.claude/archive/2026-05-14-non-rtk-cleanup/plugins/marketplaces/everything-claude-code/src/llm/__main__.py",
+            "/Users/arihantdeva/.claude/plugins/marketplaces/ecc/src/llm/__main__.py"
+          ]
+        },
+        {
+          "qid": "fact-10",
+          "query": "what I said about vendor directories being indexed",
+          "hit": false,
+          "rc": 0,
+          "elapsed_s": 20.3,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 2,
+          "failed": false,
+          "top_hits": [
+            "/Users/arihantdeva/Repos/heimdall/bench/runs/20260823-015159/sessions/gpt4_88806d6e/session_21.md",
+            "/Users/arihantdeva/Repos/heimdall/bench/runs/20260823-133140/sessions/gpt4_88806d6e/session_21_0.md",
+            "/Users/arihantdeva/Repos/heimdall/bench/runs/20260824-221606/sessions/gpt4_88806d6e/session_21_0.md"
+          ]
+        }
+      ]
+    },
+    "person": {
+      "n": 10,
+      "k": 3,
+      "hits": 0,
+      "failed_queries": [],
+      "degraded_queries": [],
+      "run_valid": true,
+      "hit_rate": 0.0,
+      "structural_zero": true,
+      "reason": "~/.heimdall/people.db does not exist, so no people ids can be returned; --kind person is also an unknown flag that is silently swallowed, so the query falls through to the code leg",
+      "preconditions": {
+        "people_db_exists": false,
+        "fact_rows_journal": 2,
+        "kind_flag_wired": false,
+        "kind_flag_rc_with_kind": 0,
+        "golds_real": "not_applicable: golds are names/titles with no backing store yet \u2014 recorded as structurally unscoreable until Phase 2/3 create people.db and fact rows"
+      },
+      "detail": [
+        {
+          "qid": "person-01",
+          "query": "who is Arihant Deva",
+          "hit": false,
+          "rc": 0,
+          "elapsed_s": 32.5,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 1,
+          "failed": false,
+          "top_hits": [
+            "/Users/arihantdeva/Desktop/Automation/job-automation/tailored_resumes/batch/m-booth-associate-digital-strategist/m-booth__associate-digital-strategist.json",
+            "/Users/arihantdeva/Desktop/Automation/job-automation/tailored_resumes/batch/basis-ai-account-executive/basis-ai__account-executive.json"
+          ]
+        },
+        {
+          "qid": "person-02",
+          "query": "who is Jev",
+          "hit": false,
+          "rc": 0,
+          "elapsed_s": 23.9,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 1,
+          "failed": false,
+          "top_hits": [
+            "/Users/arihantdeva/Repos/skillranker/src/jev/mod.rs",
+            "/Users/arihantdeva/Repos/jev-ultrafast/jev_ultrafast/demo.py"
+          ]
+        },
+        {
+          "qid": "person-03",
+          "query": "who is Heimdall",
+          "hit": false,
+          "rc": 0,
+          "elapsed_s": 24.7,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 1,
+          "failed": false,
+          "top_hits": [
+            "/Users/arihantdeva/Repos/heimdall/AGENTS.md"
+          ]
+        },
+        {
+          "qid": "person-04",
+          "query": "who wrote the kb-search verdict pass",
+          "hit": false,
+          "rc": 0,
+          "elapsed_s": 19.7,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 1,
+          "failed": false,
+          "top_hits": []
+        },
+        {
+          "qid": "person-05",
+          "query": "who reviewed the retrieval spec adversarially",
+          "hit": false,
+          "rc": 0,
+          "elapsed_s": 21.4,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 1,
+          "failed": false,
+          "top_hits": []
+        },
+        {
+          "qid": "person-06",
+          "query": "who decided to defer the LinkedIn harvest",
+          "hit": false,
+          "rc": 0,
+          "elapsed_s": 16.4,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 1,
+          "failed": false,
+          "top_hits": [
+            "/Users/arihantdeva/equitylens/research/hyperagent-sales-prospector/data/linkedin_resweep_parallel.log",
+            "/Users/arihantdeva/equitylens/research/hyperagent-sales-prospector/data/linkedin_resweep.log",
+            "/Users/arihantdeva/equitylens/research/hyperagent-sales-prospector/data/locks/domain_burtonstreet___linkedin.lock"
+          ]
+        },
+        {
+          "qid": "person-07",
+          "query": "who owns the equitylens repository",
+          "hit": false,
+          "rc": 0,
+          "elapsed_s": 15.9,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 1,
+          "failed": false,
+          "top_hits": [
+            "/Users/arihantdeva/equitylens/.hypothesis/constants/fa3475081a7d88c2",
+            "/Users/arihantdeva/equitylens/graphify-out/cache/711f407749a99ed8622cc6c4ca921e07a038af95894f7ebfeb02f83c1167cb26.json",
+            "/Users/arihantdeva/equitylens/.hypothesis/constants/a438d1748df7532b"
+          ]
+        },
+        {
+          "qid": "person-08",
+          "query": "who maintains heimdall",
+          "hit": false,
+          "rc": 0,
+          "elapsed_s": 16.1,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 1,
+          "failed": false,
+          "top_hits": [
+            "/Users/arihantdeva/.pi/workflows/projects/arihantdeva-6e1823841eea/runs/heimdall-fact-layer-impl6-mt68ff9h-j8001a.json",
+            "/Users/arihantdeva/.pi/workflows/projects/arihantdeva-6e1823841eea/runs/heimdall-fact-layer-impl6-mt68ff9h-j8001a.json.bak"
+          ]
+        },
+        {
+          "qid": "person-09",
+          "query": "who is the bge-m3 embedding model maintained by",
+          "hit": false,
+          "rc": 0,
+          "elapsed_s": 16.3,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 1,
+          "failed": false,
+          "top_hits": [
+            "/Users/arihantdeva/.heimdall/models/hf-mirror/models--BAAI--bge-m3/snapshot-5617a9f61b028005a4858fdac845db406aefb181/README.md",
+            "/Users/arihantdeva/backups/agent-state/20260913-040004/.heimdall/models/hf-mirror/models--BAAI--bge-m3/snapshot-5617a9f61b028005a4858fdac845db406aefb181/README.md",
+            "/Users/arihantdeva/Desktop/Archives/Agent-Stale-2026-08-13/vault-import/vault-import/Knowledge-Base/Wiki/vector-embeddings-search.md"
+          ]
+        },
+        {
+          "qid": "person-10",
+          "query": "who runs the jadupc remote compute boxes",
+          "hit": false,
+          "rc": 0,
+          "elapsed_s": 16.7,
+          "semantic_error": false,
+          "index_error": false,
+          "degraded": false,
+          "attempts": 1,
+          "failed": false,
+          "top_hits": [
+            "/Users/arihantdeva/heimdall-notes/facts/2026-09-24-jbox-remote-compute-delegation-to-jadupc1-jadupc2-with-enforced-cgroup-caps.md",
+            "/Users/arihantdeva/heimdall-notes/facts/2026-09-27-jev-setup-ported-to-jadupc1-jadupc2.md",
+            "/Users/arihantdeva/heimdall-notes/facts/2026-09-24-jadupc1-2-security-hardening-ufw-fail2ban-key-only-ssh-auto-updates.md"
+          ]
+        }
+      ]
+    }
+  }
+}
