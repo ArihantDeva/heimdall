@@ -6,12 +6,13 @@
 // fall through to the fact-card path — a person is not a fact, and writing
 // ~/heimdall-notes/facts/<slug>.md for one would pollute the fact corpus.
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { openPeople, screenPerson } from "../bin/lib/people.mjs";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const CLI = join(repoRoot, "bin", "heimdall.js");
@@ -89,6 +90,104 @@ print(c.execute("select count(*) from people").fetchone()[0])`,
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test("person backup produces a snapshot that is VALID and COMPLETE under a live WAL reader", async () => {
+  // BLOCKER from review. The old implementation did
+  // `PRAGMA wal_checkpoint(FULL)` (busy result never checked) and then
+  // copyFileSync'd the main db WITHOUT its WAL. Proven 3/3
+  // "database disk image is malformed" with a reader holding a snapshot, and
+  // it can also tear SILENTLY: exit 0, integrity_check ok, a row missing.
+  // FULL cannot checkpoint frames younger than the oldest live reader, so it
+  // is the wrong tool by construction, not by timing.
+  const home = mkdtempSync(join(tmpdir(), "heimdall-bak-"));
+  try {
+    run(home, "person", "add", "--name", "Alice", "--org", "A");
+    const dbPath = join(home, ".heimdall", "people.db");
+    const reader = spawn("python3", ["-c",
+      `import sqlite3,time
+c=sqlite3.connect(${JSON.stringify(dbPath)})
+c.execute("BEGIN")
+c.execute("select count(*) from people").fetchall()
+time.sleep(8)`], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 1200));
+    run(home, "person", "add", "--name", "Bob", "--org", "B");
+    const r = run(home, "person", "backup");
+    assert.equal(r.status, 0, `backup failed: ${r.stderr}`);
+
+    const dir = join(home, ".heimdall", "backup");
+    const snap = join(dir, readdirSync(dir)[0]);
+    const out = execFileSync("python3", ["-c",
+      `import sqlite3,sys
+c=sqlite3.connect(sys.argv[1])
+bad=c.execute("PRAGMA integrity_check").fetchall()
+names=sorted(r[0] for r in c.execute("select name from people"))
+print(bad[0][0], names)`,
+      snap], { encoding: "utf8" });
+    assert.match(out, /^ok /, `snapshot is corrupt: ${out}`);
+    // COMPLETE, not merely openable: the row written during the backup must
+    // be present. A torn snapshot passes integrity_check while silently
+    // losing a person, which is the worse failure.
+    assert.match(out, /Alice/, `snapshot lost Alice: ${out}`);
+    assert.match(out, /Bob/, `snapshot silently lost a row: ${out}`);
+    reader.kill("SIGKILL");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a hand-maintained column survives a KB-style re-write", () => {
+  // The clobbering-import shape: relationship/last_contact come from NO
+  // source KB, so a routine import must not be able to erase them.
+  const home = mkdtempSync(join(tmpdir(), "heimdall-imp-pres-"));
+  try {
+    run(home, "person", "add", "--name", "Zoe Quinn", "--org", "Acme",
+      "--relationship", "college friend", "--last-contact", "2026-09-01");
+    const db = join(home, ".heimdall", "people.db");
+    const q = (sql) => execFileSync("python3", ["-c",
+      `import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);print(repr(c.execute(${JSON.stringify(sql)}).fetchall()))`, db],
+      { encoding: "utf8" });
+    // Exactly what an import row looks like: KB columns only.
+    execFileSync("node", ["--input-type=module", "-e",
+      `import {openPeople,upsertPerson} from ${JSON.stringify(join(repoRoot, "bin", "lib", "people.mjs"))};
+       const s=openPeople(${JSON.stringify(db)});
+       upsertPerson(s,{name:"Zoe Quinn",org:"Acme",source:"kb"});`]);
+    const got = q("select relationship,last_contact from people");
+    assert.match(got, /college friend/, "relationship was wiped by the re-write");
+    assert.match(got, /2026-09-01/, "last_contact was wiped by the re-write");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("person subcommands reject unknown flags and bad values with exit 2", () => {
+  // `verify --deeph` silently became a plain `verify` once; checkFlags exists
+  // for that. person never called it. Also: `--kb bogus` exited 0 with a note
+  // indistinguishable from the genuinely-absent personal KB.
+  const home = mkdtempSync(join(tmpdir(), "heimdall-insp5-"));
+  try {
+    assert.equal(run(home, "person", "list", "--deeph").status, 2);
+    const bad = run(home, "person", "import", "--kb", "bogus");
+    assert.equal(bad.status, 2);
+    assert.match(bad.stderr, /valid: all/);
+    assert.equal(run(home, "person", "list", "--limit", "abc").status, 2);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("the screen is what dry-run and the real run share", () => {
+  // A dry run that cannot see what the screen will reject is not a preview:
+  // it reported stored=1519/refused=0 where the real run stored 1510 and
+  // refused 9. Both modes now call the same predicate, so pin the predicate
+  // against the real refused string rather than a hand-shortened one.
+  const row = { name: "Andrew Zhang",
+    identity_verified: "** yes — exact slug match (andrew-zhangg): "
+      + "\"Co-Founder & CEO, Azure Partners | Advisor to AI startups\"; led "
+      + "Columbia's AI Mastery program; RocketReach/TopContenders/Happenstance/"
+      + "azurepartners.ai corroborate." };
+  assert.equal(screenPerson(row), "identity_verified", "the fixture no longer trips the screen");
+  assert.equal(screenPerson({ name: "Fine Person" }), null);
 });
 
 test("the CSV reader handles the KBs' quoted multi-line fields", () => {

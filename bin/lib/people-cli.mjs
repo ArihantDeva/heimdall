@@ -6,10 +6,25 @@
 // many rows are candidly unverified. Those are stored verbatim: dropping them
 // would turn a documented unknown into a silent assertion. X rows have neither
 // field, so they import as NULL — never as a default value.
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { PEOPLE_DB, idFor, openPeople, searchPeople, upsertPerson } from "./people.mjs";
+import { backup as sqliteBackup, DatabaseSync } from "node:sqlite";
+import { PEOPLE_DB, idFor, openPeople, screenPerson, upsertPerson } from "./people.mjs";
+
+// A WAL-consistent snapshot. Node's backup() yields a progress callback that
+// must be invoked for the copy to run, hence the loop rather than a bare call.
+async function backup(src, dest) {
+  const from = new DatabaseSync(src, { readOnly: true });
+  try {
+    await sqliteBackup(from, dest, {
+      progress: () => true,
+    });
+    return existsSync(dest);
+  } finally {
+    from.close();
+  }
+}
 
 const HOME = () => homedir();
 
@@ -143,16 +158,15 @@ export function importKb(store, which, { dryRun = false } = {}) {
       const id = idFor(p.name, p.org);
       if (ids.has(id)) dupes++;
       ids.add(id);
-      if (!dryRun) {
-        // A refusal must be COUNTED and reported. An earlier version returned
-        // silently and lost 9 real people with no trace: 1,519 rows mapped,
-        // 1,510 stored, and the report said "skipped: 0".
-        const r = upsertPerson(store, p);
-        if (r.skipped) { refused++; continue; }
-        seen++;
-      } else {
-        seen++;
-      }
+      // The screen runs in DRY-RUN too, and that is the whole point: the
+      // previous version skipped it, so `--dry-run` reported
+      // stored=1519/refused=0 where the real run stored 1510 and refused 9.
+      // A dry run that cannot see the refusals is worse than no dry run --
+      // it is the number the user decides to commit on.
+      const would = screenPerson(p);
+      if (would) { refused++; continue; }
+      seen++;
+      if (!dryRun) upsertPerson(store, p);
     }
     report.push({ kb: k, source_rows: rows.length, stored: seen, skipped,
       refused_by_secret_screen: refused, dupes_in_batch: dupes });
@@ -161,7 +175,23 @@ export function importKb(store, which, { dryRun = false } = {}) {
 }
 
 export async function runPersonCmd(args) {
-  const sub = args[0];
+  const sub = args[0] && !args[0].startsWith("--") ? args[0] : undefined;
+  const FLAGS = {
+    add: ["--name", "--org", "--role", "--aliases", "--url", "--notes",
+      "--relationship", "--last-contact", "--source"],
+    rm: ["--name", "--org"],
+    import: ["--kb", "--dry-run"],
+    list: ["--limit"],
+    backup: [],
+  };
+  const allowed = FLAGS[sub];
+  if (allowed) {
+    const bad = args.filter((a) => a.startsWith("--") && !allowed.includes(a));
+    if (bad.length) {
+      for (const b of bad) console.error(`unknown option for person ${sub}: ${b}`);
+      return 2;
+    }
+  }
   const store = openPeople();
   const get = (f) => flagVal(args, f);
   if (sub === "add" || (sub === undefined && get("--name"))) {
@@ -186,27 +216,55 @@ export async function runPersonCmd(args) {
   }
   if (sub === "import") {
     const which = get("--kb") || "all";
+    // Exit 2 on an unknown KB, like kb-search.sh:74-81 does for an unknown
+    // --kind. Previously `person import --kb bogus` exited 0 with a note
+    // indistinguishable from the genuinely absent personal KB -- the exact
+    // silent-success defect checkFlags exists to prevent.
+    const valid = ["all", ...Object.keys(KB_PATHS)];
+    if (!valid.includes(which)) {
+      console.error(`unknown --kb '${which}' (valid: ${valid.join(", ")})`);
+      return 2;
+    }
     const rep = importKb(store, which, { dryRun: args.includes("--dry-run") });
-    for (const r of rep) console.log(JSON.stringify(r));
+    let refused = 0;
+    for (const r of rep) {
+      refused += r.refused_by_secret_screen || 0;
+      console.log(JSON.stringify(r));
+    }
+    if (refused) console.error(`${refused} row(s) refused by the secret screen and NOT stored`);
     return 0;
   }
   if (sub === "list") {
-    const limit = Number(get("--limit") || 50);
+    const raw = get("--limit") || 50;
+    const limit = Number(raw);
+    if (!Number.isInteger(limit) || limit < 1) {
+      console.error(`--limit must be a positive integer, got '${raw}'`);
+      return 2;
+    }
     for (const r of store.db.prepare("SELECT * FROM people ORDER BY name LIMIT ?").all(limit)) {
       console.log(`${r.id}  ${r.name}${r.org ? "  @ " + r.org : ""}`);
     }
     return 0;
   }
   if (sub === "backup") {
-    // P6: people.db is hand-typed user data, so it gets its own snapshot. The
-    // precedent is bin/kb-rebuild.sh's sqlite backup, NOT journal.db — the
-    // journal has no backup at all (`rg 'journal.db' bin/ | rg -i backup` -> 0).
+    // P6: people.db is hand-typed user data, so it gets its own snapshot.
+    //
+    // The sqlite BACKUP API, not copyFileSync. The previous version did
+    // `PRAGMA wal_checkpoint(FULL)` (whose busy=1 result was never checked)
+    // and then copied the main db without its WAL. Proven 3/3 corrupt --
+    // "database disk image is malformed" -- under a concurrent reader, and
+    // it can also tear SILENTLY: exit 0, integrity_check ok, one row gone.
+    // PRAGMA wal_checkpoint(FULL) cannot checkpoint frames younger than the
+    // oldest live reader, so it is the wrong tool by construction.
+    //
+    // Same pattern, and for the same reason, as bin/kb-rebuild.sh:23-31.
     const dest = join(HOME(), ".heimdall", "backup");
     mkdirSync(dest, { recursive: true });
     const out = join(dest, `people.db.${new Date().toISOString().replace(/[:.]/g, "-")}`);
-    store.db.exec("PRAGMA wal_checkpoint(FULL)");
-    copyFileSync(PEOPLE_DB(), out);
-    console.log(`people.db backed up -> ${out}`);
+    const done = await backup(PEOPLE_DB(), out);
+    if (!done) { console.error(`backup failed: ${out}`); return 1; }
+    const rows = store.db.prepare("SELECT count(*) n FROM people").get().n;
+    console.log(`people.db backed up -> ${out} (${rows} rows)`);
     return 0;
   }
   console.error("usage: heimdall person <add|rm|import|list|backup> ...");

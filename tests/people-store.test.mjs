@@ -7,12 +7,12 @@
 // NULL-vs-'' is the common case rather than an edge case. The id must be a
 // function of the normalized person, not of the strings as typed.
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { PEOPLE_SCHEMA, idFor, openPeople, searchPeople, upsertPerson } from "../bin/lib/people.mjs";
+import { PEOPLE_SCHEMA, idFor, openPeople, screenPerson, searchPeople, upsertPerson } from "../bin/lib/people.mjs";
 
 const COLS = ["id", "name", "aliases", "org", "role", "url", "relationship",
   "last_contact", "notes", "identity_verified", "confidence", "source",
@@ -99,6 +99,68 @@ test("searchPeople ranks an exact alias/name match first", () => {
     // that is why the tiebreak is computed over BOTH columns, not just name.
     const byAlias = searchPeople(db, "wilhelm");
     assert.equal(byAlias[0].name, "Bill Mackenzie");
+  });
+});
+
+test("a sparse re-add does NOT null the hand-maintained columns", () => {
+  // BLOCKER from review. relationship/last_contact appear in NO source KB,
+  // so they are the only non-derived user data in the store -- and the
+  // upsert used `col=excluded.col` with `p.x ?? null` on the insert, so a
+  // plain re-add (or a routine KB import) destroyed them irrecoverably.
+  withStore((db) => {
+    upsertPerson(db, { name: "Jane Doe", org: "Acme", relationship: "college friend",
+      last_contact: "2026-09-01", notes: "met at DEFCON", aliases: "jdoe" });
+    upsertPerson(db, { name: "Jane Doe", org: "Acme" });
+    const r = db.db.prepare("SELECT * FROM people").get();
+    assert.equal(r.relationship, "college friend", "relationship was wiped");
+    assert.equal(r.last_contact, "2026-09-01", "last_contact was wiped");
+    assert.equal(r.notes, "met at DEFCON", "notes was wiped");
+    assert.equal(r.aliases, "jdoe", "aliases was wiped");
+  });
+});
+
+test("re-import is idempotent: a no-op write does not churn updated_at", () => {
+  withStore((db) => {
+    upsertPerson(db, { name: "Jane Doe", org: "Acme", role: "Eng", source: "kb" });
+    const first = db.db.prepare("SELECT * FROM people").get();
+    // An identical row, straight from the KB, carries no relationship or
+    // last_contact, so it is exactly the clobbering-import shape.
+    upsertPerson(db, { name: "Jane Doe", org: "Acme", role: "Eng", source: "kb",
+      relationship: null, last_contact: null, notes: null });
+    const second = db.db.prepare("SELECT * FROM people").get();
+    assert.equal(second.created_at, first.created_at, "created_at was rewritten");
+    assert.equal(second.updated_at, first.updated_at, "a no-op re-import churned updated_at");
+  });
+});
+
+test("the id separator is a \\u0000 escape, not a raw NUL byte", () => {
+  // A raw NUL made git treat people.mjs as binary: `git diff` printed
+  // 'Bin 0 -> 5486 bytes' and `git grep` refused to search the file, so the
+  // reviewer could not diff it. An unreviewable file is the defect.
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)),
+    "..", "bin", "lib", "people.mjs"));
+  assert.equal(src.includes(0), false, "people.mjs contains a raw NUL byte");
+  assert.match(src.toString("utf8"), /\\u0000/);
+});
+
+test("relationship and last_contact are screened, not just the KB columns", () => {
+  // A previous SCREENED list omitted both, and both are CLI-writable.
+  withStore((db) => {
+    for (const f of ["relationship", "last_contact"]) {
+      const res = upsertPerson(db, { name: "Jane", [f]: "sk-ABCDEFGHIJKLMNOPQRSTUVWX" });
+      assert.equal(res.skipped, true, `${f} was not screened`);
+      assert.equal(res.field, f);
+    }
+    assert.equal(db.db.prepare("SELECT count(*) n FROM people").get().n, 0);
+  });
+});
+
+test("screenPerson answers the same question as upsertPerson", () => {
+  withStore((db) => {
+    const p = { name: "Jane", notes: "sk-ABCDEFGHIJKLMNOPQRSTUVWX" };
+    assert.equal(screenPerson(p), "notes");
+    assert.equal(upsertPerson(db, p).skipped, true);
+    assert.equal(screenPerson({ name: "Fine Person" }), null);
   });
 });
 
