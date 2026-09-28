@@ -49,19 +49,36 @@ const flagVal = (args, f) => {
 // ── field mapping, one per KB ───────────────────────────────────────────────
 
 // LinkedIn connections. first_name/last_name -> name; company/position ->
+// "absent in the source" must be null, never "". The upsert's
+// COALESCE(excluded.col, col) guard only preserves a stored value when the
+// incoming value is NULL; '' is not NULL, so the guard silently does not fire
+// and a routine re-import destroys hand-typed data. Measured on the real X KB:
+// crescely's hand-typed notes were wiped to '' by an ordinary re-import, and
+// no source KB carries notes, so nothing could ever restore them.
+//
+// Deliberately NOT fixed in SQL as COALESCE(NULLIF(excluded.notes,''), notes):
+// that would make the only way to CLEAR a field -- passing --notes "" --
+// permanently impossible. The distinction matters: null means "the source has
+// no value, keep what you have", '' means "actually clear this".
+const absent = (v) => {
+  const s = String(v ?? "").trim();
+  return s === "" ? null : s;
+};
+const absentNotes = (...parts) => absent(parts.filter(Boolean).join("\n").trim());
+
 // org/role. `slug` is the LinkedIn vanity handle, so it is the alias.
 function mapLinkedIn(row) {
   const name = [row.first_name, row.last_name].filter(Boolean).join(" ").trim();
   if (!name) return null;
   return {
     name,
-    aliases: row.slug || "",
-    org: row.company || "",
-    role: row.position || "",
-    url: row.linkedin_url || row.linkedin || "",
-    notes: [row.interests, row.outreach].filter(Boolean).join("\n").trim(),
-    identity_verified: row.identity_verified ?? null,
-    confidence: row.confidence ?? null,
+    aliases: absent(row.slug),
+    org: absent(row.company),
+    role: absent(row.position),
+    url: absent(row.linkedin_url || row.linkedin),
+    notes: absentNotes(row.interests, row.outreach),
+    identity_verified: absent(row.identity_verified),
+    confidence: absent(row.confidence),
     source: "connections-enrichment-kb",
   };
 }
@@ -73,12 +90,12 @@ function mapSubstack(row) {
   if (!name && !row.handle) return null;
   return {
     name: name || row.handle,
-    aliases: row.handle || "",
-    org: row.primary_publication || "",
-    url: row.substack_url || row.publication_url || "",
-    notes: [row.bio, row.interests, row.outreach].filter(Boolean).join("\n").trim(),
-    identity_verified: row.identity_verified ?? null,
-    confidence: row.confidence ?? null,
+    aliases: absent(row.handle),
+    org: absent(row.primary_publication),
+    url: absent(row.substack_url || row.publication_url),
+    notes: absentNotes(row.bio, row.interests, row.outreach),
+    identity_verified: absent(row.identity_verified),
+    confidence: absent(row.confidence),
     source: "substack-deva-follower-kb",
   };
 }
@@ -92,7 +109,7 @@ function mapX(row) {
     name: (row.name || "").trim() || handle,
     aliases: handle,
     url: `https://x.com/${handle}`,
-    notes: row.bio || "",
+    notes: absent(row.bio),
     identity_verified: null,
     confidence: null,
     source: "x-devabuilds-follower-kb",

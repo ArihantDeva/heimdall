@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { openPeople, screenPerson } from "../bin/lib/people.mjs";
+import { openPeople, screenPerson, upsertPerson } from "../bin/lib/people.mjs";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const CLI = join(repoRoot, "bin", "heimdall.js");
@@ -173,6 +173,50 @@ test("person subcommands reject unknown flags and bad values with exit 2", () =>
     assert.equal(run(home, "person", "list", "--limit", "abc").status, 2);
   } finally {
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("an absent source value maps to null, never to an empty string", () => {
+  // BLOCKER, second round. The mappers emitted '' for "no value in source".
+  // The upsert preserves a stored value with COALESCE(excluded.col, col),
+  // which only fires on NULL -- so '' sailed through and a routine re-import
+  // destroyed hand-typed notes. Proven on the real X KB: crescely's notes
+  // were wiped to '' by an ordinary import, and no KB carries notes, so
+  // nothing could ever restore them.
+  const home = mkdtempSync(join(tmpdir(), "heimdall-absent-"));
+  try {
+    run(home, "person", "add", "--name", "Crescely", "--notes", "hand-typed note");
+    const db = join(home, ".heimdall", "people.db");
+    // Exactly the shape an X row has: handle + empty bio, no other field.
+    execFileSync("node", ["--input-type=module", "-e",
+      `import {openPeople,upsertPerson} from ${JSON.stringify(join(repoRoot, "bin", "lib", "people.mjs"))};
+       const s=openPeople(${JSON.stringify(db)});
+       upsertPerson(s,{name:"Crescely",aliases:"crescely",url:"https://x.com/crescely",
+         notes:null, identity_verified:null, confidence:null, source:"x-devabuilds-follower-kb"});`]);
+    const got = execFileSync("python3", ["-c",
+      `import sqlite3,sys
+c=sqlite3.connect(sys.argv[1])
+print(repr(c.execute("select notes from people").fetchone()[0]))`, db], { encoding: "utf8" });
+    assert.match(got, /hand-typed note/, "a null source value destroyed the stored note");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("an explicit empty string still CLEARS a field", () => {
+  // The other half of the contract: null means "source has nothing, keep
+  // yours"; '' means "actually clear this". Fixing the blocker in SQL with
+  // COALESCE(NULLIF(col,''), col) would have silently made this impossible
+  // forever, so it is pinned here.
+  const dir = mkdtempSync(join(tmpdir(), "heimdall-clear-"));
+  try {
+    const store = openPeople(join(dir, "people.db"));
+    upsertPerson(store, { name: "Jane Doe", org: "Acme", notes: "old note" });
+    upsertPerson(store, { name: "Jane Doe", org: "Acme", notes: "" });
+    assert.equal(store.db.prepare("SELECT notes FROM people").get().notes, "",
+      "an explicit '' did not clear the field");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
