@@ -167,7 +167,15 @@ fi
 # targeted the retired global `graft retrieve` daemon API and had no callers, so
 # it was deleted; only its extract_paths() helper survives, for the stale scan.
 # Both backends above compute their own verdicts in-process.)
-echo "== retrieve (per-repo graft + global semantic): $Q"
+# Suppressed for --kind person/fact/decision: those are answered by the
+# dispatch block below, which prints its own "retrieve (people)" / "retrieve
+# (facts)" header. Printing a header naming graft+semantic legs that never ran
+# is the same lie as showing code hits under a people question (finding 1).
+# kind=code and kind=print unchanged, so the default bytes are untouched.
+case "$KIND" in
+	person|fact|decision) ;;
+	*) echo "== retrieve (per-repo graft + global semantic): $Q" ;;
+esac
 if [ ! -x "$GRAFT" ]; then
 	# Not a tool failure: a fresh/unconfigured machine has validly zero results.
 	# Exit 0 so callers (MCP kb_search) get an answer, not isError.
@@ -198,6 +206,97 @@ if [ ${#REPO_LIST[@]} -eq 0 ] && [ -z "${SCOPE:-}" ]; then
 	# Fresh install / no indexed repos yet: valid empty answer (exit 0), with
 	# setup guidance in-band. Exit 1 here broke MCP kb_search (isError) on CI.
 	echo "No repos with a graft graph found under ~/Repos yet. Index one: cd <repo> && heimdall index (or graft build). Search returns no hits until then."
+	exit 0
+fi
+
+# ── A person/fact query never runs the code legs at all.
+# The people and fact legs are a small self-contained Python block below (they
+# need sqlite3 and $Q/$N); the main code worker never sees those kinds, because
+# this dispatch exits first. It must sit BEFORE the graft/semantic legs
+# (reviewer finding 2): a pure people query was paying ~15s of graft work whose
+# results were then discarded, and with no people.db it was printing code hits
+# under a "retrieve (people)" question (finding 1).
+if [ "$KIND" = "person" ] || [ "$KIND" = "fact" ] || [ "$KIND" = "decision" ]; then
+	python3 - "$Q" "$N" "$KIND" "$LONG" <<'PYEOF'
+import os, sqlite3, sys, shutil, tempfile
+
+q, n, kind, long_out = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4] == "1"
+home = os.path.expanduser("~")
+
+
+def rows_from(db, sql, args):
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    out = con.execute(sql, args).fetchall()
+    con.close()
+    return out
+
+
+if kind == "person":
+    db = os.path.join(home, ".heimdall", "people.db")
+    if not os.path.exists(db):
+        print('No ~/.heimdall/people.db yet. Create one with: '
+              'heimdall person add --name "Full Name"')
+        sys.exit(0)
+    like = "%" + q + "%"
+    rows = rows_from(db,
+        "SELECT * FROM people WHERE name LIKE ?1 OR aliases LIKE ?1 OR org LIKE ?1 "
+        "OR role LIKE ?1 OR notes LIKE ?1", (like,))
+    out = [{"id": r["id"], "row": dict(r)} for r in rows]
+    # Alias-exact first, in JS: a SQL compare against the comma-joined alias
+    # string is wrong (it only fires when aliases is empty), and LIKE alone
+    # ranks a partial name match above an exact alias hit.
+    needle = q.strip().lower()
+    out.sort(key=lambda h: (needle not in (h["row"]["name"] or "").lower()
+                            and needle not in (h["row"]["aliases"] or "").lower(),
+                            (h["row"]["name"] or "").lower()))
+    if out:
+        print("== retrieve (people):")
+    for i, h in enumerate(out[:n], 1):
+        r = h["row"]
+        bits = [b for b in (r.get("org"), r.get("role"), r.get("url")) if b]
+        head = " · ".join([r["name"] or "?"] + bits[:2]) if bits else (r["name"] or "?")
+        print(f" {i}. [STRONG] cov100%  people.db:{h['id']}")
+        print(f"      {head}")
+        if long_out:
+            for f in ("aliases", "relationship", "last_contact", "confidence",
+                      "identity_verified", "source", "created_at", "updated_at"):
+                if r.get(f):
+                    print(f"      {f}: {r[f]}")
+    sys.exit(0)
+
+# fact / decision. The journal has a live reconciler holding it, so copy
+# before reading; a direct open fails with 'unable to open database file'.
+src = os.path.join(home, ".heimdall", "journal.db")
+if not os.path.exists(src):
+    sys.exit(0)
+tmp = tempfile.mktemp(suffix=".db")
+try:
+    shutil.copyfile(src, tmp)
+    sql = ("SELECT node_id, path, fact_title, fact_body, fact_kind FROM owned_nodes "
+           "WHERE kind = 'fact'")
+    if kind == "decision":
+        sql += " AND fact_kind IN ('assertion','declaration')"
+    like = "%" + q + "%"
+    sql += " AND (fact_title LIKE ? OR fact_body LIKE ?)"
+    rows = rows_from(tmp, sql, (like, like))
+except Exception as e:
+    print(f"WARN: fact leg failed: {e}", file=sys.stderr)
+    rows = []
+finally:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+if rows:
+    print("== retrieve (facts):")
+for i, r in enumerate(rows[:n], 1):
+    print(f" {i}. [STRONG] cov100%  {r['path']}")
+    print(f"      {r['fact_title'] or ''}")
+    if long_out and r["fact_kind"]:
+        print(f"      kind: {r['fact_kind']}")
+sys.exit(0)
+PYEOF
 	exit 0
 fi
 
@@ -252,81 +351,6 @@ long_out = sys.argv[6] == "1"
 repos = sys.argv[7:]
 graft = os.environ.get("GRAFT", "graft")
 from concurrent.futures import ThreadPoolExecutor
-
-# ── K6: people hits are emitted by a DEDICATED path and never reach the
-# verdict pass below, which hardcodes os.path.exists(p) / os.lstat(p) and emits
-# NOPATH for anything that is not a real file. `people.db:<id>` is not a file,
-# so a person hit routed through that loop would render as a dead anchor.
-def emit_people():
-    db = os.path.expanduser("~/.heimdall/people.db")
-    if not os.path.exists(db):
-        return []
-    if kind in ("code",):
-        return []
-    try:
-        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-        con.row_factory = sqlite3.Row
-        like = "%" + q + "%"
-        rows = con.execute(
-            "SELECT * FROM people WHERE name LIKE ?1 OR aliases LIKE ?1 "
-            "OR org LIKE ?1 OR role LIKE ?1 OR notes LIKE ?1", (like,)).fetchall()
-        con.close()
-    except Exception as e:
-        # Never a bare traceback and never a silent drop (2026-08-25 lesson).
-        print(f"WARN: people leg failed: {e}", file=sys.stderr)
-        return []
-    out = []
-    for r in rows:
-        name = r["name"] or "?"
-        bits = [b for b in (r["org"], r["role"], r["url"]) if b]
-        head = " · ".join([name] + bits[:2]) if bits else name
-        out.append({"id": r["id"], "name": name, "head": head, "row": dict(r)})
-    # Alias-exact first, in JS: a SQL compare against the comma-joined alias
-    # string is wrong (it only matches when aliases is empty), and LIKE alone
-    # puts a partial name match above an exact alias hit.
-    needle = q.strip().lower()
-    out.sort(key=lambda h: (needle not in (h["name"] or "").lower()
-                            and needle not in (h["row"]["aliases"] or "").lower(),
-                            h["name"].lower()))
-    return out[:n]
-
-
-def emit_facts():
-    # Facts are NOT exempt from the verdict pass — K6 covers people only, and a
-    # fact hit anchors to its real source file. The rows come from the journal.
-    if kind not in ("fact", "decision", "all"):
-        return []
-    import shutil, tempfile
-    src = os.path.expanduser("~/.heimdall/journal.db")
-    if not os.path.exists(src):
-        return []
-    # A live reconciler holds journal.db; copy before reading (direct open
-    # fails with 'unable to open database file' under that writer).
-    tmp = tempfile.mktemp(suffix=".db")
-    try:
-        shutil.copyfile(src, tmp)
-        con = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
-        con.row_factory = sqlite3.Row
-        sql = ("SELECT node_id, path, fact_title, fact_body, fact_kind "
-               "FROM owned_nodes WHERE kind = 'fact'")
-        args = ()
-        if kind == "decision":
-            sql += " AND fact_kind IN ('assertion','declaration')"
-        like = "%" + q + "%"
-        sql += " AND (fact_title LIKE ? OR fact_body LIKE ?)"
-        rows = con.execute(sql, (like, like)).fetchall()
-        con.close()
-    except Exception as e:
-        print(f"WARN: fact leg failed: {e}", file=sys.stderr)
-        return []
-    finally:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-    return [{"id": r["node_id"], "title": r["fact_title"] or "",
-             "body": r["fact_body"] or "", "path": r["path"],
-             "fact_kind": r["fact_kind"]} for r in rows][:n]
 
 def ask_repo(repo):
     try:
@@ -408,7 +432,15 @@ if os.path.exists(venv_py) and os.path.exists(os.path.expanduser("~/.heimdall/gl
 seen = {}
 for r in sorted(results, key=lambda x: -x["score"]):
     seen.setdefault(r["title"], r)
-merged = sorted(seen.values(), key=lambda x: -x["score"])[:n]
+# The `[:n]` truncation is DEFERRED when --recency is on (reviewer finding 3):
+# truncating first and weighting after means a 5-month-old file that was cut at
+# rank 7 can never be promoted back in, so the flag could only reorder the
+# survivors. Weighting must happen over the full merged set. With --recency off
+# (the default) the truncate stays exactly here, so the no-flag bytes are
+# untouched.
+merged = sorted(seen.values(), key=lambda x: -x["score"])
+if not recency:
+    merged = merged[:n]
 
 # ── --recency (spec K4, default OFF). weight = 0.5 ** (age_days / 180),
 # applied post-merge, pre-truncate. Only hits that HAVE a card mtime are
@@ -440,46 +472,6 @@ if recency:
             age_days = max(0.0, now - m_) / 86400.0
             r["score"] = r["score"] * (0.5 ** (age_days / 180.0))
     merged = sorted(merged, key=lambda x: -x["score"])[:n]
-
-# ── K6: people are emitted here, directly, and NEVER enter the verdict loop
-# below. That loop opens with os.path.exists(p) and os.lstat(p); a
-# `people.db:<id>` anchor is not a filesystem path, so it would come out NOPATH
-# — "anchor is gone from disk" — for a person who is right there in the store.
-# Both are bound to [] up front: the early-exit below reads them on a path where
-# their own branch never ran (e.g. --kind fact never defines ppl).
-ppl = []
-facts = []
-if kind in ("person", "all"):
-    ppl = emit_people()
-    if ppl:
-        print("== retrieve (people):")
-        for i, h in enumerate(ppl, 1):
-            print(f" {i}. [STRONG] cov100%  people.db:{h['id']}")
-            print(f"      {h['head']}")
-            if long_out:
-                row = h["row"]
-                for f in ("aliases", "relationship", "last_contact", "confidence",
-                          "identity_verified", "source", "created_at", "updated_at"):
-                    v = row.get(f)
-                    if v:
-                        print(f"      {f}: {v}")
-
-if kind in ("fact", "decision", "all"):
-    facts = emit_facts()
-    if facts:
-        print("== retrieve (facts):")
-        for i, f in enumerate(facts, 1):
-            print(f" {i}. [STRONG] cov100%  {f['path']}")
-            print(f"      {f['title']}")
-            if long_out and f.get("fact_kind"):
-                print(f"      kind: {f['fact_kind']}")
-
-# A pure person/fact query answers from its own leg; running the code legs
-# first would pay ~15s of graft+semantic work whose results are discarded.
-# `code` and `all` fall through to the code path below.
-if kind in ("person", "fact", "decision"):
-    if ppl or facts:
-        sys.exit(0)
 
 # Verdict pass: STRONG requires identity with the indexed content — the path
 # exists AND the file on disk still matches the card that was indexed (size +

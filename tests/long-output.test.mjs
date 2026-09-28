@@ -5,7 +5,7 @@
 // silently ignored flag.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -94,6 +94,58 @@ shellTest("--long without --kind person is a usage error", () => {
   try {
     const r = run(home, "--kind", "code", "--long");
     assert.equal(r.status, 2, `--long with --kind code should exit 2, got ${r.status}`);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// Reviewer finding 1 (2026-09-28): a person/fact query must never fall through
+// to the code leg, not even when its own store is empty. The original guard was
+// `if ppl or facts: sys.exit(0)`, so an empty or missing store answered "who is
+// X" with a list of Python files. Empty is an answer; leakage is not.
+shellTest("an empty people store answers empty — no code hits leak in", () => {
+  const home = fakeHome();
+  try {
+    rmSync(join(home, ".heimdall", "people.db"), { force: true });
+    const r = spawnSync("bash", [SEARCH, "Sayana", "-n", "5", "--kind", "person"], {
+      encoding: "utf8",
+      env: { ...process.env, HOME: home, PATH: "/usr/bin:/bin", GRAFT: undefined },
+    });
+    assert.equal(r.status, 0);
+    assert.doesNotMatch(r.stdout, /alpha hit/, "a code hit leaked into a person query");
+    assert.doesNotMatch(r.stdout, /src\/alpha\.py/);
+    assert.doesNotMatch(
+      r.stdout,
+      /retrieve \(per-repo graft/,
+      "printed a code-leg header for a query that never ran the code legs",
+    );
+    assert.match(r.stdout, /No ~\/\.heimdall\/people\.db yet/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// Reviewer finding 2: the person/fact dispatch must sit BEFORE the graft legs,
+// so a pure people query does not pay ~15s of graft work it then discards.
+shellTest("--kind person does not invoke graft at all", () => {
+  const home = fakeHome();
+  try {
+    const marker = join(home, "graft-was-called");
+    writeFileSync(
+      join(home, ".local", "bin", "graft"),
+      `#!/usr/bin/env bash\ntouch ${JSON.stringify(marker)}\nprintf '%s\\n' '{"hits":[]}'\n`,
+    );
+    chmodSync(join(home, ".local", "bin", "graft"), 0o755);
+    const r = spawnSync("bash", [SEARCH, "Sayana", "-n", "2", "--kind", "person"], {
+      encoding: "utf8",
+      env: { ...process.env, HOME: home, PATH: "/usr/bin:/bin", GRAFT: undefined },
+    });
+    assert.equal(r.status, 0);
+    assert.equal(
+      existsSync(marker),
+      false,
+      "--kind person still shelled out to graft",
+    );
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
