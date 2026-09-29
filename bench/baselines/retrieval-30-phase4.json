@@ -1,6 +1,6 @@
 {
-  "measured_at": "2026-09-28T23:04:14-0400",
-  "tree_commit": "93c63d8d159b03c8c07df7c16cc6fd8c223f8064",
+  "measured_at": "2026-09-29T00:46:38-0400",
+  "tree_commit": "70c65eb99bd170c4b5214283422753e26a30f227",
   "tree_commit_note": "the commit that CONTAINS the measured code, golds and ranking. An earlier revision of this file recorded the PARENT commit, which had the stopword leak, the flat ranking and the rigged prefix queries, so reproducing from it gave different numbers.",
   "kind_wired": true,
   "people_anchors_emitted": 3,
@@ -10,14 +10,14 @@
   },
   "slices": {
     "code": {
-      "hit_rate": 0.1,
-      "hits": 1,
+      "hit_rate": 0.4,
+      "hits": 4,
       "n": 10,
       "run_valid": true,
       "degraded_queries": [],
       "failed_queries": [],
-      "bar": "0.10",
-      "bar_note": "MEASURED FLOOR, not the 0.30 spec bar. The pre-Phase-1 baseline commit 579568d re-runs at 0.10 on the SAME live index, so the 0.30 was index drift, not a code regression: bin/lib/*.mjs is no longer in global.db, only stale graft/*.md cards remain. A rebuild was authorized and backed up (4.48 GB, quick_check ok, 852372 cards), then stopped by a real 6.0 GB RAM guard with 5.7 GB free. Decision on record: record the floor, close nothing."
+      "bar": "0.30",
+      "bar_note": "The 0.30 spec bar, MET at 0.40. The earlier 0.10 was index drift, not a code regression: the pre-Phase-1 baseline commit 579568d also measured 0.10 on the same index because bin/lib/*.mjs was absent from global.db (only stale graft/*.md cards remained). After the authorized rebuild (604135 cards, quick_check ok, 50147 embedded) the code slice measures 0.40, above both the 0.30 bar and the original baseline. The retrieval code was never the cause."
     },
     "fact": {
       "hit_rate": 0.9,
@@ -42,10 +42,10 @@
   },
   "regressions": {
     "default_kb_search_output": "byte-identical to a golden captured before any production change",
-    "code_slice_vs_0.30_spec_bar": "NOT MET; the bar is stale. See slices.code.bar_note."
+    "code_slice_vs_0.30_spec_bar": "MET: 0.40 >= 0.30, verified after the global.db rebuild. The gap that existed at merge time was environmental, proven by the pre-Phase-1 commit measuring 0.10 on the same index."
   },
   "review": "four adversarial rounds in Phase 3, one in Phase 4; this run fixed 2 BLOCKERs and 5 MAJORs before the measurement",
   "gold_set_rebuilt": true,
   "gold_set_note": "Person and fact gold sets were rebuilt in Phase 4. As shipped in Phase 0, 0 of 10 person queries named their own gold and 0 of 10 fact golds existed anywhere in the corpus, so both 0.00s measured the gold set rather than retrieval. Every replacement gold is a real record verified present in people.db / journal.db before use; fact queries draw from the middle of the gold, not its opening, and a test asserts gold/query token overlap so a rigged set fails the build.",
-  "measured_numbers_produced_by": "commit 0fbacd13003645c981cfe3fb1bd652755f4bd6e8"
+  "measured_numbers_produced_by": "70c65eb99bd170c4b5214283422753e26a30f227"
 }
