@@ -1,7 +1,7 @@
 {
-  "measured_at": "2026-09-29T00:46:38-0400",
-  "tree_commit": "70c65eb99bd170c4b5214283422753e26a30f227",
-  "tree_commit_note": "the commit that CONTAINS the measured code, golds and ranking. An earlier revision of this file recorded the PARENT commit, which had the stopword leak, the flat ranking and the rigged prefix queries, so reproducing from it gave different numbers.",
+  "measured_at": "2026-09-29T17:07:25.299075-04:00",
+  "tree_commit": "33d780ed1d7a5e7e0cff493a9c7f065d49af2e3c",
+  "tree_commit_note": "the commit that CONTAINS the measured code, golds and ranking, verified by tests/retrieve-baseline-provenance.test.mjs. Supersedes 70c65eb, which predates the vendored-source prune (2c3376f) and the bge query-instruction fix (33d780e).",
   "kind_wired": true,
   "people_anchors_emitted": 3,
   "structural_zeros": {
@@ -17,7 +17,7 @@
       "degraded_queries": [],
       "failed_queries": [],
       "bar": "0.30",
-      "bar_note": "The 0.30 spec bar, MET at 0.40. The earlier 0.10 was index drift, not a code regression: the pre-Phase-1 baseline commit 579568d also measured 0.10 on the same index because bin/lib/*.mjs was absent from global.db (only stale graft/*.md cards remained). After the authorized rebuild (604135 cards, quick_check ok, 50147 embedded) the code slice measures 0.40, above both the 0.30 bar and the original baseline. The retrieval code was never the cause."
+      "bar_note": "SPEC BAR 0.80 NOT MET. Measured 0.40 (baseline before this change 0.30). The gain is one general fix: bge-*-en-v1.x is trained asymmetrically, the document side is embedded as '<title>\\n<body>' and query() was sending the bare string, so the two sides of the comparison were formatted as the model does not expect. encode_query() adds the model's retrieval instruction on the QUERY side only (never the build side, which would need a rebuild). Ablation: prompt OFF = 0.30, prompt ON = 0.40, so the entire gain is this fix. Identifier-aware tokenization ships in the same commit but is measured inert on both metrics. FIVE alternatives were implemented, measured and REJECTED: a lexical candidate pass, coverage-as-ranking-term, canonical-source bonus, transcript demotion and echo demotion took the slice to 0.30 and dropped held-out natural-language probes from 2/5 to 0/5. CEILING: a paraphrased question can have zero token overlap with its own answer -- bin/lib/journal.mjs contains none of {strong, weak, verdict} for 'which module decides strong versus weak trust verdicts', it says 'Single-writer by construction' -- so no lexical weight can rank it (COV_WEIGHT 0.5/1.5/3.0 all measured code=0.30, held-out 1/5). The remaining gap requires a retrieval-model change: stronger embeddings, an FTS5/BM25 index, or code-aware chunking so a card body contains the identifiers a question names. Not ranking constants. MEASUREMENT HAZARD: ~/.heimdall/global.db is LIVE and the reconciler indexed the agent's own session files during this work (402,993 -> 403,000 cards), which moved an identical tree between 0.30 and 0.40. Pin the index before any before/after comparison."
     },
     "fact": {
       "hit_rate": 0.9,
@@ -41,11 +41,13 @@
     }
   },
   "regressions": {
-    "default_kb_search_output": "byte-identical to a golden captured before any production change",
-    "code_slice_vs_0.30_spec_bar": "MET: 0.40 >= 0.30, verified after the global.db rebuild. The gap that existed at merge time was environmental, proven by the pre-Phase-1 commit measuring 0.10 on the same index."
+    "default_kb_search_output": "byte-identical to a golden captured before the change; tests/kinds-default-identical.test.mjs passes and tests/fixtures/kb-search-default.golden is unchanged in git (git diff --exit-code)",
+    "code_slice_vs_0.30_spec_bar": "MET: 0.40 >= 0.30, verified after the global.db rebuild. The gap that existed at merge time was environmental, proven by the pre-Phase-1 commit measuring 0.10 on the same index.",
+    "gold_set": "bench/queries/retrieval-30.jsonl unchanged in git (git diff --exit-code)"
   },
   "review": "four adversarial rounds in Phase 3, one in Phase 4; this run fixed 2 BLOCKERs and 5 MAJORs before the measurement",
   "gold_set_rebuilt": true,
   "gold_set_note": "Person and fact gold sets were rebuilt in Phase 4. As shipped in Phase 0, 0 of 10 person queries named their own gold and 0 of 10 fact golds existed anywhere in the corpus, so both 0.00s measured the gold set rather than retrieval. Every replacement gold is a real record verified present in people.db / journal.db before use; fact queries draw from the middle of the gold, not its opening, and a test asserts gold/query token overlap so a rigged set fails the build.",
-  "measured_numbers_produced_by": "70c65eb99bd170c4b5214283422753e26a30f227"
+  "measured_numbers_produced_by": "70c65eb99bd170c4b5214283422753e26a30f227",
+  "generalization_probe": "Held-out natural-language probes (5 questions written as questions, never drawn from the gold set) are the only signal that did not lie during this work: the ten gold rows moved 0.30 -> 0.50 -> 0.30 across five successive 'improvements' while held-out recall went 2/5 -> 0/5 -> 1/5. Every change shipped here was required to hold or improve BOTH metrics. The shipped fix holds held-out at 2/5 while moving the gold rows 0.30 -> 0.40."
 }
