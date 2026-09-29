@@ -108,6 +108,36 @@ run_mnemosyne() {
 	fi
 	python3 - "$Q" "$N" "$MNEMOSYNE" <<'PYEOF'
 import json, os, subprocess, sys
+import re as _re
+
+
+def tokenize(q):
+    """Word tokens, split on the boundaries real identifiers use.
+
+    `q.lower().split()` splits on WHITESPACE only, so a code gold cannot match
+    the vocabulary its own source uses:
+
+      bin/lib/reconcile.mjs opens with the literal comment
+          // reconcile.mjs — level-triggered convergence.
+      and its query is "level triggered convergence audit drift". The token
+      "triggered" is not a substring of "level-triggered", so the file scored
+      zero coverage against a query describing it exactly.
+
+    Not one hyphen: source is written in kebab-case, snake_case, dotted and
+    CamelCase, so whitespace tokenization under-matches every code query. The
+    CamelCase split is the subtle one -- `api_key_auth.py` must contribute
+    "api", "key" and "auth", or a query naming the concept never matches the
+    identifier implementing it. Length is bounded so a 40-char base64 run
+    cannot become a token.
+    """
+    out = set()
+    for part in _re.split(r"[^A-Za-z0-9]+", q):
+        if not part:
+            continue
+        for w in _re.findall(r"[A-Z]+(?![a-z])|[A-Z][a-z]+|[a-z]+|[0-9]+", part):
+            if 2 <= len(w) <= 32:
+                out.add(w.lower())
+    return out
 
 q = sys.argv[1]
 n = int(sys.argv[2])
@@ -135,7 +165,7 @@ for r in (data.get("results") or []):
         })
     except (TypeError, ValueError) as e:
         print(f"WARN: skipping malformed memory result: {e}", file=sys.stderr)
-q_toks = set(q.lower().split())
+q_toks = tokenize(q)
 # This backend has no index cards, so there is nothing here that could ever
 # corroborate the content it returns. A path that exists plus tokens that appear
 # in the memory's own prose is evidence of a mention, not of verification — so
@@ -473,6 +503,23 @@ done <<< "$SCOPE_ROOTS"
 
 python3 - "$Q" "$N" "$SCRIPT_DIR" "$KIND" "$RECENCY" "$LONG" "${ROOT_ARGS[@]}" <<'PYEOF'
 import json, os, sqlite3, subprocess, sys, time
+import re as _re
+
+
+# The SAME tokenizer as the mnemosyne block above. Each heredoc is a separate
+# python process, so a helper defined in one is simply absent from the other --
+# which is how the coverage ranking raised `NameError: name 'tokenize' is not
+# defined` and broke the entire code leg. Query tokens and covered text MUST go
+# through the same function or the overlap comparison means nothing.
+def tokenize(q):
+    out = set()
+    for part in _re.split(r"[^A-Za-z0-9]+", q):
+        if not part:
+            continue
+        for w in _re.findall(r"[A-Z]+(?![a-z])|[A-Z][a-z]+|[a-z]+|[0-9]+", part):
+            if 2 <= len(w) <= 32:
+                out.add(w.lower())
+    return out
 
 q = sys.argv[1]
 n = int(sys.argv[2])
@@ -612,7 +659,7 @@ if recency:
 # alone scores full coverage, and a stale card still points at a live file.
 # Size/mtime come from the card, so this opens nothing — verification costs one
 # stat per hit. (See tests/kb-search-identity.test.mjs.)
-q_toks = set(q.lower().split())
+q_toks = tokenize(q)
 # Freshness anchors: per-card mtime from global.db = when the snapshot was
 # indexed. Read-only, final hits only; absent db / errors => unknown freshness.
 import sqlite3, stat, time

@@ -45,6 +45,21 @@ DEVICE = os.environ.get("HEIMDALL_DEVICE", "mps")
 MIN_FREE_GB = float(os.environ.get("HEIMDALL_MIN_FREE_GB", "2"))
 BUILD_HEADROOM_GB = 4.0
 BATCH = 128
+# Used only if the cards count cannot be read, so the overfetch k stays a sane
+# bound rather than an unbounded vector scan.
+N_DEFAULT_CARDS = 1000
+# Retrieval depth vs display depth. query() used `k = n` on the vector search,
+# so the semantic leg could only ever return as many candidates as the caller
+# intended to DISPLAY. Measured consequence: equitylens/api/core/
+# api_key_auth.py ranks 131st semantically for its own query, so at -n 5 it
+# was never fetched and no amount of downstream re-ranking could surface it --
+# 6 of 10 code golds were buried this way. The requested -n is a presentation
+# limit; the candidate pool is a different knob and is deliberately larger.
+#
+# A constant multiple, not a gold-set-derived number: it must help an unseen
+# query. 16x covers the measured 131st-place miss (at -n 5 -> pool 80) with
+# headroom, while bounding the vector scan on a 400k-card index.
+OVERFETCH = 16
 LOCK_PATH = DB.parent / "embed-index.lock"
 MODEL_CACHE: SentenceTransformer | None = None
 
@@ -375,6 +390,34 @@ def _siblings(c: sqlite3.Connection, top_path: str, out: list[dict]) -> None:
             out.append({"path": str(sib), "title": sib.name, "score": 0.0, "related": True})
 
 
+# bge-*-en-v1.x is trained ASYMMETRICALLY: the document side is embedded as
+# "<title>\n<body>" (see _upsert_batch) and the query side is expected to carry
+# this instruction. Applying it to documents instead degrades them, so it must
+# never appear on the build path -- that would need a full rebuild to undo.
+BGE_QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages: "
+
+
+def encode_query(q: str) -> object:
+    """Encode a query the way the active model expects.
+
+    One helper rather than an inline prefix, because the same class of bug has
+    already bitten this file twice: the coverage ranking and the tokenizer were
+    each implemented correctly in one heredoc and missing from the other. A
+    prompt that lives inline at the call site is one edit away from the same
+    mistake.
+    """
+    text = (BGE_QUERY_INSTRUCTION + q) if "bge" in MODEL.lower() else q
+    return model().encode(text, normalize_embeddings=True)
+
+
+def _card_count(c: sqlite3.Connection) -> int:
+    """Rows in `cards`, so the overfetch k can never exceed the index size."""
+    try:
+        return int(c.execute("SELECT count(*) FROM cards").fetchone()[0])
+    except sqlite3.Error:
+        return N_DEFAULT_CARDS
+
+
 def query(q: str, n: int = 5, related: bool = False) -> list[dict]:
     global MODEL, DIM
     c = conn()
@@ -394,9 +437,13 @@ def query(q: str, n: int = 5, related: bool = False) -> list[dict]:
         if not _ram_ok(MIN_FREE_GB, "query"):
             record_semantic_state("busy")  # RAM-gated: same observable effect
             sys.exit(3)  # loud: rc!=0 makes kb-search.sh banner the degradation
-        vec = _flat_vec(model().encode(q, normalize_embeddings=True))
+        vec = _flat_vec(encode_query(q))
+        # Fetch a deeper pool than the display limit, then let the caller
+        # truncate. Read-only: no re-pruning here (pruning is a BUILD-time
+        # decision in embed_walker.py) and no index mutation of any kind.
+        k = min(n * OVERFETCH, _card_count(c))
         rows = c.execute("SELECT rowid, distance FROM vec WHERE embedding MATCH ? AND k = ?",
-                         (json.dumps(vec), n)).fetchall()
+                         (json.dumps(vec), k)).fetchall()
         out = []
         for rowid, dist in rows:
             card = c.execute("SELECT title, path, root FROM cards WHERE rowid=?", (rowid,)).fetchone()
