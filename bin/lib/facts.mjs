@@ -146,7 +146,7 @@ function hasDuplicateRole(line) {
       j++;
     }
     let k = j + 1;
-    while (k < n && line[k] === " ") k++;
+    while (k < n && isJsonSpace(line[k])) k++;
     if (line[j] === '"' && line[k] === ":" && isRoleKey(line.slice(i, j + 1))) {
       if (++count > 1) return true;
     }
@@ -154,6 +154,12 @@ function hasDuplicateRole(line) {
   }
   return false;
 }
+
+// JSON whitespace between a key and its colon. Space-only was a LIVE BYPASS:
+// JSON.parse accepts tab/CR/LF there, so a record with
+// "role"<TAB>:"user" parsed as a duplicate role while the prescan counted
+// only one, and the assistant's text became a user fact.
+const isJsonSpace = (c) => c === " " || c === "\t" || c === "\r" || c === "\n";
 
 // Is this quoted token the key `role`? A literal compare is not enough:
 // JSON.parse decodes \\uXXXX escapes, so "\\u0072ole" IS the role key to the
@@ -175,13 +181,21 @@ function isRoleKey(token) {
 // being silently drained.
 function sessionTexts(rec) {
   const m = rec?.message;
-  if (!m || typeof m !== "object" || typeof m.role !== "string") return null;
-  if (!SESSION_ROLES.has(m.role)) return [];
-  if (typeof m.content === "string") return [m.content];
-  if (!Array.isArray(m.content)) return [];
-  return m.content
+  if (m === undefined || m === null) return null;
+  // A STRING message is an embedded JSON payload, not a session turn. It is
+  // treated as "not a session record" so the file stays eligible for the
+  // plain parser -- but the record is still marked as a session log, so
+  // parsePlain cannot then re-read the raw line and lift the assistant's
+  // text out of the embedded string. Without this the same text is
+  // extractable purely by changing which shape the record uses.
+  if (typeof m === "string") return { notSession: true, texts: [], embedded: m };
+  if (typeof m !== "object" || typeof m.role !== "string") return null;
+  if (!SESSION_ROLES.has(m.role)) return { notSession: true, texts: [] };
+  if (typeof m.content === "string") return { notSession: false, texts: [m.content] };
+  if (!Array.isArray(m.content)) return { notSession: false, texts: [] };
+  return { notSession: false, texts: m.content
     .filter((b) => b && typeof b === "object" && b.type === "text" && typeof b.text === "string")
-    .map((b) => b.text);
+    .map((b) => b.text) };
 }
 
 function parseJsonl(buf, path, out, meta) {
@@ -208,16 +222,28 @@ function parseJsonl(buf, path, out, meta) {
     try {
       const rec = JSON.parse(l);
       sawJson = true;
-      // Legacy flat shape, kept for the prompt-log format.
+      // Legacy flat shape, kept for the prompt-log format. The role is
+      // honoured when the record carries one: a flat {"role":"assistant",
+      // "text":...} is the same assistant-origin text in a different shape,
+      // and extracting it while rejecting the nested form would be an
+      // inconsistency a reader could not see.
       if (typeof rec?.text === "string") {
-        rec.text.split(/(?<=[.!?])\s+|\n/).forEach((u) =>
-          extractFromLine(u, path, i + 1, out, meta));
+        // Mark the file as a session log in BOTH branches, accepted or not.
+        // Without this a rejected flat record falls through to parsePlain,
+        // which re-reads the raw line and extracts the very text the role
+        // check just refused -- the same bypass as the duplicate-key path.
+        isSession = true;
+        const role = typeof rec?.role === "string" ? rec.role : "user";
+        if (SESSION_ROLES.has(role)) {
+          rec.text.split(/(?<=[.!?])\s+|\n/).forEach((u) =>
+            extractFromLine(u, path, i + 1, out, meta));
+        }
         return;
       }
-      const texts = sessionTexts(rec);
-      if (texts === null) return; // not a session record; not our business
+      const shape = sessionTexts(rec);
+      if (shape === null) return; // not a session record; not our business
       isSession = true;
-      texts.forEach((t) => t.split(/(?<=[.!?])\s+|\n/).forEach((u) =>
+      shape.texts.forEach((t) => t.split(/(?<=[.!?])\s+|\n/).forEach((u) =>
         extractFromLine(u, path, i + 1, out, meta)));
     } catch { /* torn/non-JSON line: skipped by design */ }
   });
