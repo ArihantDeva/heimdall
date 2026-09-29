@@ -147,12 +147,26 @@ function hasDuplicateRole(line) {
     }
     let k = j + 1;
     while (k < n && line[k] === " ") k++;
-    if (line[j] === '"' && line[k] === ":" && line.slice(i, j + 1) === '"role"') {
+    if (line[j] === '"' && line[k] === ":" && isRoleKey(line.slice(i, j + 1))) {
       if (++count > 1) return true;
     }
     i = j + 1;
   }
   return false;
+}
+
+// Is this quoted token the key `role`? A literal compare is not enough:
+// JSON.parse decodes \\uXXXX escapes, so "\\u0072ole" IS the role key to the
+// parser and last-key-wins resolved it to "user" -- measured, a live bypass of
+// the prescan. Decoding the token closes it. A token that will not decode is
+// not a role key.
+function isRoleKey(token) {
+  if (token === '"role"') return true;
+  try {
+    return JSON.parse(token) === "role";
+  } catch {
+    return false;
+  }
 }
 
 // Returns null when this file is not a session log. `sawRole` is true when a
