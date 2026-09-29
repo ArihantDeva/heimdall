@@ -32,3 +32,7 @@ target/
 # exported ONNX model — local 127 MB blob, regenerable, never committed
 rs/**/model/
 *.tgz
+
+# Live test-runner state. A repo-local journal.db was committed once by a
+git add -A; it is runtime state, not source. Never track it.
+.heimdall/
