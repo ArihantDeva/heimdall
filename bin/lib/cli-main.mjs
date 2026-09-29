@@ -22,6 +22,7 @@ const USAGE = `usage: heimdall <command>
   person import --kb <linkedin|substack|x|all> [--dry-run]    import people from a knowledge base
   person list [--limit N]                                     list stored people
   person backup                                               snapshot people.db
+  backfill-sessions --limit N [--dry-run]            extract facts from recent session logs
   ingest-email [--accounts a,b] [--limit N] [--root DIR]      index mailbox (read-only via cli-email)
   doctor                                                      daemon + index health check
 
@@ -471,6 +472,73 @@ export async function main(argv) {
     case "hint": return runHint(rest);
     case "person": return (await import("./people-cli.mjs")).runPersonCmd(rest);
     case "search": return runSearch(rest);
+    case "backfill-sessions": {
+      const bad = checkFlags("backfill-sessions", rest, ["--limit", "--dry-run"]);
+      if (bad) return bad;
+      const i = rest.indexOf("--limit");
+      const raw = i >= 0 ? rest[i + 1] : undefined;
+      const limit = raw === undefined ? 200 : Number(raw);
+      if (!Number.isInteger(limit) || limit < 1) {
+        console.error(`--limit must be a positive integer, got '${raw}'`);
+        return 2;
+      }
+      const { measureBackfill, MAX_BACKFILL } = await import("./backfill-sessions.mjs");
+      if (limit > MAX_BACKFILL) {
+        console.error(`--limit ${limit} exceeds the hard cap of ${MAX_BACKFILL} sessions`);
+        return 2;
+      }
+      const r = measureBackfill({ limit });
+      console.log(`sessions scanned: ${r.files} (limit ${r.limit})`);
+      console.log(`sessions yielding facts: ${r.filesWithFacts}`);
+      console.log(`facts extracted: ${r.facts}`);
+      console.log(`skipped secrets: ${r.skippedSecrets}  skipped duplicates: ${r.skippedDuplicates}`);
+      if (rest.includes("--dry-run")) {
+        console.log("dry run: nothing written");
+        return 0;
+      }
+      // Enqueue through the reconciler's own path — never a direct journal
+      // write. The journal has a live single-writer.
+      const [{ Lock }, { skipPath }, { loadConfig, capability, journalPath, lockPath }] =
+        await Promise.all([
+          import("./lock.mjs"), import("./reconcile.mjs"), import("./depth.mjs"),
+        ]);
+      const os = await import("node:os");
+      const code = await Lock.withLock(lockPath(), async () => {
+        const { Journal } = await import("./journal.mjs");
+        const { drain } = await import("./reconcile.mjs");
+        const { GraftSink } = await import("./sink.mjs");
+        const journal = new Journal(journalPath());
+        let queued = 0;
+        for (const f of r.perFile) {
+          if (skipPath(f.path, os.homedir())) continue;
+          journal.enqueue(f.path, "backfill");
+          queued++;
+        }
+        const ctx = { journal, config: loadConfig(), cap: capability(), sink: new GraftSink() };
+        // BOUNDED, not drain-to-exhaustion. drain(ctx) takes the WHOLE shared
+        // queue, not just what this command enqueued, so looping it drained
+        // whatever the daemon had pending: proven 400 unrelated paths
+        // processed under `--limit 1`. A backfill whose entire purpose is a
+        // hard bound must not be able to do unbounded work.
+        let done = 0;
+        while (done < queued) {
+          const { processed } = drain(ctx, { limit: queued - done });
+          if (!processed) break;
+          done += processed;
+        }
+        console.log(`queued ${queued} session log(s); reconciled ${done}`);
+        return 0;
+      });
+      // A lost lock is a FAILED backfill, never a silent no-op that still
+      // prints a success summary. runReconcile already treats a null return
+      // as a failure; this path did not, so a cron wrapper read "backfill
+      // ran" from a run that wrote nothing at all.
+      if (code === null) {
+        console.error("another writer holds the reconciler lock (is the daemon running?)");
+        return 1;
+      }
+      return code;
+    }
     case "insert": return await runInsert(rest);
     case "ingest-email": return await runIngestEmail(rest);
     case "doctor": return runDoctor();

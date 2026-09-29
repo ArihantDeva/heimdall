@@ -116,20 +116,138 @@ function extractFromLine(lineText, path, line, out, meta) {
   }
 }
 
+// Pi session logs. The real record shape is
+//   {"type":"message","message":{"role":"user","content":[{"type":"text","text":...}]}}
+// — the text is one level deeper than the pre-change `rec.text` this parser
+// read, and because the nested shape still parses as valid JSON, the old code
+// reported "no facts" rather than failing. A session log with no user text at
+// all is a real, common shape (an abandoned session), so the probe reports
+// what it SAW rather than whether it found anything.
+const SESSION_ROLES = new Set(["user"]);
+
+// Counts `"role"` keys outside string VALUES, so a `"role"` mentioned inside
+// a text block does not count. A hand-rolled scan rather than a regex: the
+// first regex attempt matched a comma inside a quoted value and was wrong on
+// real inputs.
+// Walks the line's JSON strings and returns true if more than one is the KEY
+// `"role"`. Hand-rolled rather than a regex because a regex cannot tell a key
+// from the same word inside a value, and two earlier attempts were wrong on
+// real inputs: the first never fired (a dead branch after the quote toggle),
+// the second mis-counted a comma inside a quoted value.
+function hasDuplicateRole(line) {
+  const n = line.length;
+  let i = 0, count = 0;
+  while (i < n) {
+    if (line[i] !== '"') { i++; continue; }
+    let j = i + 1;
+    while (j < n) {
+      if (line[j] === "\\") { j += 2; continue; }
+      if (line[j] === '"') break;
+      j++;
+    }
+    let k = j + 1;
+    while (k < n && isJsonSpace(line[k])) k++;
+    if (line[j] === '"' && line[k] === ":" && isRoleKey(line.slice(i, j + 1))) {
+      if (++count > 1) return true;
+    }
+    i = j + 1;
+  }
+  return false;
+}
+
+// JSON whitespace between a key and its colon. Space-only was a LIVE BYPASS:
+// JSON.parse accepts tab/CR/LF there, so a record with
+// "role"<TAB>:"user" parsed as a duplicate role while the prescan counted
+// only one, and the assistant's text became a user fact.
+const isJsonSpace = (c) => c === " " || c === "\t" || c === "\r" || c === "\n";
+
+// Is this quoted token the key `role`? A literal compare is not enough:
+// JSON.parse decodes \\uXXXX escapes, so "\\u0072ole" IS the role key to the
+// parser and last-key-wins resolved it to "user" -- measured, a live bypass of
+// the prescan. Decoding the token closes it. A token that will not decode is
+// not a role key.
+function isRoleKey(token) {
+  if (token === '"role"') return true;
+  try {
+    return JSON.parse(token) === "role";
+  } catch {
+    return false;
+  }
+}
+
+// Returns null when this file is not a session log. `sawRole` is true when a
+// message.role was observed, which is what makes the probe positive: a
+// non-session JSONL has no role, so it falls through to parsePlain instead of
+// being silently drained.
+function sessionTexts(rec) {
+  const m = rec?.message;
+  if (m === undefined || m === null) return null;
+  // A STRING message is an embedded JSON payload, not a session turn. It is
+  // treated as "not a session record" so the file stays eligible for the
+  // plain parser -- but the record is still marked as a session log, so
+  // parsePlain cannot then re-read the raw line and lift the assistant's
+  // text out of the embedded string. Without this the same text is
+  // extractable purely by changing which shape the record uses.
+  if (typeof m === "string") return { notSession: true, texts: [], embedded: m };
+  if (typeof m !== "object" || typeof m.role !== "string") return null;
+  if (!SESSION_ROLES.has(m.role)) return { notSession: true, texts: [] };
+  if (typeof m.content === "string") return { notSession: false, texts: [m.content] };
+  if (!Array.isArray(m.content)) return { notSession: false, texts: [] };
+  return { notSession: false, texts: m.content
+    .filter((b) => b && typeof b === "object" && b.type === "text" && typeof b.text === "string")
+    .map((b) => b.text) };
+}
+
 function parseJsonl(buf, path, out, meta) {
   const lines = buf.toString("utf8").split("\n");
   let sawJson = false;
+  let isSession = false;
   lines.forEach((l, i) => {
     if (!l.trim()) return;
+    // A duplicated `role` key is rejected before parsing. JSON.parse is
+    // last-key-wins, so `{"role":"assistant","role":"user"}` reads as
+    // "user" and the assistant's text becomes a user fact -- measured. Real
+    // pi logs are machine-generated so this is a hand-authored-file hazard,
+    // but the "user's words only" property must hold for any input, so an
+    // ambiguous record is dropped rather than guessed.
+    if (hasDuplicateRole(l)) {
+      // Mark the file as a session log even when the record is dropped, or
+      // parsePlain() below re-reads the raw JSON and extracts the very text
+      // the prescan just rejected. That was the actual bypass: the prescan
+      // worked, the fallback undid it.
+      sawJson = true;
+      isSession = true;
+      return;
+    }
     try {
       const rec = JSON.parse(l);
       sawJson = true;
-      const text = typeof rec?.text === "string" ? rec.text : "";
-      text.split(/(?<=[.!?])\s+|\n/).forEach((u) =>
-        extractFromLine(u, path, i + 1, out, meta));
+      // Legacy flat shape, kept for the prompt-log format. The role is
+      // honoured when the record carries one: a flat {"role":"assistant",
+      // "text":...} is the same assistant-origin text in a different shape,
+      // and extracting it while rejecting the nested form would be an
+      // inconsistency a reader could not see.
+      if (typeof rec?.text === "string") {
+        // Mark the file as a session log in BOTH branches, accepted or not.
+        // Without this a rejected flat record falls through to parsePlain,
+        // which re-reads the raw line and extracts the very text the role
+        // check just refused -- the same bypass as the duplicate-key path.
+        isSession = true;
+        const role = typeof rec?.role === "string" ? rec.role : "user";
+        if (SESSION_ROLES.has(role)) {
+          rec.text.split(/(?<=[.!?])\s+|\n/).forEach((u) =>
+            extractFromLine(u, path, i + 1, out, meta));
+        }
+        return;
+      }
+      const shape = sessionTexts(rec);
+      if (shape === null) return; // not a session record; not our business
+      isSession = true;
+      shape.texts.forEach((t) => t.split(/(?<=[.!?])\s+|\n/).forEach((u) =>
+        extractFromLine(u, path, i + 1, out, meta)));
     } catch { /* torn/non-JSON line: skipped by design */ }
   });
-  return sawJson;
+  return sawJson ? (isSession ? "session" : "json") : false;
 }
 
 function parsePlain(buf, path, out, meta) {
@@ -153,7 +271,16 @@ export function extractFacts(buf, meta = { path: "" }) {
   meta.skippedDuplicates = meta.skippedDuplicates ?? 0;
   if (!buf || !buf.toString("utf8").trim()) return [];
   const out = [];
-  if (!parseJsonl(buf, meta.path, out, meta)) parsePlain(buf, meta.path, out, meta);
+  // "session" | "json" | false. "session" means recognised session records,
+  // so parsePlain must NOT run or the same text is extracted twice. The
+  // pre-change code only returned a boolean, so a session log ALSO fell
+  // through to parsePlain and double-extracted.
+  if (parseJsonl(buf, meta.path, out, meta) !== "session" && !out.length) {
+    // Only fall back when nothing was extracted: a non-session JSONL keeps
+    // the plain parser, and a session log with no user text yields nothing
+    // rather than being re-parsed as prose.
+    parsePlain(buf, meta.path, out, meta);
+  }
   // ponytail: dedup is per-path ONLY — cross-path dedup intentionally absent
   // (spec D4): fact ownership is namespaced by source file, so editing one
   // file retracts exactly its own nodes and two files stating the same fact
