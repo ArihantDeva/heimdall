@@ -125,6 +125,36 @@ function extractFromLine(lineText, path, line, out, meta) {
 // what it SAW rather than whether it found anything.
 const SESSION_ROLES = new Set(["user"]);
 
+// Counts `"role"` keys outside string VALUES, so a `"role"` mentioned inside
+// a text block does not count. A hand-rolled scan rather than a regex: the
+// first regex attempt matched a comma inside a quoted value and was wrong on
+// real inputs.
+// Walks the line's JSON strings and returns true if more than one is the KEY
+// `"role"`. Hand-rolled rather than a regex because a regex cannot tell a key
+// from the same word inside a value, and two earlier attempts were wrong on
+// real inputs: the first never fired (a dead branch after the quote toggle),
+// the second mis-counted a comma inside a quoted value.
+function hasDuplicateRole(line) {
+  const n = line.length;
+  let i = 0, count = 0;
+  while (i < n) {
+    if (line[i] !== '"') { i++; continue; }
+    let j = i + 1;
+    while (j < n) {
+      if (line[j] === "\\") { j += 2; continue; }
+      if (line[j] === '"') break;
+      j++;
+    }
+    let k = j + 1;
+    while (k < n && line[k] === " ") k++;
+    if (line[j] === '"' && line[k] === ":" && line.slice(i, j + 1) === '"role"') {
+      if (++count > 1) return true;
+    }
+    i = j + 1;
+  }
+  return false;
+}
+
 // Returns null when this file is not a session log. `sawRole` is true when a
 // message.role was observed, which is what makes the probe positive: a
 // non-session JSONL has no role, so it falls through to parsePlain instead of
@@ -146,6 +176,21 @@ function parseJsonl(buf, path, out, meta) {
   let isSession = false;
   lines.forEach((l, i) => {
     if (!l.trim()) return;
+    // A duplicated `role` key is rejected before parsing. JSON.parse is
+    // last-key-wins, so `{"role":"assistant","role":"user"}` reads as
+    // "user" and the assistant's text becomes a user fact -- measured. Real
+    // pi logs are machine-generated so this is a hand-authored-file hazard,
+    // but the "user's words only" property must hold for any input, so an
+    // ambiguous record is dropped rather than guessed.
+    if (hasDuplicateRole(l)) {
+      // Mark the file as a session log even when the record is dropped, or
+      // parsePlain() below re-reads the raw JSON and extracts the very text
+      // the prescan just rejected. That was the actual bypass: the prescan
+      // worked, the fallback undid it.
+      sawJson = true;
+      isSession = true;
+      return;
+    }
     try {
       const rec = JSON.parse(l);
       sawJson = true;

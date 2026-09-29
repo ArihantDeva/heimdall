@@ -42,11 +42,24 @@ export function listSessionLogs(root = join(homedir(), ".pi", "agent", "sessions
 }
 
 /**
+ * Resolve and VALIDATE a limit. The bound has to be enforced here, in the
+ * library, because the CLI is not the only caller: the pre-change code
+ * clamped with Math.trunc/Math.min, so 0, NaN, Infinity and null all
+ * silently became 200 -- the cap INVERTED, and a 100000n threw a raw
+ * TypeError. "A limit that is not a positive integer is not a limit."
+ */
+export function resolveLimit(limit, fallback = DEFAULT_LIMIT) {
+  const n = typeof limit === "number" ? limit : Number(limit);
+  if (!Number.isInteger(n) || n < 1) return fallback;
+  return Math.min(n, MAX_BACKFILL);
+}
+
+/**
  * Extract facts from the N most-recent session logs. Read-only: it touches no
  * store, so the measurement can be taken before anything is written.
  */
 export function measureBackfill({ limit = DEFAULT_LIMIT, root } = {}) {
-  const capped = Math.min(Math.max(1, Math.trunc(limit) || DEFAULT_LIMIT), MAX_BACKFILL);
+  const capped = resolveLimit(limit);
   const files = listSessionLogs(root).slice(0, capped);
   const perFile = [];
   let facts = 0, secrets = 0, dupes = 0;

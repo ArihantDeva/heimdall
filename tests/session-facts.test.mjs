@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { extractFacts } from "../bin/lib/facts.mjs";
 import { desiredState } from "../bin/lib/extract.mjs";
 import { skipPath } from "../bin/lib/reconcile.mjs";
-import { MAX_BACKFILL, listSessionLogs, measureBackfill } from "../bin/lib/backfill-sessions.mjs";
+import { MAX_BACKFILL, listSessionLogs, measureBackfill, resolveLimit } from "../bin/lib/backfill-sessions.mjs";
 
 const HOME = "/Users/x";
 const SESSION = `${HOME}/.pi/agent/sessions/--home-x--/s.jsonl`;
@@ -231,4 +231,67 @@ test("facts from a backfill carry a real source anchor, not a synthetic one", ()
     const f = extractFacts(readFileSync(p), { path: p })[0];
     assert.ok(f.body.includes(p), "body does not carry its source: " + f.body);
   });
+});
+
+// ── review round 1: four MAJORs ───────────────────────────────────────────
+
+test("a duplicated role key cannot smuggle non-user text through", () => {
+  // JSON.parse is last-key-wins, so this assistant record reads as a user
+  // one. Two separate bypasses had to be closed: the prescan, AND the
+  // parsePlain fallback that re-read the raw JSON and re-extracted the very
+  // text the prescan had just rejected. Closing only the prescan still
+  // yielded 1 fact, which is why this asserts the end-to-end count.
+  const t = "I prefer zebra over horse always.";
+  const raw = (pair) => Buffer.from(
+    '{"type":"message","message":{' + pair + ',"content":[{"type":"text","text":"' + t + '"}]}}');
+  assert.equal(extractFacts(raw('"role":"assistant","role":"user"'), { path: SESSION }).length, 0);
+  assert.equal(extractFacts(raw('"role":"user","role":"assistant"'), { path: SESSION }).length, 0);
+  // The word "role" inside a text VALUE is not a second key.
+  const inText = extractFacts(Buffer.from(JSON.stringify({
+    type: "message",
+    message: { role: "user", content: [{ type: "text", text: 'the "role": "user" field, I prefer tabs.' }] },
+  })), { path: SESSION });
+  assert.equal(inText.length, 1, 'a "role" word inside user text was miscounted');
+});
+
+test("parsePlain suppression is actually observable", () => {
+  // The previous version of this assertion was VACUOUS: its input produced
+  // the same count whether or not suppression ran, because the JSON artifact
+  // fragment matched no pattern and was secret-screened. This input is chosen
+  // because it discriminates: two blocks give 2 facts with suppression on and
+  // 1 with it off.
+  const got = bodies(jsonl([{
+    type: "message",
+    message: { role: "user", content: [
+      { type: "text", text: "I prefer tabs over spaces." },
+      { type: "text", text: "I always run npm test before commit." },
+    ] },
+  }]));
+  assert.equal(got.length, 2, "expected 2 facts, got " + JSON.stringify(got));
+});
+
+test("resolveLimit refuses a non-integer instead of inverting the cap", () => {
+  // The pre-change Math.trunc/Math.min chain turned 0, NaN, Infinity and
+  // null into 200 and threw a raw TypeError on a BigInt -- so the "hard cap"
+  // lived only in the CLI, and asking for 0 sessions returned 200.
+  for (const bad of [0, NaN, Infinity, null, -5, 2.7, 100000n, undefined, {}]) {
+    assert.equal(resolveLimit(bad), 200,
+      "limit " + String(bad) + " did not fall back to the default");
+  }
+  assert.equal(resolveLimit(5), 5, "a valid limit was not honoured");
+  assert.equal(resolveLimit(100000), MAX_BACKFILL, "the cap was not applied");
+});
+
+test("the backfill reports only the sessions it is allowed to touch", () => {
+  // The pre-change loop drained to exhaustion, and drain() takes the WHOLE
+  // shared queue: proven 400 unrelated paths processed under --limit 1.
+  // This pins the bound where it is observable.
+  const dir = mkdtempSync(join(tmpdir(), "heimdall-drain-"));
+  try {
+    const r = measureBackfill({ limit: 2, root: seedTree(dir, 5) });
+    assert.equal(r.files, 2, "the limit was not applied");
+    assert.equal(r.perFile.length, 2, "more sessions were reported than the limit");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

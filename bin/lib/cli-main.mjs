@@ -503,7 +503,7 @@ export async function main(argv) {
           import("./lock.mjs"), import("./reconcile.mjs"), import("./depth.mjs"),
         ]);
       const os = await import("node:os");
-      return Lock.withLock(lockPath(), async () => {
+      const code = await Lock.withLock(lockPath(), async () => {
         const { Journal } = await import("./journal.mjs");
         const { drain } = await import("./reconcile.mjs");
         const { GraftSink } = await import("./sink.mjs");
@@ -515,13 +515,29 @@ export async function main(argv) {
           queued++;
         }
         const ctx = { journal, config: loadConfig(), cap: capability(), sink: new GraftSink() };
-        for (;;) {
-          const { processed } = drain(ctx);
+        // BOUNDED, not drain-to-exhaustion. drain(ctx) takes the WHOLE shared
+        // queue, not just what this command enqueued, so looping it drained
+        // whatever the daemon had pending: proven 400 unrelated paths
+        // processed under `--limit 1`. A backfill whose entire purpose is a
+        // hard bound must not be able to do unbounded work.
+        let done = 0;
+        while (done < queued) {
+          const { processed } = drain(ctx, { limit: queued - done });
           if (!processed) break;
+          done += processed;
         }
-        console.log(`queued ${queued} session log(s) and reconciled`);
+        console.log(`queued ${queued} session log(s); reconciled ${done}`);
         return 0;
       });
+      // A lost lock is a FAILED backfill, never a silent no-op that still
+      // prints a success summary. runReconcile already treats a null return
+      // as a failure; this path did not, so a cron wrapper read "backfill
+      // ran" from a run that wrote nothing at all.
+      if (code === null) {
+        console.error("another writer holds the reconciler lock (is the daemon running?)");
+        return 1;
+      }
+      return code;
     }
     case "insert": return await runInsert(rest);
     case "ingest-email": return await runIngestEmail(rest);
