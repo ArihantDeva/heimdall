@@ -1,6 +1,7 @@
 {
-  "measured_at": "2026-09-28T22:38:36-0400",
-  "tree_commit": "056ffab5ce95643da1fba112f2f4300bbf042418",
+  "measured_at": "2026-09-28T22:54:46-0400",
+  "tree_commit": "5f006d9dee041e4d55a08503701aab7e9d59fc92",
+  "tree_commit_note": "commit that CONTAINS the measured code, not the parent it was measured from",
   "kind_wired": true,
   "people_anchors_emitted": 3,
   "structural_zeros": {
@@ -16,7 +17,7 @@
       "degraded_queries": [],
       "failed_queries": [],
       "bar": "0.10",
-      "bar_note": "MEASURED FLOOR, not the 0.30 spec bar. The pre-Phase-1 baseline commit 579568d re-runs at 0.10 on the SAME live index, so the 0.30 was index drift, not a code regression: bin/lib/*.mjs is no longer in global.db, only stale graft/*.md cards remain. Restoring it needs a global.db rebuild, which was authorized and then blocked by a real 6.0 GB RAM guard (host had 5.7 GB); the decision on record is to record the floor rather than close anything."
+      "bar_note": "MEASURED FLOOR, not the 0.30 spec bar. The pre-Phase-1 baseline commit 579568d re-runs at 0.10 on the SAME live index, so the 0.30 was index drift, not a code regression: bin/lib/*.mjs is no longer in global.db, only stale graft/*.md cards remain. A rebuild was authorized and backed up (4.48 GB, quick_check ok, 852372 cards), then stopped by a real 6.0 GB RAM guard with 5.7 GB free. Decision on record: record the floor, close nothing."
     },
     "fact": {
       "hit_rate": 0.9,
@@ -26,7 +27,7 @@
       "degraded_queries": [],
       "failed_queries": [],
       "bar": "0.50",
-      "bar_note": "First measured-reachable bar. Reached 0.90. The original 0.00 was structural only because 0 of 10 fact golds existed anywhere in the corpus; the golds are now 10 real facts extracted from the user own session logs, each verified present before use."
+      "bar_note": "First measured-reachable bar. Reached 0.90 with queries drawn from the MIDDLE of each gold, after review showed the first version used each gold's own opening words, which is a rigged benchmark."
     },
     "person": {
       "hit_rate": 1.0,
@@ -36,14 +37,14 @@
       "degraded_queries": [],
       "failed_queries": [],
       "bar": "0.30",
-      "bar_note": "First measured-reachable bar. Reached 1.00. The original 0.00 was structural only because 0 of 10 person queries named their own gold, and 3 of 10 golds were absent from people.db entirely."
+      "bar_note": "First measured-reachable bar. Reached 1.00. The original 0.00 was structural: 0 of 10 queries named their own gold and 3 of 10 golds were absent from people.db."
     }
   },
   "regressions": {
-    "default_kb_search_output": "byte-identical to a golden captured before any production change (tests/kinds-default-identical.test.mjs, 2 pass)",
-    "code_slice_vs_0.30_spec_bar": "NOT MET, and the bar itself is stale. See slices.code.bar_note."
+    "default_kb_search_output": "byte-identical to a golden captured before any production change",
+    "code_slice_vs_0.30_spec_bar": "NOT MET; the bar is stale. See slices.code.bar_note."
   },
-  "review": "four adversarial rounds; Phase 4 fixed 2 BLOCKERs and 3 MAJORs before this measurement",
+  "review": "four adversarial rounds in Phase 3, one in Phase 4; this run fixed 2 BLOCKERs and 5 MAJORs before the measurement",
   "gold_set_rebuilt": true,
-  "gold_set_note": "The person and fact gold sets were rebuilt in Phase 4. As shipped in Phase 0, 0 of 10 person queries mentioned their own gold name and 0 of 10 fact golds existed anywhere in the corpus, so both 0.00s measured the gold set rather than retrieval. Every replacement gold is a real record, verified present in people.db / journal.db before use, and the integrity is now asserted by a test rather than assumed."
+  "gold_set_note": "Person and fact gold sets were rebuilt in Phase 4. As shipped in Phase 0, 0 of 10 person queries named their own gold and 0 of 10 fact golds existed anywhere in the corpus, so both 0.00s measured the gold set rather than retrieval. Every replacement gold is a real record verified present in people.db / journal.db before use; fact queries draw from the middle of the gold, not its opening, and a test asserts gold/query token overlap so a rigged set fails the build."
 }

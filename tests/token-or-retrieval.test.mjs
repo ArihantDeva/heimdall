@@ -132,3 +132,64 @@ test("the person leg never falls through to code hits", () => {
   assert.doesNotMatch(r.stdout, /retrieve \(per-repo graft/,
     "the code leg ran for a person query");
 });
+
+// ── Phase 4 review round: stopword leak, column weighting, rigged golds ──
+
+test("a stopword-only query returns NOTHING, not the whole store", () => {
+  // tokens_of() used to fall back to the raw string, re-injecting the
+  // stopword as a LIKE pattern. "the" matched 1061 of 1696 people, "is"
+  // matched 1462, and "%" matched ALL 1696 -- every row printed as
+  // [STRONG] cov100%. It also made "who" return rows while "who is"
+  // returned none, from identical semantics.
+  for (const q of ["the", "is", "_", "%", "who", "who is", "a", "and"]) {
+    const r = search(q, "person", 50);
+    assert.doesNotMatch(r.stdout, /people\.db:/,
+      `stopword-only query ${JSON.stringify(q)} returned rows`);
+  }
+});
+
+test("a wildcard character cannot reach the LIKE pattern", () => {
+  // [a-z0-9]+ can never yield % or _, so the old raw-string fallback was the
+  // ONLY route by which a wildcard could reach LIKE. With the fallback gone,
+  // "_" and "%" are ordinary stopword-free tokens that match nothing.
+  for (const q of ["%", "_", "%_%", "%%"]) {
+    assert.doesNotMatch(search(q, "person", 20).stdout, /people\.db:/,
+      `wildcard query ${JSON.stringify(q)} returned rows`);
+  }
+});
+
+test("a name mentioned in NOTES does not outrank the person actually named", () => {
+  // The flat token count treated a notes mention like a name. Real rows:
+  // "Dinesh Manocha" returned Stephen Cheng first, because his notes say
+  // "co-advised by ... Prof. Dinesh Manocha", while Dinesh Sayana matches
+  // the surname in a real NAME field.
+  const r = search("Dinesh Manocha", "person", 3);
+  const names = r.stdout.split("\n").filter((l) => l.includes("·"));
+  assert.ok(names.length, "no results at all");
+  assert.match(names[0], /Dinesh Sayana/,
+    `a notes mention outranked the name match: ${JSON.stringify(names[0])}`);
+});
+
+test("fact queries are not prefixes of their own golds", () => {
+  // As first written, all 10 fact queries were the gold's own first five
+  // words. A query that is a prefix of its answer is a rigged benchmark: it
+  // proves nothing about retrieval. Each query must draw from the middle.
+  const rows = readFileSync(QUERIES, "utf8").trim().split("\n").map(JSON.parse);
+  const facts = rows.filter((r) => r.slice === "fact");
+  assert.equal(facts.length, 10);
+  for (const r of facts) {
+    const g = String(r.golds[0]).toLowerCase().replace(/[^a-z0-9 ]/g, "");
+    const q = String(r.query).toLowerCase().replace(/[^a-z0-9 ]/g, "");
+    assert.ok(!g.startsWith(q) && !q.startsWith(g),
+      `${r.qid}: query ${JSON.stringify(r.query)} is a prefix of its gold`);
+  }
+});
+
+test("--kind decision keeps the user's standing rules (negations)", () => {
+  // The filter was assertion+declaration only, dropping all 481 negation
+  // rows from a 945-row corpus. A negation IS a decision: "Never VACUUM",
+  // "Do not accept proxy signals". Excluding them hid the standing rules.
+  const r = search("Never VACUUM", "decision", 5);
+  assert.match(r.stdout, /VACUUM/i,
+    "--kind decision dropped a negation rule that --kind fact returns");
+});

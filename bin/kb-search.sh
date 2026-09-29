@@ -235,9 +235,20 @@ STOP = {"who", "is", "are", "was", "what", "when", "where", "which",
 
 
 def tokens_of(q):
-    """Significant lowercase tokens, or the whole string when it has none."""
-    t = [x for x in re.findall(r"[a-z0-9]+", q.lower()) if x not in STOP]
-    return t or [q.strip().lower()]
+    """Significant lowercase tokens.
+
+    An EMPTY list is the answer for a stopword-only query -- it is NOT
+    replaced with the raw string. The old fallback `t or [q.strip().lower()]`
+    re-injected the stopword as a LIKE pattern, so "the" matched 1061 of
+    1696 people, "is" matched 1462, and "%" matched ALL 1696 (re.findall's
+    [a-z0-9]+ can never yield a wildcard, so the fallback was the only route
+    one) -- every one printed as [STRONG] cov100%. It also made "who" return
+    rows while "who is" returned none, from identical semantics.
+
+    No significant tokens means no match. Callers return no rows, which is
+    the honest answer to "the".
+    """
+    return [x for x in re.findall(r"[a-z0-9]+", q.lower()) if x not in STOP]
 
 
 q, n, kind, long_out = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4] == "1"
@@ -265,6 +276,8 @@ if kind == "person":
     # Stopwords are dropped so they cannot carry a row on their own, which is
     # what makes an OR-of-tokens safe here.
     toks = tokens_of(q)
+    if not toks:
+        sys.exit(0)
     where = " OR ".join(
         "(name LIKE ? OR aliases LIKE ? OR org LIKE ? OR role LIKE ? OR notes LIKE ?)"
         for _ in toks)
@@ -282,13 +295,21 @@ if kind == "person":
     # so the tiebreak decided the winner and it decided wrong. Token count
     # puts the row matching BOTH tokens first, which is the person asked
     # about.
+    # Rank by COLUMN-WEIGHTED token hits, not by a flat token count. The flat
+    # version treated a token found in free-text `notes` exactly like one found
+    # in `name`, so "Dinesh Manocha" returned Stephen Cheng first -- his notes
+    # mention "co-advised by ... Prof. Dinesh Manocha" -- while the row that
+    # matched NEITHER token in any name field beat Dinesh Sayana, who matches
+    # on the surname. Name and alias are the identity; org and role are
+    # context; notes is a mention. They are not interchangeable.
     def score(h):
         r = h["row"]
-        hay = " ".join(str(r.get(c) or "") for c in
-                       ("name", "aliases", "org", "role", "notes")).lower()
-        matched = sum(1 for t in toks if t in hay)
+        def hits(cols):
+            hay = " ".join(str(r.get(c) or "") for c in cols).lower()
+            return sum(1 for t in toks if t in hay)
         exact = 1 if q.strip().lower() in (r["name"] or "").lower() else 0
-        return (-exact, -matched, (r["name"] or "").lower())
+        return (-exact, -hits(("name", "aliases")), -hits(("org", "role")),
+                -hits(("notes",)), (r["name"] or "").lower())
     out.sort(key=score)
     if out:
         print("== retrieve (people):")
@@ -340,19 +361,33 @@ try:
         # fact_kind is journal schema v4. A journal that predates the
         # migration has no such column, and the migration only runs on the
         # next reconcile. Probing for it means a pre-v4 journal answers
-        # `--kind fact` normally and `--kind decision` as an empty result,
-        # instead of failing both with 'no such column' -- which is what
-        # turned the whole fact leg into a silent zero.
+        # `--kind fact` normally, instead of failing both with 'no such
+        # column' -- which is what turned the whole fact leg into a silent
+        # zero. A pre-v4 journal cannot narrow, so it returns every fact and
+        # says so on stderr rather than pretending to have filtered.
         has_kind = any(r["name"] == "fact_kind"
                        for r in rows_from(tmp, "PRAGMA table_info(owned_nodes)", ()))
         if has_kind:
             sql = ("SELECT node_id, path, fact_title, fact_body, fact_kind "
                    "FROM owned_nodes WHERE kind = 'fact'")
-            sql += " AND fact_kind IN ('assertion','declaration')"
+            # assertion OR declaration OR negation. The original filter was
+            # assertion+declaration only, which dropped all 481 negation rows
+            # from a 945-row corpus -- and a negation is exactly a decision:
+            # "Never VACUUM", "Do not accept proxy signals", "Do not invent
+            # new work". Excluding them meant `--kind decision` hid the
+            # user's standing rules, which is the opposite of the intent.
+            # Left out: `preference` (a preference is not a decision) and
+            # NULL (pre-v4 rows whose classification is genuinely unknown).
+            sql += " AND fact_kind IN ('assertion','declaration','negation')"
+        else:
+            print("WARN: journal predates schema v4; --kind decision cannot "
+                  "classify and returns every fact", file=sys.stderr)
     # Token-OR, matching the person leg for the same reason: a whole-string
     # LIKE means "Never VACUUM never write" -- a multi-word query with the
     # comma dropped -- matches nothing, even though the fact exists verbatim.
     ftoks = tokens_of(q)
+    if not ftoks:
+        sys.exit(0)
     sql += " AND (" + " OR ".join("(fact_title LIKE ? OR fact_body LIKE ?)"
                                    for _ in ftoks) + ")"
     rows = rows_from(tmp, sql, tuple(f"%{t}%" for t in ftoks for _ in range(2)))
