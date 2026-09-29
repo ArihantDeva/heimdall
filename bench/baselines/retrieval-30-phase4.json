@@ -1,7 +1,7 @@
 {
-  "measured_at": "2026-09-28T22:54:46-0400",
-  "tree_commit": "5f006d9dee041e4d55a08503701aab7e9d59fc92",
-  "tree_commit_note": "commit that CONTAINS the measured code, not the parent it was measured from",
+  "measured_at": "2026-09-28T23:04:14-0400",
+  "tree_commit": "0fbacd13003645c981cfe3fb1bd652755f4bd6e8",
+  "tree_commit_note": "the commit that CONTAINS the measured code, golds and ranking. An earlier revision of this file recorded the PARENT commit, which had the stopword leak, the flat ranking and the rigged prefix queries, so reproducing from it gave different numbers.",
   "kind_wired": true,
   "people_anchors_emitted": 3,
   "structural_zeros": {
@@ -46,5 +46,6 @@
   },
   "review": "four adversarial rounds in Phase 3, one in Phase 4; this run fixed 2 BLOCKERs and 5 MAJORs before the measurement",
   "gold_set_rebuilt": true,
-  "gold_set_note": "Person and fact gold sets were rebuilt in Phase 4. As shipped in Phase 0, 0 of 10 person queries named their own gold and 0 of 10 fact golds existed anywhere in the corpus, so both 0.00s measured the gold set rather than retrieval. Every replacement gold is a real record verified present in people.db / journal.db before use; fact queries draw from the middle of the gold, not its opening, and a test asserts gold/query token overlap so a rigged set fails the build."
+  "gold_set_note": "Person and fact gold sets were rebuilt in Phase 4. As shipped in Phase 0, 0 of 10 person queries named their own gold and 0 of 10 fact golds existed anywhere in the corpus, so both 0.00s measured the gold set rather than retrieval. Every replacement gold is a real record verified present in people.db / journal.db before use; fact queries draw from the middle of the gold, not its opening, and a test asserts gold/query token overlap so a rigged set fails the build.",
+  "measured_numbers_produced_by": "commit 0fbacd13003645c981cfe3fb1bd652755f4bd6e8"
 }

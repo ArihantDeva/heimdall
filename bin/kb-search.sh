@@ -379,6 +379,15 @@ try:
             # Left out: `preference` (a preference is not a decision) and
             # NULL (pre-v4 rows whose classification is genuinely unknown).
             sql += " AND fact_kind IN ('assertion','declaration','negation')"
+            # Pre-v4 rows carry no classification and are unreachable by any
+            # --kind decision query. Silently dropping them makes "no such
+            # decisions" indistinguishable from "N decisions were never
+            # classifiable", so the count goes to stderr.
+            n_null = rows_from(tmp, "SELECT count(*) n FROM owned_nodes "
+                                     "WHERE kind = 'fact' AND fact_kind IS NULL", ())
+            if n_null and n_null[0]["n"]:
+                print(f"WARN: {n_null[0]['n']} fact row(s) have NULL fact_kind and "
+                      "are not classifiable; run a reconcile to backfill", file=sys.stderr)
         else:
             print("WARN: journal predates schema v4; --kind decision cannot "
                   "classify and returns every fact", file=sys.stderr)

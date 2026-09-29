@@ -8,7 +8,7 @@
 // ranked "Aadi Bhandari" and "Aanya Bhandari" above Anand.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -192,4 +192,33 @@ test("--kind decision keeps the user's standing rules (negations)", () => {
   const r = search("Never VACUUM", "decision", 5);
   assert.match(r.stdout, /VACUUM/i,
     "--kind decision dropped a negation rule that --kind fact returns");
+});
+
+test("the recorded baseline points at a commit that contains the measured code", () => {
+  // Round-1 finding, still live after one 'fix': the file recorded the PARENT
+  // commit, which had the stopword leak, the flat ranking and the rigged
+  // prefix queries, so reproducing from it gave different numbers. Moving the
+  // recorded sha forward one commit is not a fix; pinning it to what actually
+  // produced the numbers is.
+  const base = JSON.parse(readFileSync(join(repoRoot, "bench", "baselines",
+    "retrieval-30-phase4.json"), "utf8"));
+  const head = execFileSync("git", ["rev-parse", "HEAD"],
+    { encoding: "utf8", cwd: repoRoot }).trim();
+  assert.equal(base.tree_commit, head,
+    `baseline records ${base.tree_commit.slice(0, 12)} but HEAD is ${head.slice(0, 12)}`);
+  for (const [s, v] of Object.entries(base.slices)) {
+    assert.ok(v.bar && v.bar_note, `${s} has no stated bar`);
+    assert.equal(v.run_valid, true, `${s} was not a valid run`);
+  }
+});
+
+test("no gold-set sidecar is left behind holding stale queries", () => {
+  // bench/queries/fact-10.jsonl and person-10.jsonl were added in the first
+  // Phase 4 commit and never updated, so they still carried the pre-fix
+  // rigged prefix queries. Nothing read them, which is exactly why they went
+  // unnoticed: a file that is dead is not checked by anything.
+  for (const f of ["fact-10.jsonl", "person-10.jsonl"]) {
+    assert.equal(existsSync(join(repoRoot, "bench", "queries", f)), false,
+      `${f} is a dead sidecar that can drift out of sync with the real set`);
+  }
 });
