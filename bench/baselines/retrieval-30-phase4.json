@@ -1,6 +1,6 @@
 {
   "measured_at": "2026-09-28T23:04:14-0400",
-  "tree_commit": "0fbacd13003645c981cfe3fb1bd652755f4bd6e8",
+  "tree_commit": "93c63d8d159b03c8c07df7c16cc6fd8c223f8064",
   "tree_commit_note": "the commit that CONTAINS the measured code, golds and ranking. An earlier revision of this file recorded the PARENT commit, which had the stopword leak, the flat ranking and the rigged prefix queries, so reproducing from it gave different numbers.",
   "kind_wired": true,
   "people_anchors_emitted": 3,

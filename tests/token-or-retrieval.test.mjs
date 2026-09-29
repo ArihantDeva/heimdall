@@ -194,18 +194,48 @@ test("--kind decision keeps the user's standing rules (negations)", () => {
     "--kind decision dropped a negation rule that --kind fact returns");
 });
 
-test("the recorded baseline points at a commit that contains the measured code", () => {
+test("the recorded baseline points at a commit that CONTAINS the measured code", () => {
   // Round-1 finding, still live after one 'fix': the file recorded the PARENT
   // commit, which had the stopword leak, the flat ranking and the rigged
   // prefix queries, so reproducing from it gave different numbers. Moving the
-  // recorded sha forward one commit is not a fix; pinning it to what actually
-  // produced the numbers is.
+  // recorded sha forward one commit is not a fix either.
   const base = JSON.parse(readFileSync(join(repoRoot, "bench", "baselines",
     "retrieval-30-phase4.json"), "utf8"));
-  const head = execFileSync("git", ["rev-parse", "HEAD"],
-    { encoding: "utf8", cwd: repoRoot }).trim();
-  assert.equal(base.tree_commit, head,
-    `baseline records ${base.tree_commit.slice(0, 12)} but HEAD is ${head.slice(0, 12)}`);
+  const rec = base.tree_commit;
+  assert.match(rec, /^[0-9a-f]{40}$/, "tree_commit is not a full sha");
+  // Ancestry is NOT enough and sha-equality is worse. A pre-fix commit IS an
+  // ancestor, so `merge-base --is-ancestor` passes on the very defect this
+  // test exists for; exact-sha pinning instead fails on every later commit,
+  // which invites the mechanical bump that reintroduced the bug. So assert
+  // the recorded commit's CODE is the fixed code, by fingerprint.
+  const at = (path) => {
+    const r = spawnSync("git", ["show", `${rec}:${path}`], { cwd: repoRoot, encoding: "utf8" });
+    return r.status === 0 ? r.stdout : "";
+  };
+  const search = at("bin/kb-search.sh");
+  assert.ok(search, `${rec.slice(0, 12)} has no bin/kb-search.sh`);
+  // Match the CODE line, not the prose. The fixed file documents the old
+  // fallback in a comment, so a bare substring match reports the leak on
+  // the very commit that removed it.
+  assert.doesNotMatch(search, /return t or \[q\.strip\(\)\.lower\(\)\]/,
+    "the recorded commit still contains the stopword-fallback leak");
+  assert.ok(search.includes('-hits(("name", "aliases"))'),
+    "the recorded commit lacks the column-weighted ranking");
+  // Whitespace-insensitive, because a fingerprint that breaks when someone
+  // reformats a line trains people to ignore it. Checking each kind
+  // separately is the real assertion: --kind decision must include negation,
+  // and the other two must be present too.
+  const kinds = ["assertion", "declaration", "negation"];
+  const decisionLine = (search.match(/fact_kind IN \([^)]*\)/) || [""])[0];
+  for (const k of kinds) {
+    assert.ok(decisionLine.includes(k),
+      `--kind decision is missing "${k}" in: ${decisionLine}`);
+  }
+  // And the gold set it measures must be the de-rigged one.
+  const golds = at("bench/queries/retrieval-30.jsonl");
+  assert.ok(golds, `${rec.slice(0, 12)} has no gold set`);
+  assert.doesNotMatch(golds, /"query": "Never VACUUM, never write, never"/,
+    "the recorded commit still holds the rigged prefix query");
   for (const [s, v] of Object.entries(base.slices)) {
     assert.ok(v.bar && v.bar_note, `${s} has no stated bar`);
     assert.equal(v.run_valid, true, `${s} was not a valid run`);
