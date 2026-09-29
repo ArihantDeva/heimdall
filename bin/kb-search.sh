@@ -218,7 +218,27 @@ fi
 # under a "retrieve (people)" question (finding 1).
 if [ "$KIND" = "person" ] || [ "$KIND" = "fact" ] || [ "$KIND" = "decision" ]; then
 	python3 - "$Q" "$N" "$KIND" "$LONG" <<'PYEOF'
-import os, sqlite3, sys, shutil, tempfile
+import os, re, sqlite3, sys, shutil, tempfile
+
+# One shared stopword set for BOTH the person and fact legs, hoisted to module
+# scope: a person is asked about in a sentence and a fact is quoted in one, so
+# neither leg can do a whole-string LIKE. Duplicating this list per leg is how
+# the two legs drifted apart in the first place.
+STOP = {"who", "is", "are", "was", "what", "when", "where", "which",
+        "the", "a", "an", "of", "at", "in", "to", "and", "or", "do",
+        "did", "does", "for", "on", "with", "that", "this", "it", "i",
+        "you", "me", "my", "your", "tell", "about", "know", "can",
+        "who's", "whats", "wrote", "maintain", "runs", "run", "owns",
+        "own", "reviewed", "decided", "keeps", "keep", "said", "say",
+        "not", "prefer", "preference", "assertion", "declaration",
+        "asserted", "declared", "use", "used", "using"}
+
+
+def tokens_of(q):
+    """Significant lowercase tokens, or the whole string when it has none."""
+    t = [x for x in re.findall(r"[a-z0-9]+", q.lower()) if x not in STOP]
+    return t or [q.strip().lower()]
+
 
 q, n, kind, long_out = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4] == "1"
 home = os.path.expanduser("~")
@@ -238,18 +258,38 @@ if kind == "person":
         print('No ~/.heimdall/people.db yet. Create one with: '
               'heimdall person add --name "Full Name"')
         sys.exit(0)
-    like = "%" + q + "%"
-    rows = rows_from(db,
-        "SELECT * FROM people WHERE name LIKE ?1 OR aliases LIKE ?1 OR org LIKE ?1 "
-        "OR role LIKE ?1 OR notes LIKE ?1", (like,))
+    # Token-OR matching, not one whole-string LIKE. A person is asked about
+    # in a sentence -- "who is Dinesh Sayana", "who maintains heimdall" --
+    # and `LIKE '%who is Dinesh Sayana%'` matches no row at all, so the
+    # natural question silently returned nothing while the bare name worked.
+    # Stopwords are dropped so they cannot carry a row on their own, which is
+    # what makes an OR-of-tokens safe here.
+    toks = tokens_of(q)
+    where = " OR ".join(
+        "(name LIKE ? OR aliases LIKE ? OR org LIKE ? OR role LIKE ? OR notes LIKE ?)"
+        for _ in toks)
+    args = tuple(f"%{t}%" for t in toks for _ in range(5))
+    rows = rows_from(db, f"SELECT * FROM people WHERE {where}", args)
     out = [{"id": r["id"], "row": dict(r)} for r in rows]
     # Alias-exact first, in JS: a SQL compare against the comma-joined alias
     # string is wrong (it only fires when aliases is empty), and LIKE alone
     # ranks a partial name match above an exact alias hit.
-    needle = q.strip().lower()
-    out.sort(key=lambda h: (needle not in (h["row"]["name"] or "").lower()
-                            and needle not in (h["row"]["aliases"] or "").lower(),
-                            (h["row"]["name"] or "").lower()))
+    #
+    # Rank by how many query tokens the row actually carries, not by name.
+    # The previous key was exact-name-then-alphabetical, so a token-OR query
+    # put "Aadi Bhandari" and "Aanya Bhandari" above "Anand Bhandari" for
+    # the query "who is Anand Bhandari" -- every row matched "bhandari",
+    # so the tiebreak decided the winner and it decided wrong. Token count
+    # puts the row matching BOTH tokens first, which is the person asked
+    # about.
+    def score(h):
+        r = h["row"]
+        hay = " ".join(str(r.get(c) or "") for c in
+                       ("name", "aliases", "org", "role", "notes")).lower()
+        matched = sum(1 for t in toks if t in hay)
+        exact = 1 if q.strip().lower() in (r["name"] or "").lower() else 0
+        return (-exact, -matched, (r["name"] or "").lower())
+    out.sort(key=score)
     if out:
         print("== retrieve (people):")
     for i, h in enumerate(out[:n], 1):
@@ -272,15 +312,63 @@ if not os.path.exists(src):
     sys.exit(0)
 tmp = tempfile.mktemp(suffix=".db")
 try:
-    shutil.copyfile(src, tmp)
-    sql = ("SELECT node_id, path, fact_title, fact_body, fact_kind FROM owned_nodes "
-           "WHERE kind = 'fact'")
+    # The sqlite BACKUP API, not copyfile. journal.db is WAL, so a plain
+    # copy of the main file can omit committed frames that live in the -wal
+    # sidecar and open as a truncated/empty database -- which is exactly the
+    # "unable to open database file" this path reported, turning the whole
+    # fact leg into a silent zero while the run still counted as valid.
+    # Same pattern, same reason, as bin/kb-rebuild.sh and the people backup.
+    con = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
+    try:
+        out = sqlite3.connect(tmp)
+        try:
+            con.backup(out)
+            # The backup keeps the source's WAL journal_mode, and a WAL
+            # database cannot be opened mode=ro without its -shm sidecar --
+            # which a temp copy does not have. That is the actual cause of
+            # the long-standing "unable to open database file", not the copy
+            # itself. journal_mode=DELETE makes the snapshot a single
+            # self-contained file that any reader can open.
+            out.execute("PRAGMA journal_mode=DELETE")
+            out.commit()
+        finally:
+            out.close()
+    finally:
+        con.close()
+    sql = "SELECT node_id, path, fact_title, fact_body FROM owned_nodes WHERE kind = 'fact'"
     if kind == "decision":
-        sql += " AND fact_kind IN ('assertion','declaration')"
-    like = "%" + q + "%"
-    sql += " AND (fact_title LIKE ? OR fact_body LIKE ?)"
-    rows = rows_from(tmp, sql, (like, like))
+        # fact_kind is journal schema v4. A journal that predates the
+        # migration has no such column, and the migration only runs on the
+        # next reconcile. Probing for it means a pre-v4 journal answers
+        # `--kind fact` normally and `--kind decision` as an empty result,
+        # instead of failing both with 'no such column' -- which is what
+        # turned the whole fact leg into a silent zero.
+        has_kind = any(r["name"] == "fact_kind"
+                       for r in rows_from(tmp, "PRAGMA table_info(owned_nodes)", ()))
+        if has_kind:
+            sql = ("SELECT node_id, path, fact_title, fact_body, fact_kind "
+                   "FROM owned_nodes WHERE kind = 'fact'")
+            sql += " AND fact_kind IN ('assertion','declaration')"
+    # Token-OR, matching the person leg for the same reason: a whole-string
+    # LIKE means "Never VACUUM never write" -- a multi-word query with the
+    # comma dropped -- matches nothing, even though the fact exists verbatim.
+    ftoks = tokens_of(q)
+    sql += " AND (" + " OR ".join("(fact_title LIKE ? OR fact_body LIKE ?)"
+                                   for _ in ftoks) + ")"
+    rows = rows_from(tmp, sql, tuple(f"%{t}%" for t in ftoks for _ in range(2)))
+    # Rank by how many query tokens each fact actually carries. Without this
+    # the leg returned rows in whatever order sqlite produced, so a fact
+    # matching every token lost to one matching only the commonest word:
+    # "Never VACUUM, never write, never" put "never entering the verdict
+    # pass" above the VACUUM rule. Same fix as the person leg, same reason.
+    def fscore(r):
+        hay = ((r["fact_title"] or "") + " " + (r["fact_body"] or "")).lower()
+        return (-sum(1 for t in ftoks if t in hay),
+                (r["fact_title"] or "").lower())
+    rows = sorted(rows, key=fscore)
 except Exception as e:
+    # LOUD on stderr, and the slice is then invalid rather than a silent
+    # zero: a fact leg that could not read the store is not a measured miss.
     print(f"WARN: fact leg failed: {e}", file=sys.stderr)
     rows = []
 finally:
