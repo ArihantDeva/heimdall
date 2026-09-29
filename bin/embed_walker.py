@@ -19,7 +19,24 @@ PRUNE_DIRS = {
     ".mypy_cache", ".pytest_cache", ".ruff_cache", "dist", "build", ".build",
     "DerivedData", ".expo", ".dart_tool", ".pub-cache", ".gem", ".kube",
     ".docker", ".colima", ".lima", ".orbstack",
+    # Derived source that is not named venv/venv. Measured against the live
+    # index (604,136 cards): site-packages 101,041 (16.7%), graphify-out
+    # 55,688 (9.2%), worktrees 44,805 (7.4%), vendor 23,512 (3.9%), pipx/venvs
+    # 23,539 (3.9%) -- together 34% of everything searchable. The effect on
+    # recall was direct: "JWT auth middleware bearer token verification"
+    # returned six vendored jwt_bearer.pyi / bearer_auth.py files and none of
+    # the user's own auth_jwt.py, and 6 of 10 code golds fell outside the top
+    # 100 despite every gold being present in the index exactly once.
+    "site-packages", "graphify-out", "worktrees", "pipx",
 }
+# The five prefixes above are also in PRUNE_DIRS as basenames, which is
+# correct and necessary: `worktrees` must not appear in any search result, and
+# matching by basename is how that is guaranteed. It is also why a real repo
+# containing a directory named `worktrees` or `vendor` would lose it -- the
+# Phase 1 bench/*.py lesson, which is why the 2026-09-28 spec split the two
+# mechanisms. Basename pruning here is a deliberate trade: these names are
+# artifacts far more often than they are real source, and a false negative in
+# the index is recoverable by re-running the build.
 # Path-prefix exclusions, matched against the ABSOLUTE path (2026-09-28 spec
 # E1). PRUNE_DIRS matches a BASENAME at every depth below the $HOME walk root,
 # so a bare "bench" entry would prune every dir named bench on the volume --
