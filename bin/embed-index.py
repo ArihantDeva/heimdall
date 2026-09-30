@@ -37,8 +37,22 @@ discover_files = embed_walker.discover_files  # re-exported for callers/tests
 DB = pathlib.Path(os.environ.get("HEIMDALL_DB", str(pathlib.Path.home() / ".heimdall" / "global.db")))
 HOME_ROOT = pathlib.Path(os.environ.get("HEIMDALL_HOME", str(pathlib.Path.home())))
 REPOS = HOME_ROOT / "Repos"  # attribution only; discovery covers all of HOME_ROOT
-MODEL = os.environ.get("HEIMDALL_EMBED_MODEL", "BAAI/bge-small-en-v1.5")
-DIM = 384 if "bge-small" in MODEL else 1024
+# Selected by hill-climb against LongMemEval-S (bench/longmemeval_s), a
+# file-disjoint dev/test eval of natural-language code questions. bge-base beat
+# bge-small on BOTH splits -- dev MRR 0.615 -> 0.682, held-out 0.455 -> 0.498,
+# recall@5 0.636 -> 0.727 -- and gte-base was worse (dev 0.526). This is the only
+# change in this effort that improved held-out recall; five earlier attempts
+# raised a benchmark number while LOWERING held-out recall and were reverted.
+# Full ledger: bench/longmemeval_s/ledger.jsonl.
+#
+# Cost: 768d instead of 384d, so the vec table is 2x the size and encode is
+# ~3x slower (bge-base measured 30s vs 12s for the 9-file eval corpus). For a
+# 400k-card rebuild that is the difference between hours and a day, so the
+# trade is deliberate and re-measurable rather than assumed.
+MODEL = os.environ.get("HEIMDALL_EMBED_MODEL", "BAAI/bge-base-en-v1.5")
+# Derived, not guessed: bge-small 384, bge-base 768, bge-m3 1024. A wrong DIM
+# is a runtime dimension error at query time, long after a multi-hour rebuild.
+DIM = 768 if "bge-base" in MODEL else 384 if "bge-small" in MODEL else 1024
 # MPS measured 3.4x CPU under load (32.7 vs 9.7 f/s) and doesn't contend for
 # CPU cores with other agent sessions. HEIMDALL_DEVICE=cpu to opt out.
 DEVICE = os.environ.get("HEIMDALL_DEVICE", "mps")
