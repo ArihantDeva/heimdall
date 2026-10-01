@@ -32,7 +32,8 @@ export default function kbToolsExtension(pi: ExtensionAPI): void {
 		label: "Knowledge Search",
 		description:
 			"Heimdall memory search: ranked, verified hits across ALL repos on this machine (lexical code graph + semantic embeddings). " +
-			"Use BEFORE any implementation/fix/research and INSTEAD of ls/grep/find chains for locating prior work. " +
+			"Use BEFORE any implementation/fix/research and INSTEAD of ls/eza/grep/rg/find/fd chains (eza/fd/rg) for locating prior work. " +
+			"Content search = rg --no-ignore, fd, eza — never bare grep/find. " +
 			"Every hit carries a trust verdict (STRONG/WEAK) verified against the live filesystem. " +
 			"Pass kind to narrow: 'person' for who someone is and what they do, 'decision'/'fact' for what the user has said, " +
 			"'code' for the default repo search.",
