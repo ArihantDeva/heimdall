@@ -86,12 +86,63 @@ const HOME_SCRATCH_PREFIXES = [
   "heim-build-check/package/",
 ];
 
+/**
+ * Credential material: the JS-side counterpart of embed_walker._is_credential_path.
+ *
+ * The index has two admission predicates — this one gates what the JOURNAL tracks,
+ * and the walker's gates what gets INDEXED. They are different languages and
+ * drifted: measured 2026-10-15, skipPath() rejected ~/.ssh/id_ed25519 and
+ * ~/.pi/agent/auth.json via its dotdir rule but ADMITTED <repo>/.env and
+ * <repo>/cert.pem, so the journal kept tracking secret-bearing files the walker
+ * had just been taught to exclude. A tracked row can be reconciled, which
+ * re-embeds the secret and undoes the walker fix.
+ *
+ * tests/predicate-parity.test.mjs pins the agreement rather than either side.
+ *
+ * The matching is deliberately partial in both directions:
+ *   - `.env` is excluded, `.env.example`/`.sample`/`.template` are NOT (a template
+ *     carries no secret and is the documented way to configure a project)
+ *   - `*.pub` is NOT a secret, so the public-key carve-out precedes the ~/.ssh/ rule
+ *   - `auth.json.bak.*` carries the same credentials as `auth.json`
+ */
+const CREDENTIAL_BASENAMES = new Set([
+  ".netrc", ".npmrc", ".pypirc", ".git-credentials",
+  "auth.json", ".htpasswd", "secring.gpg",
+]);
+const CREDENTIAL_SEGMENTS = [
+  "/.ssh/", "/.aws/", "/.gnupg/", "/.docker/", "/.kube/",
+  "/.config/gh/", "/.config/gcloud/", "/.terraform.d/",
+];
+const CREDENTIAL_SUFFIXES = [".pem", ".p12", ".pfx", ".jks", ".keystore", ".key"];
+const ENV_TEMPLATE_MARKERS = [".example", ".sample", ".template", ".dist", ".defaults"];
+
+/** True when a path holds secret material that must never be tracked or indexed. */
+export function isCredentialPath(path) {
+  const s = path.replace(/\\/g, "/");
+  const name = s.slice(s.lastIndexOf("/") + 1);
+  const lower = name.toLowerCase();
+  if (lower.endsWith(".pub")) return false;
+  if (CREDENTIAL_BASENAMES.has(lower)) return true;
+  for (const b of CREDENTIAL_BASENAMES) if (lower.startsWith(`${b}.`)) return true;
+  if (name.startsWith(".env") || s.includes("/.env")) {
+    return !ENV_TEMPLATE_MARKERS.some((m) => lower.endsWith(m));
+  }
+  if (CREDENTIAL_SUFFIXES.some((x) => lower.endsWith(x))) return true;
+  return CREDENTIAL_SEGMENTS.some((seg) => s.includes(seg));
+}
+
 export function skipPath(path, home) {
   if (!path.startsWith("/")) return true;
   // Collapse runs of leading slashes BEFORE matching: shell globbing and unquoted
   // "$var/$file" produce "///tmp/x" when a variable is empty, and "///tmp/x" does
   // not startsWith("/tmp/"). Observed live as 3 drift rows ("///tmp/g.html").
   const norm = path.replace(/^\/+/, "/");
+  // Credential material is checked FIRST and independently of the tree rules: a
+  // secret is a secret whether it sits in $HOME, in a repo, or in a directory
+  // whose name looks like ordinary source. Placed before the dotdir rule because
+  // <repo>/.env is NOT a dotdir-under-HOME path, which is exactly the case the
+  // two predicates disagreed on (tests/predicate-parity.test.mjs).
+  if (isCredentialPath(norm)) return true;
   if (EPHEMERAL_PREFIXES.some((p) => norm.startsWith(p))) return true;
 
   if (home) {
@@ -111,6 +162,12 @@ export function skipPath(path, home) {
     const sessionsPrefix = `${home}/.pi/agent/sessions/`;
     if (norm.startsWith(sessionsPrefix) && norm.endsWith(".jsonl")) return false;
     if (HOME_SCRATCH_PREFIXES.some((p) => norm.startsWith(`${home}/${p}`))) return true;
+    // A public key is not a secret, so the dotdir rule must not swallow one. Both
+    // predicates agree on this (tests/predicate-parity.test.mjs); the walker gets
+    // it via the .pub carve-out, and here the generic `~/.` rule below would
+    // otherwise catch it first. Scoped to .pub so nothing else under a dotdir is
+    // admitted by accident.
+    if (norm.startsWith(`${home}/.ssh/`) && norm.toLowerCase().endsWith(".pub")) return false;
     if (norm.startsWith(`${home}/.`)) return true;
     if (norm.startsWith(`${home}/Library/`)) return true;
   }
