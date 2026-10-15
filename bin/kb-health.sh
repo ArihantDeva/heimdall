@@ -329,4 +329,33 @@ case "$DRIFT_LINE" in
     ok "no drift ($_n row(s), verify ok)" ;;
 esac
 
+# Credential material in the index is a distinct class of un-health that the drift
+# gates above CANNOT see. Measured 2026-10-15: `verify` reported ok:true drift:0
+# and `score` reported 100/healthy while 231 cards containing ssh private keys,
+# live API keys and 40 real .env files were being returned by `kb_search` - and
+# kb-health printed HEALTHY. Every gate was green because a secret-bearing card is
+# not drift; it is a row doing exactly what the index was built to do.
+#
+# A WARNING, not a hard failure, deliberately: this is advisory about index
+# CONTENT, and a non-zero count must not turn a structurally healthy index into
+# exit 1. tests/c11-observability.test.mjs pins that a minimal sandbox still
+# passes. The point is that it is no longer SILENT.
+CRED_COUNT="$(timeout_run $HEIMDALL_CMD credentials --count 2>/dev/null || true)"
+
+case "${CRED_COUNT:-}" in
+  ''|*[!0-9]*) : ;;  # unsupported here, unreadable, or no index: stay quiet
+  *)
+    if [ "$CRED_COUNT" -gt 0 ]; then
+      echo ""
+      echo "WARNING: ${CRED_COUNT} credential-bearing card(s) are retrievable from the index."
+      echo "         These are files whose CONTENTS are secrets (ssh private keys,"
+      echo "         auth.json / API keys, real .env files). Search output is sent to"
+      echo "         third-party model providers, so a card that can be returned is an"
+      echo "         exfiltration path."
+      echo "         The verdict below reflects STRUCTURE (drift + score), not this."
+      echo "  Fix: heimdall purge     # apply the exclusion policy to existing rows"
+      echo "  Note: deleting a card does NOT un-leak the value - rotate the keys."
+    fi ;;
+esac
+
 echo "HEALTHY"

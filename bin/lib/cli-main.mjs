@@ -282,6 +282,48 @@ async function runVerify(args) {
   }
 }
 
+/**
+ * Count index rows whose path holds credential material.
+ *
+ * Read-only. Exists because credential-bearing cards are invisible to every
+ * other gate: `verify` reports ok:true and `score` reports 100/healthy while
+ * ssh private keys, auth.json API keys and real .env files are all RETRIEVABLE,
+ * because a secret-bearing card is not drift — it is a row doing exactly what
+ * the index was built to do. `kb-health` calls this so the condition is at least
+ * not silent.
+ *
+ * Shares the policy with discovery (`isCredentialPath`) so the count and the
+ * exclusion rule can never disagree about what "credential material" means.
+ */
+async function runCredentials(args) {
+  const { isCredentialPath } = await import("./reconcile.mjs");
+  const { DatabaseSync } = await import("node:sqlite");
+  // The INDEX, not the journal. "Retrievable" means a card exists in global.db,
+  // because that is the table `kb_search` and every semantic query read. Counting
+  // journal rows undercounts badly (52 vs 231 measured 2026-10-15): the journal is
+  // path bookkeeping and holds no card bodies.
+  const dbPath = process.env.HEIMDALL_DB
+    || join(os.homedir(), ".heimdall", "global.db");
+  if (!existsSync(dbPath)) {
+    if (args.includes("--count")) console.log("0");
+    return 0;
+  }
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    // Columns are read via `SELECT path` only: this command must never load a
+    // card BODY into memory, or it would itself be the leak it is reporting.
+    const hits = [];
+    for (const row of db.prepare("SELECT path FROM cards").all()) {
+      if (isCredentialPath(row.path)) hits.push(row.path);
+    }
+    if (args.includes("--count")) console.log(String(hits.length));
+    else for (const h of hits) console.log(`CREDENTIAL\t${h}`);
+    return 0;
+  } finally {
+    db.close();
+  }
+}
+
 // Graded health score (C4, scoring half): pure arithmetic over issue counts.
 // Read-only like verify — no repair gating, no deletion decisions. Exit 1 only
 // when the band is critical, so CI can alert without any auto-repair loop.
@@ -466,6 +508,7 @@ export async function main(argv) {
     case "daemon": return runDaemon(rest);
     case "reconcile": return runReconcile(rest);
     case "verify": return runVerify(rest);
+    case "credentials": return await runCredentials(rest);
     case "history": return await runHistory(rest);
     case "score": return await runScore(rest);
     case "depth": return runDepth(rest);
