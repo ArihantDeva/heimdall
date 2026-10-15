@@ -119,9 +119,40 @@ def conn() -> sqlite3.Connection:
 
 
 def _acquire_lock():
+    """EXCLUSIVE lock — for writers (build) that mutate vec/cards.
+
+    Readers must use _acquire_read_lock() instead. Taking this lock for a
+    read-only query serialises every concurrent reader against every other one,
+    which is how semantic search used to degrade to lexical-only at random.
+    """
     fh = open(LOCK_PATH, "w")
     try:
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        raise Busy()
+    return fh
+
+
+def _acquire_read_lock():
+    """SHARED lock — for readers (query) that only SELECT from vec/cards.
+
+    Readers may hold this simultaneously with each other, but not with a writer:
+    flock gives upgrade-to-exclusive priority over queued shared requests, so a
+    build cannot be starved by a stream of queries.
+
+    Why this exists (2026-10-15): query() previously called _acquire_lock(), so
+    two overlapping semantic searches could not coexist. One won, the other
+    printed "embed-index: busy", exited 3, and kb-search.sh fell back to
+    lexical-only. Measured consequence: the SAME query answered differently run
+    to run — a [STRONG] ~/Repos source hit replaced by [WEAK] cov00% hits from
+    unrelated paths — with the degradation visible only if the caller did not
+    filter the WARN line. A read that mutates nothing must not exclude another
+    read; that is a correctness property, not an optimisation.
+    """
+    fh = open(LOCK_PATH, "w")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
     except OSError:
         fh.close()
         raise Busy()
@@ -300,8 +331,51 @@ def build(progress_every: int = 5000) -> int:
             fh.close()
 
 
+def _purge_policy_excluded(c: sqlite3.Connection) -> int:
+    """Drop cards whose paths are excluded by policy, without walking anything.
+
+    Why this exists (adversarial review 2026-10-15, CONFIRMED-DEFECT):
+
+    `_prune_stale` detects a vanished FILE, and it is called once at the TAIL of
+    a build (line ~412), after the walk and every embedding. So when an exclusion
+    rule is added, the already-indexed rows it now covers keep being served until
+    a build runs to that point — and a full build is ~4 hours and is killable (I
+    killed one at 7%). I hit this directly: adding eight exclusion rules left
+    4,680 stale rows serving, and removing them needed a hand-written purge.
+
+    A path that is excluded by policy does not need to be discovered on disk, so
+    this runs FIRST and is cheap — one SELECT plus per-row deletes, no walk, no
+    embedding. It is deliberately not `_prune_stale`: that one needs the walk's
+    `seen` set, this one needs only the policy predicate.
+
+    Deletes are committed here so a build killed at 7% still leaves the policy
+    consistent.
+    """
+    from embed_walker import should_exclude_path  # noqa: PLC0415 (avoids cycle at import)
+
+    rows = c.execute("SELECT rowid, path FROM cards").fetchall()
+    # walk_root must be the SAME root the build walked (HOME_ROOT, overridable via
+    # $HEIMDALL_HOME), not a default of the real user HOME. With a configured root
+    # the predicate otherwise anchors its $HOME-relative rules against the wrong
+    # base: reproduced by adversarial review 2026-10-15 — HOME_ROOT=/alternate-home,
+    # a card at /alternate-home/.claude/telemetry/a.py was purged 0 times even
+    # though discovery excludes it.
+    victims = [(rid, p) for rid, p in rows if should_exclude_path(p, str(HOME_ROOT))]
+    for rid, _p in victims:
+        c.execute("DELETE FROM vec WHERE rowid=?", (rid,))
+        c.execute("DELETE FROM cards WHERE rowid=?", (rid,))
+    if victims:
+        c.commit()
+    return len(victims)
+
+
 def _build_inner(c: sqlite3.Connection, progress_every: int) -> int:
     init(c)
+    # Policy sweep FIRST, before the ~4h walk: excluded rows stop being served
+    # even if this build is interrupted long before the tail prune.
+    purged = _purge_policy_excluded(c)
+    if purged:
+        print(f"embed-index: policy sweep removed {purged} excluded card(s)", flush=True)
     m = model()
     graft_dirs: list[pathlib.Path] = []
     text_paths, dataless = embed_walker.discover_files(HOME_ROOT, graft_dirs_out=graft_dirs)
@@ -434,20 +508,29 @@ def _card_count(c: sqlite3.Connection) -> int:
 
 def query(q: str, n: int = 5, related: bool = False) -> list[dict]:
     global MODEL, DIM
-    c = conn()
-    db_d = _db_dim(c)
-    if db_d < 0:
-        return []
-    if DIM != db_d:  # adapt to index; build is the only path that changes dims
-        MODEL = "BAAI/bge-small-en-v1.5" if db_d == 384 else "BAAI/bge-m3"
-        DIM = db_d
+    # The shared lock is taken BEFORE conn()/_db_dim(), not after. Opening the DB
+    # and reading the vec schema are themselves reads of state a build can be
+    # mutating (build does DROP TABLE IF EXISTS vec + CREATE VIRTUAL TABLE on a
+    # dimension change), so doing them outside the lock left a TOCTOU window: a
+    # query could observe a half-rebuilt schema, compute db_d = -1 and return no
+    # rows, or adapt MODEL to a dimension that no longer exists. Observed by the
+    # adversarial reviewer 2026-10-15, not by me.
     try:
-        lock_fh = _acquire_lock()  # MUST bind: unbound refcount-frees → fd closed → flock released instantly
+        lock_fh = _acquire_read_lock()  # SHARED: readers must not exclude each other
+                                        # (bound: unbound refcount-frees -> fd closed
+                                        #  -> flock released instantly)
     except Busy:
         print("embed-index: busy; semantic skipped this call.", file=sys.stderr)
         record_semantic_state("busy")
         sys.exit(3)  # loud: caller banners lexical-only degradation
     try:
+        c = conn()
+        db_d = _db_dim(c)
+        if db_d < 0:
+            return []
+        if DIM != db_d:  # adapt to index; build is the only path that changes dims
+            MODEL = "BAAI/bge-small-en-v1.5" if db_d == 384 else "BAAI/bge-m3"
+            DIM = db_d
         if not _ram_ok(MIN_FREE_GB, "query"):
             record_semantic_state("busy")  # RAM-gated: same observable effect
             sys.exit(3)  # loud: rc!=0 makes kb-search.sh banner the degradation
@@ -477,13 +560,89 @@ def query(q: str, n: int = 5, related: bool = False) -> list[dict]:
 
 
 def status() -> dict:
-    c = conn()
-    init(c)
-    files = c.execute("SELECT COUNT(*) FROM cards").fetchone()[0]
-    repos = sorted({r[0] for r in c.execute("SELECT DISTINCT root FROM cards")})
-    d = _db_dim(c)
-    c.close()
-    return {"files": files, "repos": repos, "dim": d, "dimension_ok": d == DIM}
+    """Report index state WITHOUT mutating it.
+
+    Two defects fixed here (found by adversarial review 2026-10-15, both real):
+
+    1. It called init(), which DROPS cards and vec whenever the stored dimension
+       differs from DIM. A read-only status call could therefore destroy the
+       index: reproduced in memory, one card at dim 768 -> status() -> zero cards
+       at dim 384, while the same call reported `dimension_ok: True`. Reporting a
+       mismatch is status's job; repairing it is build's job, under the writer
+       lock. Schema creation on a genuinely absent DB still happens (init() is
+       idempotent for that case), but it must not be able to DELETE data.
+
+    2. It took no lock at all, so it raced a build rewriting vec/cards.
+
+    The shared read lock is taken first, and it is released even when the body
+    raises, so a status failure cannot wedge the writer.
+    """
+    try:
+        lock_fh = _acquire_read_lock()
+    except Busy:
+        # Degrade honestly rather than block: report unknown, claim nothing.
+        return {"files": None, "repos": [], "dim": None, "dimension_ok": None,
+                "locked": True}
+    try:
+        c = conn()
+        # Schema handling, WITHOUT any destructive branch:
+        #
+        #   cards absent        -> fresh install; create the full schema.
+        #   cards present, vec  -> the INVERSE of the destructive case. A missing
+        #     absent               vec table makes every k-NN query fail, so it is
+        #     genuinely broken, and fixing it adds a table without deleting rows.
+        #     Only the DDL is run, never the cards-DROP branch of init().
+        #   dimension mismatch  -> REPORTED, never repaired. A rebuild needs the
+        #     writer lock and is build's job; doing it here is what let a status
+        #     read destroy the index.
+        has_cards = c.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='cards'"
+        ).fetchone()
+        has_vec = c.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='vec'"
+        ).fetchone()
+        if not has_cards and not has_vec:
+            # Genuinely empty database (a fresh install): creating the schema is
+            # additive and destroys nothing.
+            init(c)
+        elif not has_cards:
+            # `vec` EXISTS but `cards` does not. This is NOT an empty database, so
+            # calling init() here was destructive: reproduced by adversarial review
+            # 2026-10-15 — one vector stored at dim 768, `cards` absent, status() ->
+            # `init()` -> vec rows 1 -> 0, while reporting dimension_ok True.
+            # A half-populated schema is a state to REPORT, not to erase.
+            return {
+                "files": None, "repos": [], "dim": _db_dim(c),
+                "dimension_ok": False, "schema_ok": False, "locked": False,
+                "incomplete_schema": "vec present without cards",
+            }
+        elif _db_dim(c) < 0:
+            # vec missing entirely: create it at the current DIM. No row is lost.
+            c.execute(
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS vec USING vec0(embedding float[{DIM}] distance_metric=cosine)"
+            )
+            c.commit()
+
+        # Read the schema defensively: a legacy `cards` table predating this
+        # module has different columns, and status() must report that rather than
+        # raise (it used to crash with "no such column: root").
+        cols = [r[1] for r in c.execute("PRAGMA table_info(cards)")]
+        files = c.execute("SELECT COUNT(*) FROM cards").fetchone()[0]
+        repos = (
+            sorted({r[0] for r in c.execute("SELECT DISTINCT root FROM cards")})
+            if "root" in cols else []
+        )
+        d = _db_dim(c)
+        c.close()
+        return {
+            "files": files, "repos": repos, "dim": d, "dimension_ok": d == DIM,
+            "schema_ok": "sha1" in cols,
+            "locked": False,
+        }
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        lock_fh.close()
 
 
 def insert_card(card_path: str) -> int:
@@ -513,10 +672,40 @@ def insert_card(card_path: str) -> int:
             fh.close()
 
 
+def purge_excluded() -> int:
+    """Remove policy-excluded rows without walking or embedding anything.
+
+    The retroactive sweep used to require a full `build`, which walks ~130k files
+    and is ~4 hours. Adding an exclusion rule therefore left the rows it covered
+    serving until a build COMPLETED — a purge-eligible state that a killed build
+    keeps forever. This is the same `_purge_policy_excluded` the build runs first,
+    exposed on its own under the exclusive lock so a policy change can be applied
+    in seconds.
+
+    Deletes are permanent here, so it takes the writer lock: it must never run
+    concurrently with a build or a query rewriting the same rows.
+    """
+    fh = _acquire_lock_or_exit()
+    try:
+        c = conn()
+        try:
+            n = _purge_policy_excluded(c)
+            print(f"embed-index: purged {n} policy-excluded card(s)")
+            return n
+        finally:
+            c.close()
+    finally:
+        with contextlib.suppress(Exception):
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            fh.close()
+
+
 def main(argv: list[str]) -> int:
     cmd = argv[0] if argv else "status"
     if cmd == "build":
         build()
+    elif cmd == "purge":
+        purge_excluded()
     elif cmd == "insert-card":
         raise SystemExit(insert_card(argv[1]))
     elif cmd == "query":

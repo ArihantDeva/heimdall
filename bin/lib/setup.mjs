@@ -22,6 +22,161 @@ export const modelsDir = () => join(os.homedir(), ".graft", "models");
 export const plistPath = () => join(os.homedir(), "Library", "LaunchAgents", "com.graft.daemon.plist");
 export const localBinGraftd = () => join(os.homedir(), ".local", "bin", "graftd");
 
+// ---------------------------------------------------------------------------
+// Reconciler supervision
+// ---------------------------------------------------------------------------
+// The reconciler is a DIFFERENT process from graftd. graftd is the embedding
+// daemon (config + workers); the reconciler is Heimdall's SINGLE WRITER — the
+// only thing that drains drift out of the journal. Until 2026-10-15 nothing
+// supervised it, so `heimdall verify --deep` reported 223 drift rows that never
+// converged: the audit kept detecting drift and no process ever repaired it. The
+// repair itself was always fine (`daemon --dry-run`: retracted 59, retracted 2,
+// ...). What was missing was anything to run it.
+//
+// A distinct label is deliberate: sharing com.graft.daemon would make the two
+// silently fight over one launchd service slot.
+export const RECONCILER_LABEL = "com.heimdall.reconciler";
+export const reconcilerPlistPath = () =>
+  join(os.homedir(), "Library", "LaunchAgents", `${RECONCILER_LABEL}.plist`);
+
+/** XML-escape a value destined for a plist <string>. A bare "&" makes the whole
+ *  document invalid XML, which launchd rejects with a message that does not
+ *  mention escaping — so this is not cosmetic. */
+const xmlEscape = (s) =>
+  String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+
+/**
+ * Render the launchd definition for the reconciler.
+ *
+ * Paths must be ABSOLUTE: launchd has no notion of a working directory and
+ * silently fails to load a plist whose program path is relative.
+ *
+ * GRAFT + a real PATH are injected because launchd starts a job with a minimal
+ * PATH (/usr/bin:/bin:/usr/sbin:/sbin). Without GRAFT the reconciler logged
+ * "graft not found — projection deferred" and projected nothing: the journal was
+ * maintained while the graph silently stopped updating.
+ */
+export function renderReconcilerPlist(nodePath, reconcilerPath, logPath, { graftBin, home, watchRoots } = {}) {
+  const abs = (p) => {
+    if (!String(p).startsWith("/")) throw new Error(`plist path must be absolute: ${p}`);
+    return xmlEscape(p);
+  };
+  const env = [
+    ["HOME", home],
+    ["GRAFT", graftBin],
+    ["PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"],
+  ].filter(([, v]) => v);
+  const watch = (watchRoots ?? []).filter((p) => String(p).startsWith("/"));
+  const envXml = env.length
+    ? `\t<key>EnvironmentVariables</key>\n\t<dict>\n${env
+        .map(([k, v]) => `\t\t<key>${k}</key>\n\t\t<string>${xmlEscape(v)}</string>`)
+        .join("\n")}\n\t</dict>\n`
+    : "";
+  // --root makes supervision self-contained. Without it the daemon depends on
+  // ~/.heimdall/config.json carrying a `roots` key; when that key is absent it
+  // logs "watching 0 root(s)" and converges nothing — an agent that is "running"
+  // and doing no work, which is the state found on 2026-10-15.
+  const rootsXml = watch
+    .map((w) => `\t\t<string>--root</string>\n\t\t<string>${abs(w)}</string>`)
+    .join("\n");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+\t<key>Label</key>
+\t<string>${RECONCILER_LABEL}</string>
+\t<key>ProgramArguments</key>
+\t<array>
+\t\t<string>${abs(nodePath)}</string>
+\t\t<string>${abs(reconcilerPath)}</string>${rootsXml ? `\n${rootsXml}` : ""}
+\t</array>
+${envXml}\t<key>RunAtLoad</key>
+\t<true/>
+\t<key>KeepAlive</key>
+\t<true/>
+\t<key>ProcessType</key>
+\t<string>Background</string>
+\t<key>StandardOutPath</key>
+\t<string>${abs(logPath)}</string>
+\t<key>StandardErrorPath</key>
+\t<string>${abs(logPath)}</string>
+</dict>
+</plist>
+`;
+}
+
+/** Resolve the graft binary the same way GraftSink does, so the plist can pin it. */
+const resolveGraftBin = () => {
+  if (process.env.GRAFT && existsSync(process.env.GRAFT)) return process.env.GRAFT;
+  for (const c of ["/opt/homebrew/bin/graft", "/usr/local/bin/graft", join(os.homedir(), ".local", "bin", "graft")]) {
+    if (existsSync(c)) return c;
+  }
+  return undefined;
+};
+
+/** Where the reconciler should look for content. Falls back to the same roots
+ *  heimdall already searches, so supervision matches what the user configured. */
+const resolveWatchRoots = () => {
+  const cfg = join(os.homedir(), ".heimdall", "config.json");
+  if (existsSync(cfg)) {
+    try {
+      const j = JSON.parse(readFileSync(cfg, "utf8"));
+      const r = j.watch_roots ?? (j.roots ? Object.keys(j.roots) : null);
+      if (Array.isArray(r) && r.length) return r;
+    } catch { /* fall through to defaults */ }
+  }
+  const home = os.homedir();
+  const candidates = [join(home, "Repos"), join(home, "projects"), join(home, "Desktop")];
+  return candidates.filter((c) => existsSync(c));
+};
+
+async function installReconcilerDaemon() {
+  const entry = join(ROOT, "bin", "heimdall-reconciler.mjs");
+  if (!existsSync(entry)) {
+    console.error(`reconciler: not found at ${entry} — skipping supervision install`);
+    return false;
+  }
+  if (process.platform !== "darwin") {
+    console.log(`reconciler: linux — supervise with a systemd unit: ${process.execPath} ${entry}`);
+    return true;
+  }
+  const uid = sh("id", ["-u"]).out;
+  const plist = reconcilerPlistPath();
+  const logPath = join(os.homedir(), ".heimdall", "reconciler.log");
+  mkdirSync(dirname(plist), { recursive: true });
+  mkdirSync(dirname(logPath), { recursive: true });
+  writeFileSync(plist, renderReconcilerPlist(process.execPath, entry, logPath, {
+    graftBin: resolveGraftBin(),
+    home: os.homedir(),
+    watchRoots: resolveWatchRoots(),
+  }));
+  console.log(`reconciler: wrote ${plist}`);
+  // Idempotent: bootout → wait → bootstrap, mirroring installDaemon above
+  // (launchctl error 5 is a real, observed race).
+  sh("launchctl", ["bootout", `gui/${uid}/${RECONCILER_LABEL}`]);
+  for (let i = 0; i < 10; i++) {
+    if (!sh("launchctl", ["print", `gui/${uid}/${RECONCILER_LABEL}`]).ok) break;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  let b = { ok: false, err: "" };
+  for (let i = 0; i < 3 && !b.ok; i++) {
+    if (i > 0) await new Promise((r) => setTimeout(r, 1000));
+    b = sh("launchctl", ["bootstrap", `gui/${uid}`, plist]);
+  }
+  if (!b.ok) {
+    console.error(`reconciler: bootstrap failed: ${b.err || b.out}`);
+    return false;
+  }
+  const p = sh("launchctl", ["print", `gui/${uid}/${RECONCILER_LABEL}`]);
+  if (p.ok && /state = running/i.test(p.out)) {
+    console.log("reconciler: running (launchd KeepAlive) — drift now converges");
+    return true;
+  }
+  console.log(`reconciler: bootstrapped but not confirmed — check ${logPath}`);
+  return true;
+}
+
 const sh = (cmd, args) => {
   try {
     return { ok: true, out: execFileSync(cmd, args, { encoding: "utf8" }).trim() };
@@ -459,8 +614,13 @@ embedding model, installs/repairs the launchd daemon. Verify with 'heimdall doct
   }
 
   const okDaemon = await installDaemon(graftdBinPath ?? dest, cfgPath);
-  console.log(okDaemon ? "done: run 'heimdall doctor' to verify" : "done with errors: see messages above");
-  return okDaemon ? 0 : 1;
+  // The reconciler is installed alongside the embedding daemon so a machine that
+  // is set up at all is also supervised. Installing graftd without it produces
+  // exactly the half-configured state that left 223 drift rows unconverged.
+  const okReconciler = await installReconcilerDaemon();
+  const allOk = okDaemon && okReconciler;
+  console.log(allOk ? "done: run 'heimdall doctor' to verify" : "done with errors: see messages above");
+  return allOk ? 0 : 1;
 }
 
 // ---------------------------------------------------------------------------

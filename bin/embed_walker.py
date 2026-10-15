@@ -27,7 +27,22 @@ PRUNE_DIRS = {
     # returned six vendored jwt_bearer.pyi / bearer_auth.py files and none of
     # the user's own auth_jwt.py, and 6 of 10 code golds fell outside the top
     # 100 despite every gold being present in the index exactly once.
-    "site-packages", "graphify-out", "worktrees", "pipx",
+    "site-packages", "graphify-out", "worktrees", ".worktrees", "pipx",
+    # Found by auditing the index AFTER the rebuild, i.e. by asking "what is
+    # still large and clearly not authored work". Both are tool state that
+    # happens to live outside the usual dotdirs the rules above already cover:
+    #   .hypothesis  pytest's example DB (equitylens/.hypothesis, 1,318 files)
+    #   .lunarclient a Minecraft launcher install (~/.lunarclient/shared — jre,
+    #                game-cache, assets/skins/*, jit; 1,477 files)
+    ".hypothesis", ".lunarclient",
+    # Any-depth name prunes: these are agent/harness scratch dirs that appear
+    # inside project trees, not only under $HOME, so a $HOME-anchored prefix
+    # cannot reach them. Measured 2026-10-15: 1,935 files of subagent transcripts
+    # and briefs sat in per-project .pi-subagents/ copies (1,073 in one Desktop
+    # project, 193 in arihantdeva-content, 104 in a Repos repo) while the rule
+    # only covered ~/.pi-subagents. Basename matching is the correct instrument
+    # here because the directory NAME is the artifact marker.
+    ".pi-subagents",
 }
 # The five prefixes above are also in PRUNE_DIRS as basenames, which is
 # correct and necessary: `worktrees` must not appear in any search result, and
@@ -49,17 +64,210 @@ PRUNE_DIRS = {
 # depth and have no real-source sibling worth protecting.
 PRUNE_PREFIXES = ("/bench/runs/", "/.claude/file-history/")
 
+# $HOME-anchored exclusions (2026-10-15).
+#
+# PRUNE_DIRS matches a BASENAME at any depth, which is the wrong instrument here:
+# a real project directory called `telemetry`, `install` or `plugins` is source,
+# while `~/.claude/telemetry` is machine exhaust. These entries are therefore
+# matched against the path RELATIVE TO THE WALK ROOT ($HOME), so they only fire
+# for the specific tool tree they name and can never eat a project's own dirs.
+#
+# Why they exist: a live audit of the index (99,302 cards) found the user's own
+# source was 0 cards under ~/Repos, ~/projects and ~/arihantdeva-content, while
+# 83,150 cards (84% of everything searchable) were toolchain caches, plugin
+# marketplaces, harness session logs and telemetry:
+#     .pi/agent 19,322   .local/share 11,682   .claude/telemetry 9,258
+#     .bun/install 6,183 .vscode/extensions 5,904  .local/lib 5,587
+#     .claude/plugins 5,481  .codex/.tmp 4,977  .pi-subagents 4,146
+#     .openhands 3,359   .claude/archive 2,618  .nvm 2,613  .claude/jobs 2,020
+# Retrieval is a claim about what is WORTH finding; none of these are authored
+# work, and their near-duplicate vectors crowd the real content out of k-NN.
+#
+# Deliberately NOT included: .pi/agent/sessions — spec P3 keeps session logs as a
+# fact source, so only the REST of .pi/agent is excluded. The rule for
+# .pi/agent/ is written as a prefix that excludes "sessions/" explicitly.
+HOME_PRUNE_PREFIXES = (
+    ".local/share/",
+    ".local/lib/",
+    ".claude/telemetry/",
+    ".claude/plugins/",
+    ".claude/jobs/",
+    ".claude/archive/",
+    ".claude/file-history/",
+    ".bun/",
+    ".vscode/extensions/",
+    ".codex/.tmp/",
+    ".openhands/",
+    ".nvm/",
+    # `.pi-subagents` is excluded at ANY depth, not just under $HOME. Measured
+    # 2026-10-15: 1,935 files / 2,386 cards live in PER-PROJECT copies that a
+    # $HOME-anchored rule cannot see — .claude/.pi-subagents (1,073 under one
+    # Desktop project alone), arihantdeva-content/.pi-subagents (193),
+    # Repos/shepherd-mvo-engine (104), Repos/Pi-Bolt/.work/plugins (102).
+    # Content is subagent transcripts and *_input.md/*_output.md briefs: the
+    # agent's own scratch, never authored source. It is listed in HOME_PRUNE_*
+    # for the $HOME copy AND in ANAME_PRUNE below for every nested one.
+    ".pi-subagents/",
+    ".pi/tmp/",                          # harness scratch — measured: held a stale
+                                          # Sep-16 COPY OF THE HEIMDALL REPO (289
+                                          # cards) that out-ranked the live source
+                                          # it was copied from. Distinct from
+                                          # .pi/agent/, which is handled below with
+                                          # its sessions/ carve-out.
+    "heim-build-check/package/",         # extraction of arihantdeva-heimdall-0.12.2.tgz
+                                          # — an OLD 0.12.2 build whose mtimes are
+                                          # stamped 1985-10-26 by npm's tarball
+                                          # normalization. 680 cards, identical
+                                          # content to .pi/tmp/sim1 (both sha
+                                          # 397f7010cd58), and it ranked ABOVE
+                                          # live source for "reconciler single
+                                          # writer". The 1985 mtimes also render as
+                                          # as_of=14963.9d in search output.
+
+    # Generated-data classes, measured 2026-10-15.
+    # The walk discovers 432,523 files under $HOME while the previous index held
+    # only 99,303 cards, so the earlier build never finished its walk — that, not
+    # a filtering rule, is why ~/Repos had 0 cards. Excluding the tool trees above
+    # is necessary but not sufficient: six generated classes then account for
+    # 232k files (54% of everything discoverable). Each entry below is anchored
+    # to $HOME and is derived data, evidenced by volume vs. tracked-file count.
+    "go/pkg/mod/",                       # GOPATH module cache — 46,947, zero authored
+    "backups/",                           # dated machine-state snapshots — 44,581
+    "Documents/curseforge/",              # game installs — 18,618
+    "Desktop/Lumina/_work/",              # scraped page dumps — 30,366 ($HOME-anchored so a
+                                          # project's own _work/ is untouched)
+    "equitylens/research/hyperagent-sales-prospector/data/",  # 119,530 generated
+                                          # llm_queue/locks/mx_cache rows; 1 file tracked in git
+    "equitylens/data/vendor/",            # 18,443 vendored third-party tree
+    "arihantdeva-content/.pi/workflows/",          # gitignored workflow state — 8,423
+    "arihantdeva-content/.pi/workflow-subagents/",  # gitignored workflow state — 2,938
+)
+
+
+# .pi/agent is excluded EXCEPT its sessions/ fact source, so it cannot be a plain
+# prefix in the tuple above (a tuple entry would also drop sessions/).
+HOME_PRUNE_EXCEPT = ((".pi/agent/", (".pi/agent/sessions/",)),)
+
 
 def _pruned_by_prefix(abs_path: str) -> bool:
-    """True when `abs_path` sits under a PRUNE_PREFIXES subtree.
+    """True when `abs_path` sits under, or IS, a PRUNE_PREFIXES subtree.
 
-    Substring, not prefix-component: the caller passes a directory that may be
-    any descendant, and a descendant of bench/runs/ is noise just as much as
-    the subtree root is.
+    Component-boundary matched. A plain substring test cannot match the subtree
+    ROOT, because the entries carry a trailing slash: `"/bench/runs/" in
+    "/x/bench/runs"` is False, so the directory itself survived the test while its
+    children passed it. That asymmetry is what let the walk and the policy
+    predicate disagree (adversarial review 2026-10-15).
     """
-    return any(p in abs_path for p in PRUNE_PREFIXES)
+    s = abs_path.replace(os.sep, "/")
+    for p in PRUNE_PREFIXES:
+        e = p.rstrip("/")
+        if s == e or s.endswith(e) or f"{e}/" in s:
+            return True
+    return False
+
+
+def _pruned_by_home_prefix(abs_path: str, walk_root: str) -> bool:
+    """True when `abs_path` sits under an excluded $HOME tool tree.
+
+    Matched on the path RELATIVE to the walk root, so it is anchored: the rule
+    `".claude/telemetry/"` fires for $HOME/.claude/telemetry but NOT for
+    <repo>/claude/telemetry or any project directory of the same name. That is
+    the whole reason this is separate from PRUNE_DIRS — basename matching would
+    delete real source, and losing a real repo is far worse than indexing noise.
+
+    Carve-outs are checked FIRST and apply to the path itself as well as to any
+    ancestor, so descending INTO ~/.pi/agent does not prune ~/.pi/agent/sessions.
+    """
+    try:
+        rel = os.path.relpath(abs_path, walk_root)
+    except ValueError:  # different drive (Windows); not our platform, skip
+        return False
+    if rel.startswith(".."):
+        return False
+    rel = rel.replace(os.sep, "/")  # forward slashes so the tuple reads uniformly
+
+    for prefix, excepts in HOME_PRUNE_EXCEPT:
+        if rel == prefix.rstrip("/") or rel.startswith(prefix):
+            # The carve-out protects the excepted subtree AND its ancestors: if
+            # this path is an ancestor of a carve-out (exactly ~/.pi/agent when
+            # the carve-out is ~/.pi/agent/sessions/) it must NOT be pruned, or
+            # the walk never descends far enough to reach the carve-out at all.
+            if any(rel.startswith(x) or x.startswith(rel + "/") for x in excepts):
+                return False
+            return True
+
+    return any(rel == p.rstrip("/") or rel.startswith(p) for p in HOME_PRUNE_PREFIXES)
 # ponytail: 128KB payload cap — larger files still get indexed via their
 # 3000-char preview; the cap only bounds the sniff/read window indirectly.
+# Credential material: paths whose CONTENTS are secrets, never retrievable text.
+#
+# Why this is a separate list from SKIP_NAMES (measured 2026-10-15, read-only audit):
+#   `kb_search "ssh private key ed25519 openssh"` returned ~/.ssh/id_ed25519 and
+#   three sibling private keys as STRONG hits. The stored card body was 411 chars
+#   containing the OpenSSH PEM header plus 5 key-material lines — the COMPLETE key.
+#   Search output is sent to third-party model providers, so a served card is an
+#   exfiltration path. 252 cards carried a credential-shaped string.
+#
+# This is PRE-EXISTING, not a regression: at git HEAD no exclusion list covered
+# any of these paths.
+#
+# Deliberately NOT SKIP_NAMES, because the matching has to be partial in both
+# directions and a bare basename/suffix rule gets both wrong:
+#   - `.env` is in DATA_EXTS and is legitimately indexed as `.env.example`,
+#     `.env.sample`, `.env.template` (templates carry no secret and are the
+#     documented way to configure a project — excluding them removes real source)
+#   - `*.key` would swallow `key-rotation.md`; `*.pub` must stay (not a secret)
+#   - `.ssh/` must exclude private keys but keep `config` out only where it is a
+#     credential lens, and must never swallow a repo directory named `.ssh`
+CREDENTIAL_BASENAMES = {
+    ".netrc", ".npmrc", ".pypirc", ".git-credentials",
+    "auth.json", ".htpasswd", "secring.gpg",
+}
+# Matched as a path SEGMENT, so a repo's own `secrets/` directory is not pruned by
+# name (only the credential stores below are).
+CREDENTIAL_PATH_SEGMENTS = (
+    "/.ssh/", "/.aws/", "/.gnupg/", "/.docker/", "/.kube/",
+    "/.config/gh/", "/.config/gcloud/", "/.terraform.d/",
+)
+CREDENTIAL_SUFFIXES = (".pem", ".p12", ".pfx", ".jks", ".keystore", ".key")
+# Templates are NOT secrets: the suffix must be present but the name must not end
+# in one of these markers.
+ENV_TEMPLATE_MARKERS = (".example", ".sample", ".template", ".dist", ".defaults")
+
+
+def _is_credential_path(abs_path: str) -> bool:
+    """True when the path holds secret material that must never be indexed.
+
+    Reads only the path, never the file: a rule that needed the contents would
+    have to open the very file it is trying to keep out of the index.
+    """
+    s = abs_path.replace(os.sep, "/")
+    name = os.path.basename(s)
+    lower = name.lower()
+
+    # A public key is not a secret, and it is the one file family inside ~/.ssh
+    # that is safe and useful to index.
+    if lower.endswith(".pub"):
+        return False
+    if lower in CREDENTIAL_BASENAMES:
+        return True
+    # auth.json.bak.20261012-1400, auth.json.bak — the backups carry the same
+    # credentials as the file they back up, and were measured serving.
+    if lower.startswith(tuple(b + "." for b in CREDENTIAL_BASENAMES)):
+        return True
+    # `.env` and every generated variant (`.env.local`, `.env.production.local`,
+    # `.vercel/.env.production.local`) EXCEPT the checkable-in templates.
+    if name.startswith(".env") or "/.env" in s:
+        return not lower.endswith(ENV_TEMPLATE_MARKERS)
+    if lower.endswith(CREDENTIAL_SUFFIXES):
+        return True
+    if any(seg in s for seg in CREDENTIAL_PATH_SEGMENTS):
+        # ~/.ssh/config is a credential lens (it names every host and identity),
+        # so it goes too. The .pub carve-out above already handled public keys.
+        return True
+    return False
+
+
 MAX_BYTES = 131_072
 SNIFF_BYTES = 4096
 
@@ -136,7 +344,43 @@ MIN_PREVIEW_CHARS = 24  # near-empty previews carry no signal worth a vector
 
 
 def _name_skipped(p: pathlib.Path) -> bool:
-    return p.name in SKIP_NAMES or p.name.endswith(tuple(SKIP_SUFFIXES))
+    return (p.name in SKIP_NAMES or p.name.endswith(tuple(SKIP_SUFFIXES))
+            or _is_credential_path(str(p)))
+
+
+def should_exclude_path(abs_path: str, walk_root: str = None) -> bool:
+    """True when `abs_path` is excluded by policy, whatever is on disk.
+
+    The discovery walk prunes DIRECTORIES as it descends, so it can never answer
+    "is this already-indexed row excluded?" for a whole path. This predicate can,
+    and it exists so an exclusion can be applied to existing rows cheaply — see
+    embed_index._purge_policy_excluded, which runs before the walk so a killed
+    build still leaves the index policy-consistent.
+
+    It reuses the same rules as discovery rather than restating them, because two
+    copies of a policy drift: `walk_root` defaults to $HOME so the anchored
+    rules behave exactly as they do during a build.
+    """
+    p = pathlib.Path(abs_path)
+    if walk_root is None:
+        walk_root = str(pathlib.Path.home())
+    # Credential material is checked FIRST and independently of the tree rules:
+    # a secret is a secret whether it sits in $HOME, in a repo, or in a directory
+    # whose name looks like ordinary source. Measured: 8 *.key under ~/Downloads
+    # and ~/Desktop plus 40 real .env files inside repos, none of which any
+    # tree-shaped rule reaches.
+    if _is_credential_path(abs_path):
+        return True
+    # Any component matching a basename prune excludes the path. Checked per
+    # component because the walk prunes the DIRECTORY, and any row beneath it is
+    # therefore excluded too.
+    if any(part in PRUNE_DIRS for part in p.parts):
+        return True
+    if _pruned_by_home_prefix(abs_path, walk_root):
+        return True
+    if _pruned_by_prefix(abs_path):
+        return True
+    return _name_skipped(p)
 
 
 def discover_files(root: pathlib.Path, graft_dirs_out=None):
@@ -171,6 +415,11 @@ def discover_files(root: pathlib.Path, graft_dirs_out=None):
                     if e.is_dir(follow_symlinks=False):
                         if name == "graft" and graft_dirs_out is not None:
                             graft_dirs_out.append(pathlib.Path(e.path).parent)
+                        # $HOME-anchored tool-tree exclusion, checked BEFORE the
+                        # basename rules: it is anchored, so it is safe for names
+                        # that are also legitimate inside a project.
+                        if _pruned_by_home_prefix(e.path, str(root)):
+                            continue
                         if name not in PRUNE_DIRS and not _pruned_by_prefix(e.path):
                             stack.append(e.path)
                         continue
@@ -180,6 +429,15 @@ def discover_files(root: pathlib.Path, graft_dirs_out=None):
                 except OSError:
                     continue
                 p = pathlib.Path(e.path)
+                # Policy is applied to FILES as well as to directories, through
+                # the same predicate the retroactive purge uses. The walk used to
+                # check these rules only while descending, so any file sitting
+                # directly in (or under) a pruned-but-not-descended-into tree was
+                # admitted anyway — measured: ~/.pi/agent/auth.json (a credential
+                # store) and 2 bench/runs/*.md were indexed while
+                # should_exclude_path() correctly rejected them.
+                if _pruned_by_home_prefix(e.path, str(root)) or _pruned_by_prefix(e.path):
+                    continue
                 if st.st_blocks == 0:
                     # Dataless placeholder: stat lies about size, read blocks.
                     if 0 < st.st_size <= MAX_BYTES:

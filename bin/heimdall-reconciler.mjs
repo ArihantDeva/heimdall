@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { Journal } from "./lib/journal.mjs";
 import { Lock } from "./lib/lock.mjs";
 import { ingestHints } from "./lib/hints.mjs";
-import { drain, audit, skipPath } from "./lib/reconcile.mjs";
+import { drain, audit, skipPath, evictExcluded } from "./lib/reconcile.mjs";
 import { GraftSink, MemorySink } from "./lib/sink.mjs";
 import {
   capability, journalPath, loadConfig, lockPath, queueHintPath, watchRoots,
@@ -38,7 +38,7 @@ export function* walk(root, depth = 0) {
 }
 
 function parseArgs(argv) {
-  const o = { interval: 2000, auditEvery: 15 * 60_000, once: false, dryRun: false, scan: false };
+  const o = { interval: 2000, auditEvery: 15 * 60_000, once: false, dryRun: false, scan: false, roots: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--once") o.once = true;
@@ -46,6 +46,12 @@ function parseArgs(argv) {
     else if (a === "--scan") o.scan = true;
     else if (a === "--interval") o.interval = Number(argv[++i]);
     else if (a === "--audit-every") o.auditEvery = Number(argv[++i]) * 1000;
+    // --root makes supervision self-contained. Without it the daemon depends on
+    // ~/.heimdall/config.json carrying a `roots` key; when that key is absent it
+    // logs "watching 0 root(s)" and converges nothing — an agent that is
+    // "running" and doing no work (observed 2026-10-15). A plist can pass roots
+    // explicitly, so the supervised process does not depend on unrelated config.
+    else if (a === "--root") o.roots.push(argv[++i]);
   }
   return o;
 }
@@ -54,7 +60,9 @@ export async function runDaemon(argv = [], { log = console.error } = {}) {
   const opts = parseArgs(argv);
   const cfg = loadConfig();
   const cap = capability();
-  const roots = watchRoots(cfg);
+  // CLI roots win over config roots: an explicit instruction from the supervisor
+  // is more trustworthy than an optional key in a user-editable file.
+  const roots = opts.roots.length ? opts.roots.filter((r) => r && r.startsWith("/")) : watchRoots(cfg);
 
   const lock = new Lock(lockPath());
   if (!lock.acquire()) {
@@ -109,6 +117,18 @@ export async function runDaemon(argv = [], { log = console.error } = {}) {
 
   let lastAudit = Date.now();
   try {
+    // Startup convergence pass. Runs on EVERY boot, not just a fresh journal:
+    // a supervised daemon can be restarted after downtime (or after a manual
+    // reconcile took the lock), and drift that accumulated meanwhile would
+    // otherwise sit unrepaired until the first 15-minute audit tick. Measured
+    // 2026-10-15: 8 rows stayed drifted purely because the audit interval had not
+    // elapsed yet, which reads as "the daemon isn't working" when it is.
+    {
+      const { evicted } = evictExcluded(ctx, HOME);
+      if (evicted) log(`exclude: forgot ${evicted} policy-excluded row(s)`);
+      const drift = audit(ctx);
+      if (drift.length) log(`startup audit: re-queued ${drift.length} drifted path(s)`);
+    }
     do {
       ingestHints(queueHintPath(), journal, { skip: (p) => skipPath(p, HOME) });
       const { processed, results } = drain(ctx);
@@ -126,6 +146,14 @@ export async function runDaemon(argv = [], { log = console.error } = {}) {
       if (opts.once && journal.queueDepth() === 0) break;
 
       if (Date.now() - lastAudit >= opts.auditEvery) {
+        // Policy sweep BEFORE the drift audit. skipPath gates admission, so a row
+        // admitted before a rule existed is invisible to audit() as a violation —
+        // it just looks like drift forever. Measured 2026-10-15: 555 excluded rows
+        // (/var/folders, ///tmp, /Applications, /etc) sat in the journal keeping
+        // score 0/critical long after the entry point was fixed. Sweeping here
+        // makes every exclusion rule retroactive without a manual command.
+        const { evicted } = evictExcluded(ctx, HOME);
+        if (evicted) log(`exclude: forgot ${evicted} policy-excluded row(s)`);
         const drift = audit(ctx);
         lastAudit = Date.now();
         if (drift.length) log(`audit: re-queued ${drift.length} drifted path(s)`);

@@ -217,6 +217,41 @@ export class Journal {
     return this.db.prepare(`SELECT * FROM paths ORDER BY path`).all();
   }
 
+  /**
+   * Remove a path from the journal entirely, with everything it owns.
+   *
+   * Why this exists (2026-10-15): a path that policy EXCLUDES must be forgotten,
+   * not marked absent. `state: absent` means "this file is gone, do not re-embed
+   * it" — so audit() immediately reports it as `reappeared` on the next pass,
+   * because the file is still sitting there. That produced 22 permanent
+   * `reappeared` warnings for /Applications bundles and /etc config: a loop that
+   * could never converge, scoring 3 points each, forever.
+   *
+   * Deleting is the honest representation: the journal is a claim about what is
+   * WORTH indexing, and an excluded path is not part of that claim at all.
+   *
+   * @returns {number} rows deleted from `paths` (0 if it was never there)
+   */
+  forget(path) {
+    // Explicit BEGIN/COMMIT rather than db.transaction(): the sqlite binding
+    // used here (node:sqlite) does not expose a transaction() helper. Mirrors how
+    // commit() already brackets its multi-statement work.
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare(`DELETE FROM fact_history WHERE path = ?`).run(path);
+      this.db.prepare(`DELETE FROM owned_nodes WHERE path = ?`).run(path);
+      this.db.prepare(`DELETE FROM owned_edges WHERE path = ?`).run(path);
+      this.db.prepare(`DELETE FROM pending_edges WHERE path = ?`).run(path);
+      this.db.prepare(`DELETE FROM queue WHERE path = ?`).run(path);
+      const changes = this.db.prepare(`DELETE FROM paths WHERE path = ?`).run(path).changes;
+      this.db.exec("COMMIT");
+      return changes;
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+
   ownedNodes(path) {
     return this.db
       .prepare(`SELECT node_id, kind, symbol, line, label, sink_id FROM owned_nodes WHERE path = ?`)

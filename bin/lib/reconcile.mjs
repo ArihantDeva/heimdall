@@ -12,27 +12,109 @@ import { desiredState, runBridge } from "./extract.mjs";
 import { depthFor, rank } from "./depth.mjs";
 import { renderNode } from "./sink.mjs";
 
-/** Paths we never index. Mirrors the old autosync skip(), kept as the one place. */
+/**
+ * Paths we never index. Mirrors the old autosync skip(), kept as the one place.
+ *
+ * EPHEMERAL_ROOTS exists because the original rule spelled scratch space as
+ * "/tmp/", and on macOS that is not where scratch space lives: $TMPDIR is
+ * /var/folders/<2 chars>/<hash>/T/. Measured 2026-10-15, the live journal held
+ * 128 rows under /var/folders. Their files are cleaned by the OS, so every one
+ * became a permanent `missing` anchor — 10 points each on the health score, and
+ * a search could still return a path that no longer exists. A rule written to
+ * exclude scratch space has to name the scratch space the platform actually
+ * uses.
+ */
+const EPHEMERAL_PREFIXES = [
+  "/tmp/", "/private/tmp/",
+  // macOS per-user temp: /var/folders/xx/xxxxxxxxxxxxxxxx/T/...
+  "/var/folders/",
+  // The RESOLVED form of the two lines above. macOS ships /tmp as a symlink to
+  // /private/tmp and /var to /private/var, so a rule on the symlink form alone
+  // leaves the real path uncaught — exactly how /private/etc slipped through
+  // until 2026-10-15. `/private/var/folders/` is listed separately from
+  // `/private/var/`: the latter would also swallow /private/var/db and other
+  // genuinely readable state, and only the per-user T/ scratch is ephemeral.
+  "/private/var/folders/",
+  // Application bundles are not user content and change on every app update.
+  "/Applications/",
+  // System configuration is not memory. /etc/cups/printers.conf is rewritten by
+  // cupsd on every print/queue change, so it can never be a stable anchor: it
+  // produced permanent, unfixable `mtime/size` + `depth` drift on 2026-10-15 and
+  // was the last thing keeping `verify` from reporting ok. Ordinary readable
+  // state is what /etc holds, and none of it is something the user authored.
+  "/etc/",
+  // The SAME system config reached by its resolved path. macOS ships /etc as a
+  // symlink to /private/etc, and /tmp to /private/tmp, so a rule on the symlink
+  // form alone leaves the real path uncaught. Measured 2026-10-15: after the
+  // /etc rule was added, `/private/etc/cups/printers.conf` STILL produced two
+  // drift rows (it is rewritten by cupsd on every print/queue change, so it can
+  // never be a stable anchor); the `/` + `etc` form never matched. /private/tmp
+  // and /private/var were already listed for the same reason — the /etc entry
+  // was simply the one that had no resolved-path twin.
+  "/private/etc/",
+  // Harness scratch space. `.pi/tmp/` is named tmp and holds throwaway
+  // simulation copies — measured 2026-10-15: `~/.pi/tmp/sim1` was a stale
+  // Sep-16 SNAPSHOT OF THE HEIMDALL REPO itself (289 cards), so retrieval for
+  // "reconciler single writer" ranked `.pi/tmp/sim1/bin/heimdall-reconciler.mjs`
+  // ABOVE the live source it was copied from (hash 397f7010cd58 vs the real
+  // e067de392797). A stale duplicate of a repo is worse than no hit: it returns
+  // a plausible path whose content is not what the user is editing.
+  // Only `tmp/` is listed, NOT `.pi/` — `.pi/agent/` is excluded at the walker
+  // for tool internals while `~/.pi/agent/sessions/` is kept as the P3 fact
+  // source, and a bare `.pi/` here would silently drop that.
+  "/.pi/tmp/",
+  // Extraction of a stale published tarball, not the user's working copy.
+  // Measured 2026-10-15: `~/heim-build-check/package/` is an unpacked
+  // arihantdeva-heimdall-0.12.2.tgz whose mtimes npm stamped 1985-10-26, so it
+  // reports `as_of=14963.9d` and ranked ABOVE the live source for "reconciler
+  // single writer". Its content is byte-identical to the ~/.pi/tmp/sim1 copy
+  // (both sha 397f7010cd58) while the working tree is e067de392797.
+];
+
+/**
+ * Prefixes matched against the HOME-RELATIVE path, i.e. `${home}/` + entry.
+ *
+ * Separate from EPHEMERAL_PREFIXES because these are not absolute filesystem
+ * locations — they are the user's own scratch directories under $HOME, so a
+ * leading-slash entry can never match them. Adversarial review 2026-10-15
+ * caught exactly that mistake: `/heim-build-check/package/` was listed in
+ * EPHEMERAL_PREFIXES, which meant the real ~/heim-build-check/package/ path
+ * stayed ADMISSIBLE (admission, hints and evictExcluded all share skipPath)
+ * while a nonexistent root-level path would have been excluded.
+ */
+const HOME_SCRATCH_PREFIXES = [
+  "heim-build-check/package/",
+];
+
 export function skipPath(path, home) {
   if (!path.startsWith("/")) return true;
-  if (path.startsWith("/tmp/") || path.startsWith("/private/tmp/")) return true;
+  // Collapse runs of leading slashes BEFORE matching: shell globbing and unquoted
+  // "$var/$file" produce "///tmp/x" when a variable is empty, and "///tmp/x" does
+  // not startsWith("/tmp/"). Observed live as 3 drift rows ("///tmp/g.html").
+  const norm = path.replace(/^\/+/, "/");
+  if (EPHEMERAL_PREFIXES.some((p) => norm.startsWith(p))) return true;
+
   if (home) {
-    // fact-layer carve-out (spec D1, 2026-08-23): prompt logs under
-    // ~/.heimdall/prompts/ are the canonical memory write path and must
-    // reconcile despite living in a dotdir.
+    // Every check below uses `norm`, not `path`. Using the raw string only for
+    // the absolute-prefix rule above let a normalized alias bypass the rest:
+    // reproduced by adversarial review 2026-10-15 —
+    // "///Users/.../heim-build-check/package/bin/heimdall.js" reported skip=false
+    // while the single-slash form reported skip=true. Hint ingestion accepts
+    // leading-slash paths unchanged, so the bypass is reachable, not theoretical.
     const promptsPrefix = `${home}/.heimdall/prompts/`;
-    if (path.startsWith(promptsPrefix)) return false;
+    if (norm.startsWith(promptsPrefix)) return false;
     // Session logs (spec P3, 2026-09-28) are the second fact source. Same
     // reasoning as the prompt carve-out: they live in a dotdir, so the
     // dotdir rule below would skip them, but the facts they carry are the
     // point. Only .jsonl under the sessions tree, so nothing else in ~/.pi
     // (secrets, config, git mirrors) becomes an ingest target.
     const sessionsPrefix = `${home}/.pi/agent/sessions/`;
-    if (path.startsWith(sessionsPrefix) && path.endsWith(".jsonl")) return false;
-    if (path.startsWith(`${home}/.`)) return true;
-    if (path.startsWith(`${home}/Library/`)) return true;
+    if (norm.startsWith(sessionsPrefix) && norm.endsWith(".jsonl")) return false;
+    if (HOME_SCRATCH_PREFIXES.some((p) => norm.startsWith(`${home}/${p}`))) return true;
+    if (norm.startsWith(`${home}/.`)) return true;
+    if (norm.startsWith(`${home}/Library/`)) return true;
   }
-  return /\/(node_modules|\.git|__pycache__|\.venv|venv|dist|build|DerivedData|Pods|\.build)\//.test(path);
+  return /\/(node_modules|\.git|__pycache__|\.venv|venv|dist|build|DerivedData|Pods|\.build)\//.test(norm);
 }
 
 /**
@@ -240,4 +322,34 @@ export function audit(ctx, { deep = false, enqueue = true } = {}) {
   // detection and drift repair are separable.
   if (enqueue) for (const d of drift) journal.enqueue(d.path, `audit:${d.why}`);
   return drift;
+}
+
+/**
+ * Sweep already-journaled rows whose paths policy now excludes.
+ *
+ * `skipPath` gates admission; this repairs history. Clearing a policy bug is not
+ * retroactive on its own: after the 2026-10-15 exclusion fix the journal still
+ * held 134 /var/folders, ///tmp and /Applications rows in state=present, each one
+ * scoring as a `missing` ERROR, so the index stayed critical while the code was
+ * already correct. Returns the count actually evicted (already-absent rows are
+ * not violations and are not counted), so the caller can tell "nothing to do"
+ * apart from "policy is working".
+ *
+ * @returns {{evicted: number, paths: string[]}}
+ */
+export function evictExcluded(ctx, home) {
+  const { journal, sink } = ctx;
+  const h = home ?? ctx.home;
+  const paths = [];
+  for (const row of journal.allPaths()) {
+    if (!skipPath(row.path, h)) continue;
+    // Delete, do not mark absent: absent means "gone from disk, keep the memory",
+    // and the file is very much there. An absent row whose file exists is
+    // reported as `reappeared` forever — the non-converging loop this fixes.
+    const owned = journal.ownedNodes(row.path);
+    for (const n of owned) if (n.sink_id) sink.delete(n.sink_id);
+    const removed = journal.forget(row.path);
+    if (removed) paths.push(row.path);
+  }
+  return { evicted: paths.length, paths };
 }

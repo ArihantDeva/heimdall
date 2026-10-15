@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
 # kb-health.sh — Heimdall / @nanonets/graft health check.
-# Verifies: graft CLI present, per-repo graphs built, search smoke passes.
+# Verifies: graft CLI present, per-repo graphs built, search smoke passes,
+# and — the part that matters most — that the index is not drifting.
 # Exit 0 = healthy.
+#
+# Why the drift gate exists (2026-10-15): the eight structural checks below all
+# passed while the index was actively rotting. Measured on the real machine:
+#     heimdall score --count-only  ->  band "critical", errors 152, exit 1
+#     heimdall doctor              ->  "HEALTHY",                 exit 0
+# A health check that cannot fail on the signal that is red is worse than no
+# health check: it launders a broken index into a green light. Every check below
+# asks "is the plumbing installed", which stayed true the whole time. The final
+# gate asks "does the store actually agree with the filesystem", which did not.
 set -u
 GRAFT="${GRAFT:-$(command -v graft 2>/dev/null || echo "$HOME/.local/bin/graft")}"
 VERBOSE=0; [ "${1:-}" = "-v" ] && VERBOSE=1
@@ -138,5 +148,185 @@ else
   ok "daemon: non-macOS — ensure graftd --config $CONFIG_YAML is running"
 fi
 fi # config-exists guard
+
+# 9. index truthfulness — the gate that can actually fail (2026-10-15).
+#
+# Everything above asks whether the plumbing is installed; none of it looks at
+# the store. Drift is the one signal that means "retrieval is lying to you": a
+# journal row in state=present for a file that no longer exists still answers
+# searches with a path that is gone. That is measured two ways and both must be
+# clean: `score` (graded 0-100, weighted so one missing anchor is 10 points) and
+# `verify` (the raw drift rows, for a reason string the user can act on).
+#
+# `heimdall score` exits non-zero on a critical band, so the command itself is
+# allowed to fail — we read its JSON either way rather than treating a non-zero
+# exit as "no output".
+# Resolving the CLI (issue #15 lesson): this script ships INSIDE the heimdall
+# package, so it must not depend on `heimdall` being on PATH. Prefer the explicit
+# override, then PATH, then the bin/heimdall.js sibling next to this file. When
+# none resolve, the drift check is UNVERIFIABLE — say so loudly and continue,
+# rather than hard-failing a minimal sandbox that has no index to measure.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HEIMDALL_CMD=""
+if [ -n "${HEIMDALL_BIN:-}" ] && command -v "$HEIMDALL_BIN" >/dev/null 2>&1; then
+  HEIMDALL_CMD="$HEIMDALL_BIN"
+elif command -v heimdall >/dev/null 2>&1; then
+  HEIMDALL_CMD="heimdall"
+elif [ -f "$SCRIPT_DIR/heimdall.js" ] && command -v node >/dev/null 2>&1; then
+  HEIMDALL_CMD="node $SCRIPT_DIR/heimdall.js"
+fi
+
+if [ -z "$HEIMDALL_CMD" ]; then
+  # No CLI. Two cases, and they differ in whether anything can be laundered:
+  #
+  #   an index EXISTS and cannot be measured -> FAIL. Reporting HEALTHY here is
+  #     the defect this script was fixed to stop doing: the drift gate never ran,
+  #     so the verdict would be unearned.
+  #   NO index exists -> genuinely nothing to verify. A minimal sandbox with no
+  #     index is the issue #15 portability case, and hard-failing it would be
+  #     wrong for the opposite reason: it would report a problem where none
+  #     exists. (tests/c11-observability.test.mjs pins this.)
+  #
+  # The existence test must cover every database this check actually inspects,
+  # not just the default path. Adversarial review 2026-10-15 reproduced a false
+  # "no index" verdict by pointing HEIMDALL_DB at a live global.db from an empty
+  # sandbox HOME, and noted the graph verifier reads journal.db (bin/lib/depth.mjs),
+  # so a journal-only install was misclassified as an empty sandbox too.
+  _state="${HEIMDALL_HOME:-$HOME}"
+  _found=""
+  for _db in "${HEIMDALL_DB:-}" "$_state/.heimdall/global.db" "$_state/.heimdall/journal.db"; do
+    if [ -n "$_db" ] && [ -e "$_db" ]; then _found="$_db"; break; fi
+  done
+  if [ -n "$_found" ]; then
+    echo "FAIL: cannot verify index health — an index exists at $_found"
+    echo "      but no heimdall CLI was found (PATH, \$HEIMDALL_BIN, or $SCRIPT_DIR/heimdall.js)."
+    echo "      Health is UNKNOWN, not healthy — the drift gate never ran."
+    echo "  Fix: put heimdall on PATH, or set HEIMDALL_BIN=/path/to/heimdall."
+    exit 1
+  fi
+  echo "no index yet (no global.db or journal.db under $_state, and \$HEIMDALL_DB unset) — nothing to verify."
+  echo "      Everything above only proves the plumbing is installed."
+  echo "HEALTHY (no index)"
+  exit 0
+fi
+
+HEALTH_JSON="$(timeout_run $HEIMDALL_CMD score --count-only 2>/dev/null || true)"
+
+if [ -z "$HEALTH_JSON" ]; then
+  fail "index health unreadable ($HEIMDALL_CMD score --count-only returned nothing).\
+  A health check must never read a broken payload as healthy.\
+  Fix: $HEIMDALL_CMD score --count-only   # see the error; the index may be unreadable"
+fi
+
+# Parse in python3 (already a dependency of this script) so a malformed payload
+# fails loudly instead of silently reading as "healthy".
+VERDICT="$(printf '%s' "$HEALTH_JSON" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception as e:
+    print("PARSE_ERROR " + str(e)); raise SystemExit(0)
+score = d.get("score")
+band = d.get("band", "?")
+iss = d.get("issues", {}) or {}
+errors = iss.get("errors", 0) or 0
+warnings = iss.get("warnings", 0) or 0
+infos = iss.get("infos", 0) or 0
+print(f"OK {score} {band} {errors} {warnings} {infos}")
+' 2>/dev/null || echo 'PARSE_ERROR python failed')"
+
+case "$VERDICT" in
+  PARSE_ERROR*)
+    fail "index health payload unparseable (${VERDICT#PARSE_ERROR }).\
+  A health check must never read a broken payload as healthy." ;;
+  OK\ *)
+    set -- $VERDICT
+    _score="$2"; _band="$3"; _errors="$4"; _warnings="$5"; _infos="$6"
+    ok "index score ${_score}/100 (${_band}); errors=${_errors} warnings=${_warnings} infos=${_infos}"
+    if [ "$_band" != "healthy" ] || [ "$_errors" != "0" ]; then
+      echo "FAIL: index is not healthy — score ${_score}/100, band ${_band}, errors ${_errors}."
+      echo "  A missing anchor means a search can return a path that no longer exists."
+      echo "  Fix: heimdall daemon --dry-run   # rehearsal, retracts nothing"
+      echo "       heimdall reconcile --all    # converge for real (holds the lock)"
+      echo "       heimdall verify             # confirm the drift is gone"
+      exit 1
+    fi ;;
+  *)
+    fail "unexpected index health verdict: $VERDICT" ;;
+esac
+
+# Raw drift rows, for a human-readable reason when the score says something is wrong.
+#
+# This block must be able to FAIL, not just decorate a pass. Before 2026-10-15 it
+# was advisory in the worst way: unparseable output, EMPTY output, and a payload
+# saying ok:false with no rows all fell through to `echo HEALTHY; exit 0`.
+# Reproduced by adversarial review — `bad-verify`, `empty-verify` and
+# `false-verify` each printed HEALTHY and exited 0. An unreadable drift payload is
+# an UNKNOWN, and an unknown must never be reported as healthy.
+DRIFT_JSON="$(timeout_run $HEIMDALL_CMD verify --json 2>/dev/null)"
+DRIFT_RC=$?
+if [ -z "$DRIFT_JSON" ]; then
+  fail "index drift check returned nothing ($HEIMDALL_CMD verify --json produced no output, exit ${DRIFT_RC}).\
+  Health is UNKNOWN, not healthy — an empty payload must never read as a pass.\
+  Fix: $HEIMDALL_CMD verify --json   # see the error; the index may be unreadable"
+fi
+DRIFT_LINE="$(printf '%s' "$DRIFT_JSON" | python3 -c '
+import json, sys, collections
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("PARSE_ERROR"); raise SystemExit(0)
+# The SCHEMA is part of the contract, not just parseability. A payload that parses
+# but does not carry an explicit boolean verdict and an explicit list of rows is
+# UNKNOWN, and the old code coerced it to healthy: reproduced by adversarial review
+# 2026-10-15 — {"ok":true}, {"ok":true,"drift":false} and {"ok":true,"drift":[]}
+# each printed HEALTHY and exited 0, and the verifier process had itself exited 7.
+if not isinstance(d, dict):
+    print("SCHEMA_ERROR not-an-object"); raise SystemExit(0)
+if d.get("ok") is not True:
+    print("SCHEMA_ERROR ok-not-true"); raise SystemExit(0)
+rows = d.get("drift")
+if not isinstance(rows, list):
+    print("SCHEMA_ERROR drift-not-a-list"); raise SystemExit(0)
+c = collections.Counter(r.get("why", "?") for r in rows)
+print(len(rows), d.get("ok"), "; ".join(f"{k}={v}" for k, v in c.most_common()))
+' 2>/dev/null || echo 'PARSE_ERROR')"
+case "$DRIFT_LINE" in
+  PARSE_ERROR)
+    fail "index drift payload unparseable — health is UNKNOWN, not healthy.\
+  A health check must never read a broken payload as healthy.\
+  Fix: $HEIMDALL_CMD verify --json   # see the error" ;;
+  SCHEMA_ERROR*)
+    fail "index drift payload malformed (${DRIFT_LINE#SCHEMA_ERROR }) — health is UNKNOWN, not healthy.\
+  Required: an object with ok === true and drift as a LIST of rows.\
+  A payload missing either cannot prove the index is clean, so it must not pass.\
+  Fix: $HEIMDALL_CMD verify --json   # inspect the payload shape" ;;
+  *)
+    set -- $DRIFT_LINE
+    _n="$1"; _ok="$2"; shift 2
+    if [ "$_n" != "0" ]; then
+      echo "FAIL: ${_n} drift row(s) — retrieval is stale for those paths (${*:-none})."
+      echo "  Fix: heimdall reconcile --all && heimdall verify"
+      exit 1
+    fi
+    # A non-zero verifier exit means the tool itself judged the index unhealthy.
+    # `verify` returns `drift.length ? 1 : 0` (bin/lib/cli-main.mjs), so it is a
+    # real verdict and not a crash code. Gating on it closes the last fail-open:
+    # adversarial review reproduced a verifier exiting 7 with a well-formed
+    # {"ok":true,"drift":[]} body, which the payload checks alone could not catch.
+    if [ "${DRIFT_RC:-0}" != "0" ]; then
+      fail "index verify exited ${DRIFT_RC} — health is UNKNOWN, not healthy.\
+  A verifier that fails to complete cannot certify the index, even if its payload looks clean.\
+  Fix: $HEIMDALL_CMD verify --json   # see the error"
+    fi
+    # Zero rows is necessary but not sufficient: `verify` also reports its own
+    # verdict, and ok:false with no rows means the check could not complete.
+    if [ "$_ok" != "True" ]; then
+      fail "index verify reported ok=${_ok} with 0 drift rows — the drift check did not complete.\
+  Health is UNKNOWN, not healthy.\
+  Fix: $HEIMDALL_CMD verify --deep --json   # see what the verifier is unhappy about"
+    fi
+    ok "no drift ($_n row(s), verify ok)" ;;
+esac
 
 echo "HEALTHY"
