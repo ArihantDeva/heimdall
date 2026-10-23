@@ -55,8 +55,16 @@ while IFS=$'\t' read -r path purpose keywords; do
 			# fields distinguishable even when the body contains newlines or tabs.
 			rec=$(sqlite3 -separator $'\x1f' "$DB" "select title, body from nodes where hex(id)='$id';" 2>/dev/null)
 			[ -n "$rec" ] || { echo "WARN: could not read node $id before delete — skipping it" >&2; continue; }
-			saved_titles=("${saved_titles[@]}" "${rec%%$'\x1f'*}")
-			saved_bodies=("${saved_bodies[@]}" "${rec#*$'\x1f'}")
+			# `arr=("${arr[@]}" x)` reads as a plain append but fatally is not
+			# one: under `set -u`, expanding an EMPTY array is an unbound-variable
+			# error in bash 3.2 — the bash macOS ships at /bin/bash, and what
+			# `#!/usr/bin/env bash` resolves to for every Mac user. Measured
+			# 2026-10-23: seed-graft.sh died on line 58 ("saved_titles[@]: unbound
+			# variable") on EVERY run, before touching the graph, so re-seeding was
+			# completely broken on macOS while CI's bash 5 passed. `+=` is the
+			# portable append and behaves identically where the old form worked.
+			saved_titles+=("${rec%%$'\x1f'*}")
+			saved_bodies+=("${rec#*$'\x1f'}")
 		done
 		# Refuse to delete anything we could not read back. Deleting unreadable
 		# content is unrecoverable by construction.
