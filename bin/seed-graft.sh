@@ -3,9 +3,23 @@
 # Idempotent: graft dedupes by (title, body) — re-runs add nothing.
 # Usage: bash ~/knowledge-base/seed-graft.sh [--dry-run]
 set -u
+DRY=0
+for a in "$@"; do
+	case "$a" in
+		--dry-run) DRY=1 ;;
+		*)
+			# Same shape as sync-edits.sh: a typo'd --dry-run must not fall through
+			# and let the script insert/graft-delete for real. seed-graft deletes
+			# and re-inserts graph rows, so this is a durable-state command.
+			echo "seed-graft: unknown option: $a" >&2
+			echo "seed-graft: usage: seed-graft.sh [--dry-run]" >&2
+			exit 2
+			;;
+	esac
+done
+
 TSV="$HOME/knowledge-base/.inventory.tsv"
 [ -f "$TSV" ] || { echo "no $TSV"; exit 1; }
-DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
 
 if ! command -v graft >/dev/null 2>&1 || ! graft stats >/dev/null 2>&1; then
 	echo "ERROR: graft daemon unreachable — cannot seed."

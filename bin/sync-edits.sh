@@ -18,8 +18,20 @@ set -u
 STATE="$HOME/.graft/.last-sync"
 DRY=0; FULL=0
 for a in "$@"; do
-  [ "$a" = "--dry-run" ] && DRY=1
-  [ "$a" = "--full" ] && FULL=1
+  case "$a" in
+    --dry-run) DRY=1 ;;
+    --full) FULL=1 ;;
+    *)
+      # A typo'd flag must not silently become the real thing. Measured
+      # 2026-10-23: `sync-edits.sh --dry-runn` fell through this loop, DRY stayed
+      # 0, and the run proceeded past the dry-run branch to actually hint paths
+      # and ADVANCE the durable high-water mark in $STATE — a rehearsal the
+      # operator believes is safe, performing permanent work.
+      echo "sync: unknown option: $a" >&2
+      echo "sync: usage: sync-edits.sh [--dry-run] [--full]" >&2
+      exit 2
+      ;;
+  esac
 done
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
