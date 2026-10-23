@@ -166,11 +166,29 @@ RS_RC=$?
 [ "$RS_RC" -eq 0 ] || die "restore failed (exit $RS_RC) — nodes are ONLY in $BK/nodes.$TS.json, graph left EMPTY. Re-run the restore before anything else."
 
 echo "== 4/6 re-seed inventory + full-history edit sync"
-bash "$HERE/seed-graft.sh" 2>&1 | tail -1
-bash "$HERE/sync-edits.sh" --full 2>&1 | tail -1
+# Steps 1-3 are fail-closed; 4-6 discarded every exit status and piped straight
+# into `tail -1`, so a rebuild whose re-seed, sync and prune ALL failed still
+# printed 6/6 and exited 0 (measured 2026-10-23). A rebuild is the one command
+# whose whole job is fidelity — reporting success over a partial restore is worse
+# than failing loudly, because the caller stops looking.
+# `set -o pipefail` is NOT set here, so capture the status explicitly.
+SEED_OUT=$(bash "$HERE/seed-graft.sh" 2>&1); SEED_RC=$?
+[ -n "$SEED_OUT" ] && printf '%s\n' "$SEED_OUT" | tail -1
+SYNC_OUT=$(bash "$HERE/sync-edits.sh" --full 2>&1); SYNC_RC=$?
+[ -n "$SYNC_OUT" ] && printf '%s\n' "$SYNC_OUT" | tail -1
 
 echo "== 5/6 stale prune"
-python3 "$HERE/kb-stale-scan.py" 2>&1 | tail -1
+# The prune is best-effort by design: it refuses a mass delete on purpose (see
+# the circuit breaker), and exit 1 there means "I protected you", not "I failed".
+# So it is reported, never fatal.
+PRUNE_OUT=$(python3 "$HERE/kb-stale-scan.py" 2>&1); PRUNE_RC=$?
+[ -n "$PRUNE_OUT" ] && printf '%s\n' "$PRUNE_OUT" | tail -1
 
 echo "== 6/6 verify"
 ~/.local/bin/graft stats 2>/dev/null | python3 -c "import json,sys; r=json.load(sys.stdin)['result']; print('   nodes:', r['n_nodes'], '| edges:', r['n_edges'], '| keywords:', r['n_keywords'])"
+
+# Only steps whose failure means the graph is INCOMPLETE are fatal.
+if [ "$SEED_RC" -ne 0 ] || [ "$SYNC_RC" -ne 0 ]; then
+	die "re-seed (exit $SEED_RC) or edit sync (exit $SYNC_RC) failed — the graph is complete enough to serve but missing inventory/history rows. Re-run: bash $HERE/seed-graft.sh; bash $HERE/sync-edits.sh --full"
+fi
+[ "$PRUNE_RC" -eq 0 ] || echo "   note: stale prune exited $PRUNE_RC (a refused mass delete is not an error)"
