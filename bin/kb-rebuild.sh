@@ -19,6 +19,12 @@ TS=$(date +%Y%m%d-%H%M%S)
 BK="$KB/backups"
 mkdir -p "$BK"
 
+# ── fail-fast helpers ──────────────────────────────────────────────────────
+# This script DROPs every graph table. With `set -u` alone, a failed backup
+# printed an error and the wipe ran anyway (measured 2026-10-23): total loss with
+# exit 0. Every step that can destroy or strand data must therefore stop the run.
+die() { echo "kb-rebuild: ABORT — $*" >&2; exit 1; }
+
 echo "== 1/6 backup"
 # sqlite backup API — consistent snapshot even under WAL (a plain cp of a live
 # WAL db can be torn/incomplete).
@@ -29,9 +35,33 @@ con = sqlite3.connect(src)
 dst = sqlite3.connect(sys.argv[1])
 con.backup(dst)
 dst.close(); con.close()
-print(f"   backed up DB via sqlite backup API -> {sys.argv[1]}")
+# A backup that "succeeded" but wrote nothing is worse than a loud failure: the
+# next step DROPs every table and this file is the only restore source.
+if not os.path.exists(sys.argv[1]) or os.path.getsize(sys.argv[1]) == 0:
+    print(f"   FATAL backup produced no data: {sys.argv[1]}", file=sys.stderr)
+    sys.exit(1)
+print(f"   backed up DB via sqlite backup API -> {sys.argv[1]} ({os.path.getsize(sys.argv[1])} bytes)")
 EOF
-sqlite3 "$DB" "SELECT hex(id), title, body FROM nodes;" > "$BK/nodes.$TS.tsv" 2>/dev/null
+BK_RC=$?
+[ "$BK_RC" -eq 0 ] || die "sqlite backup failed (exit $BK_RC) — refusing to wipe the graph"
+# The node list is a SECOND restore source and the only human-readable one. It
+# was written with stderr to /dev/null, its exit status ignored, and no emptiness
+# check — measured 2026-10-23: a valid-but-empty graft.db produced a 0-byte
+# nodes.$TS.tsv and the run proceeded to the wipe. A backup that silently holds
+# nothing is worse than a loud failure, because the next step DROPs the source.
+if ! sqlite3 "$DB" "SELECT hex(id), title, body FROM nodes;" > "$BK/nodes.$TS.tsv" 2>"$BK/nodes.$TS.err"; then
+	die "node list extraction failed (see $BK/nodes.$TS.err) — refusing to wipe the graph"
+fi
+if [ ! -s "$BK/nodes.$TS.tsv" ]; then
+	# An empty database is legitimate, so this is not an error on its own — but
+	# the node list must at least be written. Distinguish "no nodes" from
+	# "the query did not run" by checking the source count.
+	SRC_N=$(sqlite3 "$DB" "SELECT count(*) FROM nodes;" 2>/dev/null || echo "?")
+	if [ "$SRC_N" != "0" ]; then
+		die "node list is empty but the graph holds $SRC_N node(s) — extraction failed, refusing to wipe"
+	fi
+fi
+rm -f "$BK/nodes.$TS.err" 2>/dev/null
 echo "   node list saved -> $BK/nodes.$TS.tsv"
 
 echo "== 2/6 dump all nodes (title/body/keywords) + wipe graph"
@@ -48,8 +78,10 @@ for row in con.execute("""SELECT hex(n.id) id, n.title, n.body, group_concat(k.t
     kw[row["id"]] = {"title": row["title"], "body": row["body"],
                      "keywords": (row["kws"] or "").split(",") if row["kws"] else []}
 json.dump(list(kw.values()), open(sys.argv[1], "w"))
-print(f"   dumped {len(kw)} nodes to {sys.argv[1]}")
 con.close()
+if not os.path.exists(sys.argv[1]) or os.path.getsize(sys.argv[1]) == 0:
+    sys.exit(1)
+
 """
 EOF
 
@@ -126,14 +158,37 @@ with ThreadPoolExecutor(max_workers=8) as ex:
         if f.result() == 0: ok += 1
         else: fail += 1
 print(f"   restored {ok} nodes ({fail} failed) in parallel")
+# The graph was already DROPped, so the JSON dump is now the only copy of these
+# nodes. A non-zero fail count means those nodes exist nowhere else.
+sys.exit(1 if fail else 0)
 EOF
+RS_RC=$?
+[ "$RS_RC" -eq 0 ] || die "restore failed (exit $RS_RC) — nodes are ONLY in $BK/nodes.$TS.json, graph left EMPTY. Re-run the restore before anything else."
 
 echo "== 4/6 re-seed inventory + full-history edit sync"
-bash "$HERE/seed-graft.sh" 2>&1 | tail -1
-bash "$HERE/sync-edits.sh" --full 2>&1 | tail -1
+# Steps 1-3 are fail-closed; 4-6 discarded every exit status and piped straight
+# into `tail -1`, so a rebuild whose re-seed, sync and prune ALL failed still
+# printed 6/6 and exited 0 (measured 2026-10-23). A rebuild is the one command
+# whose whole job is fidelity — reporting success over a partial restore is worse
+# than failing loudly, because the caller stops looking.
+# `set -o pipefail` is NOT set here, so capture the status explicitly.
+SEED_OUT=$(bash "$HERE/seed-graft.sh" 2>&1); SEED_RC=$?
+[ -n "$SEED_OUT" ] && printf '%s\n' "$SEED_OUT" | tail -1
+SYNC_OUT=$(bash "$HERE/sync-edits.sh" --full 2>&1); SYNC_RC=$?
+[ -n "$SYNC_OUT" ] && printf '%s\n' "$SYNC_OUT" | tail -1
 
 echo "== 5/6 stale prune"
-python3 "$HERE/kb-stale-scan.py" 2>&1 | tail -1
+# The prune is best-effort by design: it refuses a mass delete on purpose (see
+# the circuit breaker), and exit 1 there means "I protected you", not "I failed".
+# So it is reported, never fatal.
+PRUNE_OUT=$(python3 "$HERE/kb-stale-scan.py" 2>&1); PRUNE_RC=$?
+[ -n "$PRUNE_OUT" ] && printf '%s\n' "$PRUNE_OUT" | tail -1
 
 echo "== 6/6 verify"
 ~/.local/bin/graft stats 2>/dev/null | python3 -c "import json,sys; r=json.load(sys.stdin)['result']; print('   nodes:', r['n_nodes'], '| edges:', r['n_edges'], '| keywords:', r['n_keywords'])"
+
+# Only steps whose failure means the graph is INCOMPLETE are fatal.
+if [ "$SEED_RC" -ne 0 ] || [ "$SYNC_RC" -ne 0 ]; then
+	die "re-seed (exit $SEED_RC) or edit sync (exit $SYNC_RC) failed — the graph is complete enough to serve but missing inventory/history rows. Re-run: bash $HERE/seed-graft.sh; bash $HERE/sync-edits.sh --full"
+fi
+[ "$PRUNE_RC" -eq 0 ] || echo "   note: stale prune exited $PRUNE_RC (a refused mass delete is not an error)"

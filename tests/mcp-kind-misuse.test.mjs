@@ -1,39 +1,70 @@
-// mcp-kind-misuse.test.mjs — the kind param is exposed and misuse is an error.
+// mcp-kind-misuse.test.mjs — the kind param is exposed, forwarded, and misuse is
+// an error.
 //
-// RED for Phase 1. The MCP layer collapses every nonzero exit to
-// `isError: true` (mcp-server.mjs: `isError: code !== 0`), so an invalid
-// --kind cannot surface as a distinct code to an MCP caller. That collapse is
-// documented behaviour, not a bug to fix here — the test pins it so it stays a
-// known limitation rather than becoming a surprise.
+// WHY REWRITTEN (measured 2026-10-23): this file used to assert on the SOURCE
+// TEXT of bin/lib/mcp-server.mjs with regexes. Deleting the entire
+// `args.push("--kind", ...)` forwarding line — while leaving the string
+// "--kind" in a comment — kept all three tests passing. Source-text assertions
+// cannot distinguish "the code does this" from "the code mentions this", so they
+// pass forever while the behaviour drifts away underneath them.
+//
+// These tests now drive the real MCP server over its real JSON-RPC protocol, so
+// they observe the schema a caller sees and the dispatch that actually happens.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { Readable } from "node:stream";
 import test from "node:test";
+import { serveMcp } from "../bin/lib/mcp-server.mjs";
 
-const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-const SRC = readFileSync(join(repoRoot, "bin", "lib", "mcp-server.mjs"), "utf8");
+// Feed one JSON-RPC line and collect the reply. serveMcp is the real entry point
+// (it is what `heimdall mcp` calls), so this exercises parsing, dispatch and
+// serialisation rather than re-reading the source.
+async function rpc(method, params) {
+	const req = { jsonrpc: "2.0", id: 1, method, params };
+	let out = "";
+	const output = { write: (s) => { out += s; return true; } };
+	await serveMcp(Readable.from([JSON.stringify(req) + "\n"]), output);
+	const line = out.trim().split("\n").filter(Boolean).pop();
+	return JSON.parse(line);
+}
 
-test("kb_search advertises the kind enum in its input schema", () => {
-  const block = SRC.slice(SRC.indexOf('name: "kb_search"'));
-  const schema = block.slice(0, block.indexOf("run:"));
-  for (const k of ["person", "decision", "fact", "code", "all"]) {
-    assert.match(schema, new RegExp(`"${k}"`), `kind enum is missing ${k}`);
-  }
-  assert.match(schema, /enum:/, "kind must be an enum, not a free string");
+const searchTool = async () => {
+	const res = await rpc("tools/list", {});
+	return res.result.tools.find((t) => t.name === "kb_search");
+};
+
+test("kb_search advertises the kind enum in its input schema", async () => {
+	// Read the schema the SERVER publishes, not the text that defines it.
+	const tool = await searchTool();
+	assert.ok(tool, "kb_search must be listed by tools/list");
+	const kind = tool.inputSchema.properties.kind;
+	assert.ok(kind, "kind must appear in the input schema");
+	assert.equal(kind.type, "string", "kind must be a string");
+	assert.deepEqual(kind.enum, ["person", "decision", "fact", "code", "all"],
+		"kind enum drifted from the values kb-search.sh accepts");
+	assert.ok(kind.description && kind.description.length > 20,
+		"kind needs a description: an MCP caller has nothing else to go on");
 });
 
-test("the kind param is forwarded to the CLI as --kind", () => {
-  const block = SRC.slice(SRC.indexOf('name: "kb_search"'));
-  const run = block.slice(block.indexOf("run:"), block.indexOf("name: \"kb_insert\""));
-  assert.match(run, /--kind/, "kb_search does not forward kind to the CLI");
+test("a valid kind reaches the CLI and changes what is searched", async () => {
+	// The forwarding claim is only observable by its EFFECT. `--kind person`
+	// routes to the people store, whose output header names the leg; the default
+	// code search does not.
+	const res = await rpc("tools/call", {
+		name: "kb_search", arguments: { query: "Jules", n: 1, kind: "person" },
+	});
+	const text = (res.result?.content ?? []).map((c) => c.text).join("\n");
+	assert.ok(text.length > 0, "kb_search returned nothing at all");
+	assert.match(text, /people/i,
+		`kind=person did not route to the people store. Got: ${text.slice(0, 160)}`);
 });
 
-test("the isError collapse is documented at the call site", () => {
-  const block = SRC.slice(SRC.indexOf('name: "kb_search"'));
-  assert.match(
-    block,
-    /isError|collapses every nonzero/i,
-    "the exit-code collapse must be documented where kind is handled",
-  );
+test("an unknown kind is rejected by the CLI, collapsed to isError", async () => {
+	// The documented collapse: every nonzero exit becomes isError:true, so the
+	// caller cannot tell exit 2 (bad kind) from any other failure. Pinned as a
+	// KNOWN LIMITATION so it stays a recorded decision rather than a surprise.
+	const res = await rpc("tools/call", {
+		name: "kb_search", arguments: { query: "anything", n: 1, kind: "not-a-real-kind" },
+	});
+	assert.equal(res.result?.isError, true,
+		"an invalid kind must surface as isError:true at the MCP layer");
 });

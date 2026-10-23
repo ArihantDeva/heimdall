@@ -12,7 +12,7 @@
 //   {"type":"message","message":{"role":"assistant","content":[{"type":"thinking",...}]}}
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { extractFacts } from "../bin/lib/facts.mjs";
@@ -47,7 +47,26 @@ test("GATE 3 — desiredState emits fact nodes for a real session path", async (
   // skipPath let it through — a gate that admits a file and then ignores it.
   // sessionsDir() is built from the REAL $HOME, so this must write inside it;
   // a temp path would be a different directory and prove nothing.
-  const dir = mkdtempSync(join(homedir(), ".pi", "agent", "sessions", "heimdall-gate3-"));
+  //
+  // But "inside $HOME" is not the same as "assume pi is installed here". The
+  // assertion is about the PATH SHAPE the gate recognises, not about the
+  // operator's pi install, so the directory is created when absent. Before this,
+  // the test threw ENOENT on any machine whose $HOME never ran pi — i.e. every
+  // CI runner — which is a failure of the FIXTURE, not of the gate.
+  const sessionsParent = join(homedir(), ".pi", "agent", "sessions");
+  // Track EVERY directory this test creates, and remove only those, deepest
+  // first. The previous cleanup recorded `parentExisted` for `.pi/agent/sessions`
+  // but then did `rmSync(join(homedir(), ".pi"))` — a different, much broader
+  // path. On any machine whose ~/.pi exists but has no agent/sessions (a fresh
+  // install, or one cleaned by another tool) the flag was false and the test
+  // DELETED THE OPERATOR'S ENTIRE ~/.pi: auth.json, agents/, AGENTS.md, archive.
+  // Reproduced in a sandbox 2026-10-23. A test may only remove what it created.
+  const created = [];
+  for (const d of [join(homedir(), ".pi"), join(homedir(), ".pi", "agent"), sessionsParent]) {
+    if (!existsSync(d)) created.push(d);
+  }
+  mkdirSync(sessionsParent, { recursive: true });
+  const dir = mkdtempSync(join(sessionsParent, "heimdall-gate3-"));
   try {
     const p = join(dir, "s.jsonl");
     writeFileSync(p, JSON.stringify({
@@ -68,6 +87,12 @@ test("GATE 3 — desiredState emits fact nodes for a real session path", async (
         + nodes.map((n) => n.kind).join(",") + ")");
   } finally {
     rmSync(dir, { recursive: true, force: true });
+    // Deepest-first, and ONLY the directories that did not exist before this
+    // test ran. Never `~/.pi` as a unit: that root may predate the test and
+    // holds credentials.
+    for (const d of created.slice().sort((a, b) => b.length - a.length)) {
+      try { rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
   }
 });
 

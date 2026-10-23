@@ -2,7 +2,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdirSync, writeFileSync, existsSync, readFileSync, openSync, closeSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, readFileSync, openSync, closeSync, readSync, statSync } from "node:fs";
 import os from "node:os";
 
 const HERE = dirname(fileURLToPath(import.meta.url)); // bin/lib
@@ -85,7 +85,14 @@ async function runInsert(args) {
     mkdirSync(FACTS_DIR, { recursive: true });
     const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 80);
     const stamp = new Date().toISOString().slice(0, 10);
-    factPath = join(FACTS_DIR, `${stamp}-${slug || "fact"}.md`);
+    // Distinct titles can slug identically: "a b", "a-b" and "a/b" all reduce to
+    // "a-b", so the same-day path collided and writeFileSync silently destroyed
+    // the earlier card while exiting 0 (measured 2026-10-23: three inserts, one
+    // file, two facts gone). This file is the DURABLE record — losing it is not a
+    // cache miss. Disambiguate with a counter rather than overwriting.
+    const base = join(FACTS_DIR, `${stamp}-${slug || "fact"}`);
+    factPath = `${base}.md`;
+    for (let n = 2; existsSync(factPath); n += 1) factPath = `${base}-${n}.md`;
     const kw = kws.length ? `keywords: ${kws.join(", ")}\n` : "";
     const card = `# ${title}\n\n${kw}\n${body}\n\n(recorded ${new Date().toISOString()})\n`;
     writeFileSync(factPath, card, "utf8");
@@ -172,6 +179,12 @@ import { installAdapter, detectHarnesses, KNOWN_HARNESSES } from "./adapters.mjs
 import { configPath } from "./depth.mjs";
 
 function runInit(args) {
+  // init WRITES config and installs adapters. Measured 2026-10-23: `init
+  // --bogus-typo` exited 0 with "ok: config already present" — it performed the
+  // mutation and silently ignored the flag. Same class checkFlags already covers
+  // for verify/score/reconcile/history/depth.
+  const bad = checkFlags("init", args, ["--detect", "--harness", "--quiet"]);
+  if (bad) return bad;
   if (args.includes("--detect")) {
     const found = detectHarnesses();
     console.log(found.length ? found.join("\n") : "(no harness configs found)");
@@ -266,6 +279,48 @@ async function runReconcile(args) {
   return code;
 }
 
+// A cheap, dependency-free probe for a DESTROYED graph store.
+//
+// `verify` audits the JOURNAL — it never opens graft.db, so its node/edge counts
+// describe what the journal believes, not whether the graph can still answer a
+// query. Measured 2026-10-23: with graft.db overwritten by garbage, `verify`
+// printed "ok: 0 paths, 0 nodes, 0 edges ... no drift" and `--json` returned
+// {"ok": true}, exit 0. Any health automation watching verify saw green through
+// total data loss.
+//
+// The three states are genuinely different and must stay distinguishable:
+//   absent    -> fresh install, legitimately empty, NOT an error
+//   corrupt   -> the store is gone; retrieval will silently return nothing
+//   present   -> validate by state, as before
+// SQLite's file magic is 16 fixed bytes, so this reads 16 bytes rather than
+// parsing SQL or adding a driver dependency.
+const SQLITE_MAGIC = "SQLite format 3\u0000";
+function graphStoreState() {
+  const p = join(os.homedir(), ".graft", "profiles", "default", "graft.db");
+  let fd;
+  try {
+    if (!existsSync(p)) return { state: "absent", path: p };
+    fd = openSync(p, "r");
+    const buf = Buffer.alloc(16);
+    const n = readSync(fd, buf, 0, 16, 0);
+    if (n < 16) return { state: "corrupt", path: p, why: `file shorter than a sqlite header (${n} bytes)` };
+    if (buf.toString("utf8") !== SQLITE_MAGIC) return { state: "corrupt", path: p, why: "missing sqlite header" };
+    // Header alone is not a database: sqlite's minimum page size is 512 bytes, so
+    // a file no larger than the header cannot hold a single page. Without this a
+    // truncated store would pass as healthy.
+    const size = statSync(p).size;
+    if (size < 512) return { state: "corrupt", path: p, why: `file is ${size} bytes; below one sqlite page (512)` };
+    return { state: "present", path: p };
+  } catch (e) {
+    // Cannot even open it (permissions, EIO): report UNKNOWN rather than ok —
+    // an unreadable store is not a healthy one, but it is also not proof of
+    // corruption. Surfaced either way.
+    return { state: "unreadable", path: p, why: String(e && e.message || e) };
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* ignore */ } }
+  }
+}
+
 async function runVerify(args) {
   const bad = checkFlags("verify", args, ["--deep", "--json"]);
   if (bad) return bad;
@@ -283,16 +338,28 @@ async function runVerify(args) {
       { deep: args.includes("--deep"), enqueue: false },
     );
     const stats = journal.stats();
+    // A destroyed graph store is NOT "no drift" — see graphStoreState above.
+    const graph = graphStoreState();
+    const graphBroken = graph.state === "corrupt" || graph.state === "unreadable";
     if (args.includes("--json")) {
-      console.log(JSON.stringify({ ok: drift.length === 0, drift, stats }, null, 2));
-    } else if (drift.length) {
-      for (const d of drift) console.log(`DRIFT ${d.why}\t${d.path}`);
-      console.log(`\n${drift.length} drifted path(s) of ${stats.paths}. Run: heimdall reconcile --all`);
+      console.log(JSON.stringify({ ok: drift.length === 0 && !graphBroken, drift, stats, graph }, null, 2));
     } else {
-      console.log(`ok: ${stats.paths} paths, ${stats.nodes} nodes, ${stats.edges} edges, ` +
-        `${stats.pending} pending, ${stats.queued} queued — no drift`);
+      if (graphBroken) {
+        console.error(`GRAPH STORE ${graph.state.toUpperCase()}: ${graph.path}${graph.why ? ` (${graph.why})` : ""}`);
+        console.error(`  The journal is intact (${stats.paths} paths, ${stats.nodes} owned nodes), but the graph`);
+        console.error(`  cannot be queried. Retrieval will return nothing while reporting no drift.`);
+        console.error(`  Restore from a backup: heimdall doctor, or ~/knowledge-base/backups/`);
+      }
+      if (drift.length) {
+        for (const d of drift) console.log(`DRIFT ${d.why}\t${d.path}`);
+        console.log(`\n${drift.length} drifted path(s) of ${stats.paths}. Run: heimdall reconcile --all`);
+      } else {
+        console.log(`${graphBroken ? "drift-free journal, but see GRAPH STORE above:" : "ok:"} ` +
+          `${stats.paths} paths, ${stats.nodes} nodes, ${stats.edges} edges, ` +
+          `${stats.pending} pending, ${stats.queued} queued — no drift`);
+      }
     }
-    return drift.length ? 1 : 0;
+    return drift.length || graphBroken ? 1 : 0;
   } finally {
     journal.close();
   }
@@ -312,6 +379,11 @@ async function runVerify(args) {
  * exclusion rule can never disagree about what "credential material" means.
  */
 async function runCredentials(args) {
+  // Read-only, but a typo'd filter must not silently report on everything: this
+  // is consumed by scripts (`--count` for a number), and exit 0 implies the flag
+  // was honoured.
+  const bad = checkFlags("credentials", args, ["--count"]);
+  if (bad) return bad;
   const { isCredentialPath } = await import("./reconcile.mjs");
   const { DatabaseSync } = await import("node:sqlite");
   // The INDEX, not the journal. "Retrievable" means a card exists in global.db,
@@ -366,15 +438,25 @@ async function runScore(args) {
     // raise the score by dropping its warnings. Count the missing reading as
     // one warning and surface it explicitly.
     const staleWarn = stale ? stale.stale : 0;
+    // A dead sensor is ONE warning, and it must appear in the report as well as
+    // in the score. Measured 2026-10-23: the score was computed with the +1 but
+    // the report spread the raw counts, so a corrupt graph printed
+    // {score: 97, warnings: 0} — three points unaccounted for, and a reader could
+    // not tell why the score was not 100. The report and the score must be the
+    // same arithmetic.
     const staleIssue = stale ? 0 : 1;
+    const warnings = counts.warnings + staleWarn + staleIssue;
     const { score, band } = computeHealthScore({
       errors: counts.errors,
-      warnings: counts.warnings + staleWarn + staleIssue,
+      warnings,
       infos: counts.infos,
     });
     const out = {
       score, band,
-      issues: { ...counts, staleNodesPending: stale?.stale ?? null, staleNodesTotal: stale?.nodes ?? null,
+      // Report the counts the score was actually computed from, not the raw
+      // drift counts — otherwise the numbers cannot be reconciled with the score.
+      issues: { ...counts, warnings,
+        staleNodesPending: stale?.stale ?? null, staleNodesTotal: stale?.nodes ?? null,
         staleScanFailed: !stale },
     };
     console.log(JSON.stringify(out, null, 2));
@@ -401,6 +483,11 @@ function countStale() {
 }
 
 async function runIngestEmail(args) {
+  // Measured 2026-10-23: `ingest-email --zzz-bogus` ran the ingest and exited 0.
+  // This command scaffolds directories and writes cards, so an unhonoured flag
+  // means the operator cannot tell what actually ran. Same guard as the others.
+  const bad = checkFlags("ingest-email", args, ["--accounts", "--limit", "--root"]);
+  if (bad) return bad;
   const get = (f, dflt) => {
     const i = args.indexOf(f);
     return i >= 0 && i + 1 < args.length ? args[i + 1] : dflt;

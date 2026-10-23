@@ -61,7 +61,26 @@ function mergeJson(jsonPath, patch) {
 
 // adapters.mjs lives at <root>/bin/lib/ → lib=1×dirname, bin=2×, package root=3×.
 const HERE_LIB = dirname(fileURLToPath(import.meta.url));
-const pkgRoot = () => dirname(dirname(HERE_LIB));
+let _pkgRootOverride = null;
+
+/**
+ * Point the package lookup at an explicit tree.
+ *
+ * WHY: every adapter writer resolves heimdall.js, heimdall-hook.mjs and the
+ * extension sources from the INSTALLED package (this file's own location). That
+ * is correct in production and untestable: measured 2026-10-23, redirecting
+ * pkgRoot() to a nonexistent directory made 5 adapter tests fail, which means
+ * their verdict depended on the contents of the real checkout rather than on the
+ * code under test. A test that supplies its own tree proves the copy/merge logic
+ * instead of proving that the developer has files on disk.
+ *
+ * Production never calls this; the default resolves relative to this module.
+ */
+export function setPkgRootForTesting(root) {
+	_pkgRootOverride = root;
+}
+
+const pkgRoot = () => _pkgRootOverride ?? dirname(dirname(HERE_LIB));
 
 /** Install bin/heimdall-hook.mjs as ~/.local/bin/heimdall-hook executable shim. */
 export function installHookBinary(home = HOME()) {
@@ -98,11 +117,24 @@ function resolveCli() {
 // ---------- pi ---------------------------------------------------------------
 // pi auto-discovers extensions from ~/.pi/agent/extensions/. The heimdall npm
 // package ships kb-tools.ts / kb-search-guard.ts / kb-autosync.ts / kb-orient.ts.
-function writePi(home) {
-	// If heimdall is already installed as a pi package (pi manifest in its
-	// package.json, under ~/.pi/agent/npm or a project .pi/npm), pi loads the
-	// extensions from the package itself — copying duplicates them. Wire the
-	// rules block only.
+function writePi(home, pkgRootOverride = null) {
+	// `pkgRootOverride` exists so tests can supply the package tree instead of
+	// reading whatever happens to be on disk. Measured 2026-10-23: pointing
+	// pkgRoot() at a nonexistent directory made 5 adapter tests fail, so their
+	// verdict depended on the state of the real checkout rather than on the code
+	// under test. Production passes null and gets the real root.
+	// If heimdall is already installed as a pi package, pi loads the extensions
+	// from the package itself — copying duplicates them and the copied files
+	// collide on tool names (kb_search/kb_insert/kb_sync), which makes pi exit 1
+	// at boot. Wire the rules block only.
+	//
+	// Two install shapes must both be detected:
+	//   1. npm/git package — manifest under ~/.pi/agent/npm or ~/.pi/npm.
+	//   2. PATH package — settings.json lists the checkout directory itself, e.g.
+	//      "/Users/me/Repos/heimdall" or the same as {"source": ..., "extensions": [...]}.
+	// The path shape is the common local-dev install and was MISSED by the
+	// original npm-only check, so every `heimdall init` recreated the duplicates
+	// (root cause of the recurring boot conflict, 2026-10-23).
 	const npmRoots = [join(home, ".pi", "agent", "npm", "node_modules"), join(home, ".pi", "npm", "node_modules")];
 	for (const root of npmRoots) {
 		for (const name of ["@arihantdeva/heimdall", "heimdall"]) {
@@ -116,17 +148,48 @@ function writePi(home) {
 			} catch { /* unreadable manifest — fall through to copy */ }
 		}
 	}
-	const pkgExtensions = join(pkgRoot(), "extensions");
+	// Path/git package shape: a settings.json packages[] entry naming the checkout
+	// directory itself. pi accepts either a bare string or an object whose "source"
+	// is that path (docs/packages.md: local packages are identified by resolved
+	// absolute path). The bare-path form is the one the npm-only check missed.
+	for (const settingsPath of [join(home, ".pi", "agent", "settings.json"), join(home, ".pi", "settings.json")]) {
+		if (!existsSync(settingsPath)) continue;
+		let sources = [];
+		try {
+			sources = (JSON.parse(readFileSync(settingsPath, "utf8"))?.packages ?? [])
+				.map((e) => (typeof e === "string" ? e : e?.source))
+				.filter((s) => typeof s === "string");
+		} catch { continue; /* unreadable settings — fall through to copy */ }
+		const selfIsPackage = sources.some((s) => {
+			if (!s.startsWith("/")) return false;
+			const manifest = join(s, "package.json");
+			if (!existsSync(manifest)) return false;
+			try { return Boolean(JSON.parse(readFileSync(manifest, "utf8"))?.pi?.extensions?.length); } catch { return false; }
+		});
+		if (selfIsPackage) {
+			upsertMarkdownBlock(join(home, ".pi", "agent", "AGENTS.md"));
+			return "pi (package-managed — extensions loaded by pi, rules wired)";
+		}
+	}
+	// Not package-managed: copy is the only way to load the extensions, BUT never
+	// overwrite a file that already exists. A pre-existing copy is either the same
+	// file (harmless) or a user-local override this writer must not silently
+	// clobber. Overwriting made the copy branch destructive and hid the bug above.
+	const pkgExtensions = join(pkgRootOverride ?? pkgRoot(), "extensions");
 	const targetDir = ensure(join(home, ".pi", "agent", "extensions"));
 	const libTarget = ensure(join(targetDir, "lib"));
 	const files = ["kb-tools.ts", "kb-search-guard.ts", "kb-autosync.ts", "kb-orient.ts"];
 	const copied = [];
 	for (const f of files) {
 		const src = join(pkgExtensions, f);
-		if (existsSync(src)) { copyFileSync(src, join(targetDir, f)); copied.push(f); }
+		const dest = join(targetDir, f);
+		// Never clobber an existing file: it is either byte-identical (no-op) or a
+		// user-local override this writer must not destroy.
+		if (existsSync(src) && !existsSync(dest)) { copyFileSync(src, dest); copied.push(f); }
 	}
 	const coreSrc = join(pkgExtensions, "lib", "kb-guard-core.mjs");
-	if (existsSync(coreSrc)) copyFileSync(coreSrc, join(libTarget, "kb-guard-core.mjs"));
+	const coreDest = join(libTarget, "kb-guard-core.mjs");
+	if (existsSync(coreSrc) && !existsSync(coreDest)) copyFileSync(coreSrc, coreDest);
 	upsertMarkdownBlock(join(home, ".pi", "agent", "AGENTS.md"));
 	return "pi";
 }
@@ -312,11 +375,13 @@ export function detectHarnesses(home = HOME()) {
 	return probes.filter(([, p]) => existsSync(p)).map(([name]) => name);
 }
 
-export function installAdapter(harness, home = HOME()) {
+export function installAdapter(harness, home = HOME(), opts = {}) {
 	if (harness === "all") {
-		return Object.keys(WRITERS).map((h) => installAdapter(h, home));
+		return Object.keys(WRITERS).map((h) => installAdapter(h, home, opts));
 	}
 	const writer = WRITERS[harness];
 	if (!writer) throw new Error(`unknown harness: ${harness}. Known: ${KNOWN_HARNESSES.join(", ")}`);
-	return writer(home);
+	// Only the pi writer reads the package tree; the others are home-relative
+	// already. Forwarding it keeps one signature rather than a special case.
+	return writer(home, opts.pkgRoot ?? null);
 }

@@ -21,6 +21,17 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          # One suite fingerprints the CODE of a recorded baseline commit
+          # (bench/baselines/retrieval-30-phase4.json → tree_commit) with
+          # `git show <sha>:<path>` — the fix for a real defect where the
+          # recorded sha was an ANCESTOR of the measured code, so exact-sha
+          # pinning was replaced by a content fingerprint. That check needs the
+          # commit OBJECT, and the default fetch-depth 1 does not have it, so the
+          # suite failed on a clone that was merely shallow, not wrong. 50 is
+          # comfortably past the 7 commits between the baseline and HEAD and
+          # costs ~1.4 MiB of pack.
+          fetch-depth: 50
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -28,10 +39,20 @@ jobs:
       # packed-tarball extraction smoke test is only meaningful if it actually
       # runs — so give CI the parser the bridge needs rather than letting those
       # assertions silently skip. HEIMDALL_PYTHON is the documented override.
+      #
+      # sqlite-vec rides along for the same reason: bin/embed-index.py imports it
+      # at module scope (its own error message is "pip install sqlite-vec into
+      # ~/.heimdall/venv first"), so it is a real dependency of the product that
+      # was declared nowhere. Without it every suite that touches embed-index
+      # skips. The gate is capability-based, not presence-based: a python that
+      # imports sqlite_vec but cannot actually LOAD it — macOS's
+      # CommandLineTools sqlite3 lacks enable_load_extension — still reports
+      # false and still skips honestly, so installing it on the macOS leg is
+      # harmless and the Linux leg gains real coverage.
       - name: tree-sitter python for L2/L3 tests
         run: |
           python3 -m venv "$RUNNER_TEMP/ts-py"
-          "$RUNNER_TEMP/ts-py/bin/pip" install --quiet --upgrade pip tree-sitter tree-sitter-python
+          "$RUNNER_TEMP/ts-py/bin/pip" install --quiet --upgrade pip tree-sitter tree-sitter-python sqlite-vec
           echo "HEIMDALL_PYTHON=$RUNNER_TEMP/ts-py/bin/python3" >> "$GITHUB_ENV"
       # CI has no need for a graftd build (tests gate on a usable binary and
       # skip when absent); skip the postinstall llama.cpp/graftd build to keep

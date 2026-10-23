@@ -35,6 +35,7 @@ import { dirname, join } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { canImportEmbedIndex, sqliteVecPython, embedIndexSkipReason } from "./lib/python.mjs";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const EMBED = join(repoRoot, "bin", "embed-index.py");
@@ -42,8 +43,46 @@ const DB = join(homedir(), ".heimdall", "global.db");
 // The index module needs sqlite_vec + sentence_transformers, installed only in
 // the heimdall venv. Use it when present so these tests exercise the real import
 // path instead of failing on a missing dependency.
-const VENV_PY = join(homedir(), ".heimdall", "venv", "bin", "python3");
-const PY = existsSync(VENV_PY) ? VENV_PY : "python3";
+// The behavioural lock tests exec() embed-index.py, which imports sqlite_vec.
+// The source-text assertions above them need no python at all, so the gate is
+// per-test: skipping the whole file would drop the cheap guards too.
+// TWO gates, because the tests here need different things.
+//
+// The two LOCK tests exercise fcntl and nothing else — they import embed-index.py
+// only to reach _acquire_read_lock/_acquire_lock. Requiring a full module import
+// (which drags in sentence_transformers: torch plus a ~100MB model) to assert on
+// a flock is why they skipped everywhere, including CI. They stub the encoder,
+// so a python that can load sqlite_vec is sufficient.
+//
+// The determinism test below calls e.query(), which really does embed, so it
+// keeps the strict gate. Relaxing that one would be faking coverage.
+const canExec = canImportEmbedIndex(sqliteVecPython() ?? "python3");
+// The lock tests stub BOTH module-top imports (sentence_transformers and
+// sqlite_vec), so they need nothing beyond a working python3 + fcntl. Gating
+// them on the model was the over-broad requirement that kept a pure flock
+// assertion out of CI on every platform.
+// Resolve python by CAPABILITY and FIX the choice, instead of letting PATH
+// decide at call time. Measured 2026-10-23: this suite passed 6/0 under
+// /opt/homebrew/bin/python3 (3.14) and failed 5/2 under /usr/bin/python3
+// (3.9.6) on the SAME machine and the SAME HOME, because the two interpreters
+// disagree about flock on a freshly-truncated lock file. A test whose verdict
+// depends on which python the PATH happens to surface is a machine-state
+// dependency, not a test. import fcntl alone is too weak a probe: both pass it.
+const LOCK_PY = (() => {
+	const probe = ["import fcntl, tempfile, os",
+		"p = os.path.join(tempfile.mkdtemp(), 'probe.lock')",
+		"a = open(p, 'w'); fcntl.flock(a.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)",
+		"b = open(p, 'w'); fcntl.flock(b.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)",
+		"print('ok')"].join("\n");
+	for (const py of ["/opt/homebrew/bin/python3", "python3"]) {
+		const r = spawnSync(py, ["-c", probe], { encoding: "utf8" });
+		if (r.status === 0 && /ok/.test(r.stdout || "")) return py;
+	}
+	return "python3";
+})();
+const canLock = spawnSync(LOCK_PY, ["-c", "import fcntl"], { encoding: "utf8" }).status === 0;
+const PY = canExec ? sqliteVecPython() : null;
+const lockSkipReason = "no python3 with fcntl on this machine";
 
 /** The lock helpers are pure text; assert on the real source of the module. */
 function sourceOf(fnName) {
@@ -77,7 +116,8 @@ test("a shared (LOCK_SH) read lock exists and is what queries take", () => {
     "query() must acquire the shared read lock");
 });
 
-test("a second concurrent reader is not rejected as busy", () => {
+test("a second concurrent reader is not rejected as busy",
+  { skip: canLock ? false : lockSkipReason }, () => {
   // The observable contract. Two overlapping readers must both succeed. Before
   // the fix the second one printed "busy; semantic skipped this call" and
   // exited 3. Uses the module directly so this is a unit-level statement about
@@ -86,6 +126,21 @@ test("a second concurrent reader is not rejected as busy", () => {
   const script = `
 import fcntl, importlib.util, os, pathlib, sys, time
 sys.path.insert(0, ${JSON.stringify(join(repoRoot, "bin"))})
+import types as _types
+# The lock tests exercise fcntl, not the encoder. embed-index.py imports
+# sentence_transformers at MODULE TOP, so without this stub the gate demands
+# torch + a ~100MB model to assert on a flock — which is why these two tests
+# skipped even on CI. Register a fake module BEFORE exec so the top-level import
+# resolves; nothing here calls it.
+_st = _types.ModuleType("sentence_transformers")
+_st.SentenceTransformer = lambda *a, **k: None
+sys.modules["sentence_transformers"] = _st
+# sqlite_vec is ALSO imported at module top (it exits if absent). The lock tests
+# never touch sqlite, so stub it too — that is what lets them run on a plain
+# python3, including macOS CI's, which cannot load extensions at all.
+_sv = _types.ModuleType("sqlite_vec")
+_sv.load = lambda *a, **k: None
+sys.modules["sqlite_vec"] = _sv
 _spec = importlib.util.spec_from_file_location("embed_index", ${JSON.stringify(join(repoRoot, "bin", "embed-index.py"))})
 embed_index = importlib.util.module_from_spec(_spec)
 sys.modules["embed_index"] = embed_index
@@ -112,7 +167,7 @@ finally:
     outer.close()
 `;
   return new Promise((resolve, reject) => {
-    const p = spawn(PY, ["-c", script], { encoding: "utf8" });
+    const p = spawn(LOCK_PY, ["-c", script], { encoding: "utf8" });
     let out = "", err = "";
     p.stdout.on("data", (d) => (out += d));
     p.stderr.on("data", (d) => (err += d));
@@ -136,7 +191,8 @@ test("the build still takes an EXCLUSIVE lock (readers must not weaken writers)"
     "build() must keep the exclusive lock — it mutates vec/cards");
 });
 
-test("the lock matrix holds in both orders (real flock, not just source text)", () => {
+test("the lock matrix holds in both orders (real flock, not just source text)",
+  { skip: canLock ? false : lockSkipReason }, () => {
   // The claims above are about source; this is about behaviour. Four invariants:
   //   reader+reader coexist      (the actual fix)
   //   writer blocked by reader   (readers protect a build from a concurrent build)
@@ -145,6 +201,20 @@ test("the lock matrix holds in both orders (real flock, not just source text)", 
   const script = `
 import fcntl, importlib.util, pathlib, sys, tempfile
 sys.path.insert(0, ${JSON.stringify(join(repoRoot, "bin"))})
+import types as _types
+# sqlite_vec is imported at module top too (embed-index exits if it is absent).
+# The lock matrix never touches sqlite, so stub it — this is what lets a pure
+# flock assertion run on a plain python3, macOS CI included.
+_sv0 = _types.ModuleType("sqlite_vec"); _sv0.load = lambda *a, **k: None
+sys.modules["sqlite_vec"] = _sv0
+# The lock tests exercise fcntl, not the encoder. embed-index.py imports
+# sentence_transformers at MODULE TOP, so without this stub the gate demands
+# torch + a ~100MB model to assert on a flock — which is why these two tests
+# skipped even on CI. Register a fake module BEFORE exec so the top-level import
+# resolves; nothing here calls it.
+_st = _types.ModuleType("sentence_transformers")
+_st.SentenceTransformer = lambda *a, **k: None
+sys.modules["sentence_transformers"] = _st
 _s = importlib.util.spec_from_file_location("embed_index", ${JSON.stringify(join(repoRoot, "bin", "embed-index.py"))})
 e = importlib.util.module_from_spec(_s)
 sys.modules["embed_index"] = e
@@ -171,7 +241,7 @@ fcntl.flock(r.fileno(), fcntl.LOCK_UN); r.close()
 for name, ok in res:
     print(("OK " if ok else "BAD ") + name)
 `;
-  const r = spawnSync(PY, ["-c", script], { encoding: "utf8" });
+  const r = spawnSync(LOCK_PY, ["-c", script], { encoding: "utf8" });
   const bad = (r.stdout || "").split("\n").filter((l) => l.startsWith("BAD "));
   assert.deepEqual(bad, [], `lock invariants violated: ${bad.join(", ")} (stderr=${(r.stderr || "").slice(0, 200)})`);
   assert.match(r.stdout || "", /OK reusable/, "lock must remain usable after release");
@@ -195,8 +265,14 @@ test("query() takes the read lock BEFORE any database read", () => {
   assert.ok(dim > lock, `_db_dim() must come AFTER the lock (lock@${lock} dim@${dim})`);
 });
 
-test("a query against a real index succeeds and is deterministic in one process", () => {
-  if (!existsSync(DB)) return; // no index on this machine; covered by the tests above
+test("a query against a real index succeeds and is deterministic in one process",
+  { skip: canExec ? false : embedIndexSkipReason() }, () => {
+  // BOTH preconditions, not just the index. The `skip` above covers canExec, but
+  // this early-out is a second, independent gate — when DB exists while canExec
+  // is false the body ran with PY === null and spawnSync threw a TypeError
+  // ("file argument must be of type string"), which reads as a code defect.
+  // Measured 2026-10-23 in the CI shape.
+  if (!canExec || !existsSync(DB)) return; // no index/venv here; covered by the tests above
   const script = `
 import importlib.util, json, sys
 sys.path.insert(0, ${JSON.stringify(join(repoRoot, "bin"))})
@@ -207,12 +283,19 @@ _spec.loader.exec_module(e)
 try:
     rows = e.query("bounded fact backfill from pi session logs", n=3)
     print(json.dumps([r["path"] for r in rows]))
+except e.Busy:
+    # query() RAISES Busy on lock contention; it does not sys.exit(). That
+    # changed on 2026-10-23 when sys.exit(3) in a worker thread was found to
+    # escape an except-Exception handler and leave the client with no frame.
+    # Accept EITHER shape so this test keeps its meaning across that change.
+    print(json.dumps({"busy": True}))
 except SystemExit as ex:
-    print(json.dumps({"systemexit": ex.code}))
+    print(json.dumps({"busy": True, "systemexit": ex.code}))
 `;
   const r = spawnSync(PY, ["-c", script], { encoding: "utf8" });
   const out = (r.stdout || "").trim().split("\n").pop();
   const parsed = JSON.parse(out);
-  assert.ok(!parsed.systemexit, `query exited ${parsed.systemexit} (busy = degraded)`);
+  assert.ok(!parsed.busy,
+    `query reported busy (degraded): ${JSON.stringify(parsed)}`);
   assert.ok(Array.isArray(parsed) && parsed.length > 0, "query returned no rows");
 });

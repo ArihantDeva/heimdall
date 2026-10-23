@@ -251,10 +251,32 @@ fi
 `;
   const tail = src.slice(src.indexOf('if [ -z "$HEIMDALL_CMD" ]; then'));
   const body = tail.slice(0, tail.indexOf('HEALTH_JSON='));
-  const r = spawnSync("bash", ["-c", `SCRIPT_DIR=/nonexistent\n${harness}\n${body}`], {
-    encoding: "utf8", timeout: 60_000,
-    env: { ...process.env, PATH: "/usr/bin:/bin" },
-  });
+  // The branch under test is "no CLI, but an index EXISTS" -> FAIL. That
+  // precondition has to be CREATED, not inherited: kb-health.sh decides by
+  // probing $HEIMDALL_HOME (then $HOME) for global.db or journal.db, so on a
+  // machine that happens to have an index the branch reports FAIL and the test
+  // passes — and on a clean machine (every CI runner) it correctly reports
+  // "HEALTHY (no index)", which this test then flags as a fail-open regression.
+  // The test was measuring the operator's disk, not the script. A private
+  // sandbox with one index file makes the precondition explicit and identical
+  // everywhere.
+  const sandbox = mkdtempSync(join(tmpdir(), "heimdall-doctor-nocli-"));
+  mkdirSync(join(sandbox, ".heimdall"), { recursive: true });
+  writeFileSync(join(sandbox, ".heimdall", "global.db"), "");
+  let r;
+  try {
+    r = spawnSync("bash", ["-c", `SCRIPT_DIR=/nonexistent\n${harness}\n${body}`], {
+      encoding: "utf8", timeout: 60_000,
+      env: {
+        ...process.env, PATH: "/usr/bin:/bin",
+        HEIMDALL_HOME: sandbox,
+        HOME: sandbox,
+        HEIMDALL_DB: "",
+      },
+    });
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
   const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
   assert.doesNotMatch(out, /^\s*HEALTHY\s*$/m,
     `an unverifiable index must never be reported as healthy.\n--- output ---\n${out}`);

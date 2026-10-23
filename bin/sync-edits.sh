@@ -18,8 +18,20 @@ set -u
 STATE="$HOME/.graft/.last-sync"
 DRY=0; FULL=0
 for a in "$@"; do
-  [ "$a" = "--dry-run" ] && DRY=1
-  [ "$a" = "--full" ] && FULL=1
+  case "$a" in
+    --dry-run) DRY=1 ;;
+    --full) FULL=1 ;;
+    *)
+      # A typo'd flag must not silently become the real thing. Measured
+      # 2026-10-23: `sync-edits.sh --dry-runn` fell through this loop, DRY stayed
+      # 0, and the run proceeded past the dry-run branch to actually hint paths
+      # and ADVANCE the durable high-water mark in $STATE — a rehearsal the
+      # operator believes is safe, performing permanent work.
+      echo "sync: unknown option: $a" >&2
+      echo "sync: usage: sync-edits.sh [--dry-run] [--full]" >&2
+      exit 2
+      ;;
+  esac
 done
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,7 +50,28 @@ fi
 
 SINCE=0; [ -f "$STATE" ] && SINCE=$(cat "$STATE" 2>/dev/null || echo 0)
 [ "$SINCE" = 0 ] && SINCE=$(( $(date +%s) - 7*86400 ))
-REF=$(mktemp); touch -t "$(date -r "$SINCE" +%Y%m%d%H%M.%S)" "$REF" 2>/dev/null
+# Portable epoch -> touch stamp. `date -r <epoch>` is BSD; GNU reads `-r` as
+# --reference=FILE, so on any machine with GNU coreutils in front (measured here:
+# GNU 9.11 on macOS, and every ubuntu CI runner) this line failed silently under
+# 2>/dev/null and left REF "now". --full=false then compared against the WRONG
+# timestamp and, worse, $SINCE=0's seven-day default window was never applied.
+# Try each dialect and, if all fail, fall back to a stamp that errs toward
+# scanning MORE (an older reference), never fewer.
+_stamp() {
+  local e=$1
+  # BSD: date -r <epoch>       GNU: date -d @<epoch>
+  date -r "$e" +%Y%m%d%H%M.%S 2>/dev/null \
+    || date -d "@$e" +%Y%m%d%H%M.%S 2>/dev/null
+}
+REF=$(mktemp)
+STAMP=$(_stamp "$SINCE")
+if [ -n "$STAMP" ]; then
+  touch -t "$STAMP" "$REF" 2>/dev/null || rm -f "$REF" 2>/dev/null
+fi
+if [ ! -f "$REF" ]; then
+  echo "sync: WARN could not set the since-reference from $SINCE; scanning ALL logs" >&2
+  FULL=1
+fi
 
 # One parser, used for both modes — the two copies that used to differ only in
 # the find predicate had already drifted apart once.
@@ -62,11 +95,31 @@ for f in sys.argv[1:]:
 PY
 
 LIST=$(mktemp)
+# CAPTURE find's EXIT STATUS. A permission error on any scanned directory makes
+# find exit 1 while printing nothing, which is indistinguishable from "no logs
+# changed" — and that false negative is not harmless here: the run then advances
+# $STATE, so the scans it missed are treated as already-hinted and those edits
+# are never seen again. Measured 2026-10-23 (chmod 000 on a subdirectory:
+# `find` status 1, zero matches). Same class as a fixed bug in kb-rehome.sh.
+SCAN=$(mktemp)
 if [ "$FULL" = 1 ]; then
-  find "$SESSIONS" -name '*.jsonl' -print0 2>/dev/null
+  find "$SESSIONS" -name '*.jsonl' -print0 2>"$SCAN.err" > "$SCAN"
 else
-  find "$SESSIONS" -name '*.jsonl' -newer "$REF" -print0 2>/dev/null
-fi | xargs -0 python3 -c "$PARSE" 2>/dev/null | sort -u > "$LIST"
+  find "$SESSIONS" -name '*.jsonl' -newer "$REF" -print0 2>"$SCAN.err" > "$SCAN"
+fi
+FIND_RC=$?
+if [ "$FIND_RC" -ne 0 ]; then
+  # Do NOT advance $STATE. Report the directories we could not read so the cause
+  # is fixable rather than invisible.
+  echo "sync: ERROR scanning $SESSIONS (exit $FIND_RC) — state NOT advanced, so the" >&2
+  echo "      unscanned logs will be retried next run. Unreadable paths:" >&2
+  sed -n '1,5p' "$SCAN.err" >&2 || true
+  rm -f "$SCAN" "$SCAN.err" "$LIST" "$REF"
+  exit 1
+fi
+rm -f "$SCAN.err"
+xargs -0 -r python3 -c "$PARSE" < "$SCAN" 2>/dev/null | sort -u > "$LIST"
+rm -f "$SCAN"
 
 n=$(wc -l < "$LIST" | tr -d ' ')
 if [ "$DRY" = 1 ]; then

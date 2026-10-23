@@ -153,6 +153,16 @@ def _with_deadline(fn, seconds: float):
             box["value"] = fn()
         except BaseException as e:  # surface even the odd exception to the caller
             box["error"] = e
+        finally:
+            # ALWAYS mark completion. Measured 2026-10-23: if fn() raised
+            # something that escaped the except above (it used to: SystemExit
+            # from embed-index.query(), before that was fixed to raise Busy),
+            # NEITHER key was set, the thread simply ended, and the caller then
+            # evaluated box["value"] -> KeyError: 'value'. The client got
+            # {"error": "KeyError: 'value'"} -- a message about a dict lookup,
+            # naming nothing about the real cause. A missing result must be
+            # reported as a missing result.
+            box.setdefault("finished", True)
 
     t = threading.Thread(target=run, daemon=True)
     t.start()
@@ -164,6 +174,13 @@ def _with_deadline(fn, seconds: float):
         )
     if "error" in box:
         raise box["error"]
+    if "value" not in box:
+        # The worker thread ended without producing a value and without an
+        # exception we caught. Never KeyError here: say what actually happened.
+        raise RuntimeError(
+            f"{fn} produced no result and raised nothing catchable "
+            f"(worker thread ended silently)"
+        )
     return box["value"]
 
 
@@ -334,6 +351,11 @@ def lexical_hits(ei, q: str, n: int, scope: str | None = None) -> list:
         c.close()
 
 
+# "ok" | "degraded" — set by fused_search when the semantic leg is skipped, and
+# read by handle_request to put the coverage into the reply.
+_SEM_COVERAGE = "ok"
+
+
 def fused_search(ei, q: str, n: int = 6, related: bool = False, scope: str | None = None) -> list:
     """Lexical + semantic in one warm process, ranked together.
 
@@ -341,6 +363,8 @@ def fused_search(ei, q: str, n: int = 6, related: bool = False, scope: str | Non
     the same +3.0 offset the shell used, so ordering behaviour is unchanged for
     callers while the source of both legs is now a single warm process.
     """
+    global _SEM_COVERAGE
+    _SEM_COVERAGE = "ok"
     hits = lexical_hits(ei, q, n, scope=scope)
     try:
         sem = _semantic_hits(ei, q, n=n, related=related)
@@ -356,6 +380,17 @@ def fused_search(ei, q: str, n: int = 6, related: bool = False, scope: str | Non
                 "related": bool(h.get("related")),
             })
     except Exception as e:
+        # DEGRADED, AND SAY SO IN THE REPLY. The stderr warning below is a
+        # human-facing side channel; a programmatic caller that talks to this
+        # socket never sees it, so before this the reply was identical to a
+        # healthy one that simply had no semantic hits. Measured 2026-10-23:
+        # running the suite's 65 files concurrently pushed the semantic leg past
+        # its deadline, fused_search returned LEXICAL-ONLY hits with ok:true, and
+        # the caller could not tell the difference between "the semantic leg
+        # found nothing" and "the semantic leg never ran". That is a partial
+        # answer presented as a complete one. `coverage` carries the distinction
+        # into the reply.
+        _SEM_COVERAGE = "degraded"
         print(f"SEMANTIC_ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         print("WARN: semantic layer failed — results are LEXICAL-ONLY (sem_coverage=degraded)", file=sys.stderr)
     # Dedupe by path, keep the best-scoring leg, then order.
@@ -400,7 +435,21 @@ def handle_request(ei, req):
         return {"ok": False, "error": "request must be a JSON object"}, False
     op = req.get("op")
     if op == "ping":
-        return {"ok": True, "pid": os.getpid(), "model": getattr(ei, "MODEL", "?")}, False
+        # `warm` reports whether the vector snapshot is USABLE, which is a
+        # different question from "is the process alive". Measured 2026-10-23:
+        # the model warms in 0.8s and the socket binds immediately, but the
+        # snapshot for 135,490 x 768 vectors (416MB) is built on a background
+        # thread and takes ~5s more. A caller that pings, sees ok, and then issues
+        # a search can therefore land on the COLD fallback — measured 4815ms
+        # against a 10s deadline. There was no way to ask, so "warm" was an
+        # assumption rather than a fact. Report it.
+        return {
+            "ok": True,
+            "pid": os.getpid(),
+            "model": getattr(ei, "MODEL", "?"),
+            "warm": _VEC["mat"] is not None,
+            "loading": bool(_VEC["loading"]),
+        }, False
     if op in ("query", "search"):
         q = req.get("q")
         if not isinstance(q, str) or not q.strip():
@@ -419,10 +468,21 @@ def handle_request(ei, req):
             hits = _with_deadline(lambda: _semantic_hits(ei, q, n=n, related=related), SEARCH_DEADLINE_S)
             if scope:
                 hits = [h for h in hits if scope in (h.get("path") or "")]
-            return {"ok": True, "hits": hits}, False
+            # `n` is a CAP on the reply, not a hint. Neither producer honours it
+            # on every path: embed-index.query() overfetches n*OVERFETCH rows and
+            # says "let the caller truncate", and a `related` request appends
+            # same-directory siblings on top. Measured 2026-10-23: the first call
+            # after a worker start returned 48 hits for n=3, and every later call
+            # returned 3 — so the answer shrank as the worker warmed and the same
+            # query appeared to change its mind. kb-search.sh passes --related on
+            # every semantic call, so this was the normal path, not an edge case.
+            return {"ok": True, "hits": hits[:n]}, False
         # op == "search": fused lexical + semantic, in ONE process.
         hits = _with_deadline(lambda: fused_search(ei, q, n=n, related=related, scope=scope), SEARCH_DEADLINE_S)
-        return {"ok": True, "hits": hits}, False
+        # A fused reply is only complete if BOTH legs ran. Callers use this to
+        # decide whether to fall back; without it a degraded answer is
+        # indistinguishable from a complete one.
+        return {"ok": True, "hits": hits, "sem_coverage": _SEM_COVERAGE}, False
     return {"ok": False, "error": f"unknown op: {op!r} (valid: ping, query, search, stop)"}, False
 
 
@@ -545,9 +605,24 @@ def serve(sock_path: pathlib.Path, idle_timeout: float) -> int:
                     else:
                         try:
                             reply, do_stop = handle_request(ei, req)
-                        except Exception as e:  # a bad request must not kill the worker
-                            log(f"request failed: {type(e).__name__}: {e}")
-                            reply, do_stop = {"ok": False, "error": f"{type(e).__name__}: {e}"}, False
+                        except BaseException as e:
+                            # BaseException, not Exception. Measured 2026-10-23:
+                            # embed-index.query() did sys.exit(3) on lock
+                            # contention. SystemExit derives from BaseException,
+                            # so it escaped this handler, the thread died before
+                            # sendall(), and the client received NO FRAME AT ALL
+                            # -- it sat on its socket until its own timeout
+                            # (90-120s) and then reported a timeout, which reads
+                            # like a hung daemon rather than "busy, degraded".
+                            # A request must always produce exactly one reply.
+                            if isinstance(e, SystemExit):
+                                log(f"request exited {e.code} (treated as busy)")
+                                reply = {"ok": False, "busy": True,
+                                         "error": "degraded: semantic leg unavailable (busy)"}
+                            else:
+                                log(f"request failed: {type(e).__name__}: {e}")
+                                reply = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+                            do_stop = False
                     last_activity = time.time()
                     conn.sendall((json.dumps(reply) + "\n").encode())
                     if do_stop:
@@ -593,7 +668,15 @@ def main(argv: list[str]) -> int:
     args = ap.parse_args(argv)
     try:
         return serve(pathlib.Path(args.socket).expanduser(), args.idle_timeout)
-    except Exception as e:
+    except BaseException as e:
+        # BaseException, not Exception. Measured 2026-10-23: anything that
+        # raised SystemExit (embed-index.py's module-top `sys.exit` on a missing
+        # package, or query()'s old sys.exit(3)) skipped this branch entirely,
+        # so the one place that explains a startup failure printed nothing and
+        # the worker died with a bare string. A fatal path must always be logged.
+        if isinstance(e, SystemExit):
+            log(f"fatal: SystemExit({e.code!r}) during startup")
+            return e.code if isinstance(e.code, int) else 1
         log(f"fatal: {type(e).__name__}: {e}")
         return 1
 

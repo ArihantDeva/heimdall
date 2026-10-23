@@ -20,10 +20,11 @@ import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import test from "node:test";
+import { plainPython } from "./lib/python.mjs";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-const VENV_PY = join(homedir(), ".heimdall", "venv", "bin", "python3");
-const PY = existsSync(VENV_PY) ? VENV_PY : "python3";
+// embed_walker is stdlib-only, so a plain python3 is sufficient here.
+const PY = plainPython();
 
 /** Paths (HOME-relative) with the verdict BOTH predicates must reach. */
 const CORPUS = [
