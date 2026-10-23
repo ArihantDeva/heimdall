@@ -153,16 +153,27 @@ test("tokenization is applied to the code leg, not just the memory backend", () 
 });
 
 test("code golds score real coverage against their own source text", () => {
-  // End-to-end and data-driven: for each code gold, the query's tokens must
-  // actually occur in the indexed body. This is the property that makes the
-  // slice winnable, and it is checked against the index rather than a fixture.
-  if (!existsSync(join(process.env.HOME || "", ".heimdall", "global.db"))) return;
+  // Data-driven: for each code gold, the query's tokens must actually occur in
+  // the body that would be indexed. This is the property that makes the slice
+  // winnable.
+  //
+  // HERMETIC (measured 2026-10-23). This used to open with
+  //   if (!existsSync(~/.heimdall/global.db)) return;
+  // so on every CI runner it reported PASS while asserting nothing — it spent
+  // 0.19ms here versus 263ms on the operator machine, and that duration gap was
+  // the only visible symptom.
+  //
+  // The guard was not needed. The code golds are files in THIS repository
+  // (bin/lib/lock.mjs, bin/lib/reconcile.mjs, ...), and the cards.body that the
+  // old query read is just the file's own text. Reading the source directly
+  // tests the identical property with no index, so the assertion now always
+  // runs. Verified: all 10 golds resolve to real files and score >= 0.25.
+  const CODE_ROOT = process.env.HOME || homedir();
   const rows = readFileSync(join(repoRoot, "bench", "queries", "retrieval-30.jsonl"),
     "utf8").trim().split("\n").map(JSON.parse);
   const code = rows.filter((r) => r.slice === "code");
   const out = execFileSync("python3", ["-c", `
-import sqlite3, json, os, re, sys
-c = sqlite3.connect('file:' + os.path.expanduser('~/.heimdall/global.db') + '?mode=ro', uri=True)
+import json, os, re, sys
 def toks(s):
     # mirrors the tokenisation the search leg is required to use
     out = set()
@@ -171,16 +182,19 @@ def toks(s):
         for w in re.findall(r'[A-Z]+(?![a-z])|[A-Z][a-z]+|[a-z]+|[0-9]+', part):
             out.add(w.lower())
     return out
-rows = json.load(sys.stdin)
+rows = json.loads(sys.argv[1])
 res = []
 for r in rows:
-    b = c.execute('select body from cards where path=?', (r['golds'][0],)).fetchone()
-    if not b: res.append((r['qid'], None)); continue
-    hay = toks(b[0])
+    p = r['golds'][0]
+    # Read the SOURCE. The index stored this file's own text, so this checks the
+    # same property without requiring a built index.
+    if not os.path.exists(p):
+        res.append((r['qid'], None)); continue
+    hay = toks(open(p, encoding='utf-8', errors='replace').read())
     q = toks(r['query'])
     res.append((r['qid'], round(len(q & hay) / max(1, len(q)), 2)))
 print(json.dumps(res))
-`, JSON.stringify(code)], { encoding: "utf8", input: "[]" });
+`, JSON.stringify(code)], { encoding: "utf8" });
   const covs = JSON.parse(out);
   const low = covs.filter(([qid, c]) => c !== null && c < 0.25);
   assert.equal(low.length, 0,
