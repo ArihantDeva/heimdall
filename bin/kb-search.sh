@@ -34,6 +34,21 @@ USAGE
 }
 
 if [ $# -eq 0 ]; then usage; exit 2; fi
+# A LEADING FLAG IS NOT A QUERY. Measured 2026-10-23: `kb-search --zzz-bogus`
+# exited 0 and returned results, because Q="$1" took the flag as the query and
+# the following `shift` left the option loop with nothing to reject — the
+# unknown-option guard below was unreachable for that position. A user who typed
+# `search --scope x` (forgetting the query) got either results for the flag or a
+# confusing complaint about "x". `--` ends options so a query may still start
+# with a dash.
+if [ "${1:-}" = "--" ]; then
+	shift
+	[ $# -eq 0 ] && { usage; exit 2; }
+elif [ "${1#-}" != "$1" ]; then
+	echo "error: missing query — '$1' looks like an option (use -- before a query that starts with '-')" >&2
+	usage
+	exit 2
+fi
 Q="$1"
 # The empty string must be rejected explicitly: `${1:?}` cannot tell "set but
 # empty" from "set and non-empty", so `kb-search "" -n 2` ran the whole search

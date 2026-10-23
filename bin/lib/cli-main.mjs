@@ -412,6 +412,11 @@ function countStale() {
 }
 
 async function runIngestEmail(args) {
+  // Measured 2026-10-23: `ingest-email --zzz-bogus` ran the ingest and exited 0.
+  // This command scaffolds directories and writes cards, so an unhonoured flag
+  // means the operator cannot tell what actually ran. Same guard as the others.
+  const bad = checkFlags("ingest-email", args, ["--accounts", "--limit", "--root"]);
+  if (bad) return bad;
   const get = (f, dflt) => {
     const i = args.indexOf(f);
     return i >= 0 && i + 1 < args.length ? args[i + 1] : dflt;
