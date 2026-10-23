@@ -88,6 +88,39 @@ def count_only():
     return 0
 
 
+# One scan may not remove more than this fraction of the graph. See the
+# circuit breaker in main().
+MASS_DELETE_FRACTION = 0.5
+
+
+def _definitely_absent(path: str) -> bool:
+    """True only when the path is PROVABLY gone.
+
+    os.path.exists() returns False for a permission error, an I/O error or a
+    dead symlink as well as for a genuinely missing file. On 2026-10-23 that
+    mattered: a node whose file merely sat under an unreadable directory was
+    counted dead, and a dead node is deleted with `graft delete` — irreversible,
+    with the file still on disk.
+
+    Reproduced: chmod 000 on a parent dir makes os.path.exists() false while the
+    file exists. Same class as the unchecked find, the unreadable vector
+    dimension and the failed stat() found the same day: a destructive branch
+    gated on a signal that cannot tell "absent" from "could not look".
+
+    So: stat() first. ENOENT is absence. Anything else — EACCES, EIO, ELOOP,
+    ENOTDIR on a broken parent — is UNKNOWN, and unknown must never mean delete.
+    """
+    try:
+        os.stat(path)
+        return False          # it is there
+    except FileNotFoundError:
+        return True           # provably absent
+    except OSError:
+        return False          # could not determine: treat as ALIVE (keep node)
+    except ValueError:
+        return False          # malformed path: do not delete on a parse failure
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if "--count-only" in argv:
@@ -96,12 +129,12 @@ def main(argv=None):
     rows = db.execute("SELECT hex(id), title, body FROM nodes").fetchall()
     db.close()
     total = len(rows)
-    stale = removed = rebuilt = ambiguous = unresolved = 0
+    stale = removed = rebuilt = ambiguous = unresolved = kept_mass = 0
     tmpdir = tempfile.mkdtemp(prefix="kbrh-")
 
-    for id_hex, title, body in rows:
+    for i, (id_hex, title, body) in enumerate(rows):
         paths = extract_paths(body or title)
-        dead = [p for p in paths if not os.path.exists(p)]
+        dead = [p for p in paths if _definitely_absent(p)]
         alive = [p for p in paths if os.path.exists(p)]
         # only self-heal when ALL anchors are dead — a node with one live path
         # is still reachable; deleting it would lose the live reference
@@ -140,6 +173,24 @@ def main(argv=None):
                 f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} | {id_hex} | {path} -> {newpath}\n")
             print(f"REBUILT  {path} -> {newpath}\n         {title[:70]}")
         else:
+            # CIRCUIT BREAKER (2026-10-23). `graft delete` is irreversible and
+            # this loop had no bound of any kind: every node whose paths looked
+            # dead was deleted, silently, in one pass. A wrong DB path, a
+            # half-mounted volume, or an unreadable tree makes every path look
+            # dead at once, and the whole graph goes. Same rule the SQL pruner
+            # now enforces: refuse a mass deletion, keep the nodes, say so.
+            planned = removed + 1
+            if total and planned / total > MASS_DELETE_FRACTION \
+                    and os.environ.get("HEIMDALL_PRUNE_ALLOW_MASS") != "1":
+                kept_mass += len(rows) - i
+                print(f"\nREFUSING to delete {planned}/{total} nodes "
+                      f"(> {MASS_DELETE_FRACTION:.0%} of the graph) in one scan. "
+                      f"That ratio usually means the tree was not visible "
+                      f"(wrong HOME, unmounted volume, permissions), not that the "
+                      f"files are gone. NO further nodes were deleted and none of "
+                      f"the remaining {len(rows) - i} were examined. "
+                      f"Set HEIMDALL_PRUNE_ALLOW_MASS=1 to force.", file=sys.stderr)
+                break
             removed += 1
             if out == "AMBIGUOUS":
                 ambiguous += 1
@@ -149,7 +200,8 @@ def main(argv=None):
             subprocess.run(["graft", "delete", id_hex], capture_output=True, text=True, timeout=15)
             print(f"REMOVED  {path} [{out}]  {title[:60]}")
 
-    print(f"\n== scan done: {total} nodes | {stale} stale | {rebuilt} rehomed | {removed} removed | {ambiguous} ambiguous | {unresolved} unresolved (search failed, kept)")
+    print(f"\n== scan done: {total} nodes | {stale} stale | {rebuilt} rehomed | {removed} removed | {ambiguous} ambiguous | {unresolved} unresolved (search failed, kept)"
+          + (f" | {kept_mass} KEPT (mass-delete refused)" if kept_mass else ""))
 
 
 if __name__ == "__main__":
