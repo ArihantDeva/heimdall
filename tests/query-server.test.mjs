@@ -12,7 +12,8 @@
 // node:test is the runner package.json actually invokes; see tests/lib/harness.mjs
 import { describe, it, expect, beforeAll, afterAll } from "./lib/harness.mjs";
 import { spawn } from "node:child_process";
-import { existsSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,7 +26,13 @@ const VENV_PY = join(homedir(), ".heimdall", "venv", "bin", "python3");
 // beforeAll/afterAll, which killed the operator's live warm worker and made the
 // suite pass only when nothing else was running. Tests must never manage the
 // real socket.
-const SOCK = join(homedir(), ".heimdall", "query-server-test.sock");
+// Sockets live in a PRIVATE temp dir, never the operator's ~/.heimdall.
+// Measured 2026-10-23: this suite unlinkSync'd query-server-test.sock inside the
+// live state dir, so two workers (this suite's and the operator's own daemon)
+// could contend for one location. Isolating makes the file unreachable by
+// anything but this process.
+const SOCK_DIR = mkdtempSync(join(tmpdir(), "heimdall-qserver-"));
+const SOCK = join(SOCK_DIR, "query-server-test.sock");
 
 // The semantic worker needs the heimdall venv + a built index. Absent either,
 // this suite cannot prove anything real, so it must SKIP loudly rather than
@@ -211,4 +218,8 @@ describe.skipIf(!canRun)("query-server: stale lock does not lock the worker out"
 			try { if (existsSync(lock)) unlinkSync(lock); } catch {}
 		}
 	}, 240_000);
+});
+
+afterAll(() => {
+	try { rmSync(SOCK_DIR, { recursive: true, force: true }); } catch {}
 });

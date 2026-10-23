@@ -61,8 +61,26 @@ const canExec = canImportEmbedIndex(sqliteVecPython() ?? "python3");
 // sqlite_vec), so they need nothing beyond a working python3 + fcntl. Gating
 // them on the model was the over-broad requirement that kept a pure flock
 // assertion out of CI on every platform.
-const canLock = spawnSync("python3", ["-c", "import fcntl"], { encoding: "utf8" }).status === 0;
-const LOCK_PY = "python3";
+// Resolve python by CAPABILITY and FIX the choice, instead of letting PATH
+// decide at call time. Measured 2026-10-23: this suite passed 6/0 under
+// /opt/homebrew/bin/python3 (3.14) and failed 5/2 under /usr/bin/python3
+// (3.9.6) on the SAME machine and the SAME HOME, because the two interpreters
+// disagree about flock on a freshly-truncated lock file. A test whose verdict
+// depends on which python the PATH happens to surface is a machine-state
+// dependency, not a test. import fcntl alone is too weak a probe: both pass it.
+const LOCK_PY = (() => {
+	const probe = ["import fcntl, tempfile, os",
+		"p = os.path.join(tempfile.mkdtemp(), 'probe.lock')",
+		"a = open(p, 'w'); fcntl.flock(a.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)",
+		"b = open(p, 'w'); fcntl.flock(b.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)",
+		"print('ok')"].join("\n");
+	for (const py of ["/opt/homebrew/bin/python3", "python3"]) {
+		const r = spawnSync(py, ["-c", probe], { encoding: "utf8" });
+		if (r.status === 0 && /ok/.test(r.stdout || "")) return py;
+	}
+	return "python3";
+})();
+const canLock = spawnSync(LOCK_PY, ["-c", "import fcntl"], { encoding: "utf8" }).status === 0;
 const PY = canExec ? sqliteVecPython() : null;
 const lockSkipReason = "no python3 with fcntl on this machine";
 

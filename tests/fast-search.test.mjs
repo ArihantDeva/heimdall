@@ -16,17 +16,33 @@
 // instead of silently returning a half-empty answer.
 // node:test is the runner package.json actually invokes; see tests/lib/harness.mjs
 import { describe, it, expect, beforeAll, afterAll } from "./lib/harness.mjs";
-import { spawn } from "node:child_process";
-import { existsSync, unlinkSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createConnection } from "node:net";
+import { plainPython } from "./lib/python.mjs";
+
+const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const assert = (await import("node:assert/strict")).default;
+const python = plainPython();
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SERVER = join(REPO, "bin", "query-server.py");
 const VENV_PY = join(homedir(), ".heimdall", "venv", "bin", "python3");
-const SOCK = join(homedir(), ".heimdall", "fastsearch-test.sock");
+// Sockets live in a PRIVATE temp dir, never in the operator's ~/.heimdall.
+//
+// Measured 2026-10-23: these were written to ~/.heimdall/fastsearch-test.sock
+// and ~/.heimdall/fastsearch-deadline.sock, and the suites unlinkSync those
+// paths. That made two things true at once: a test could delete files inside
+// the operator's live state dir, and a leftover socket from a killed worker
+// made the NEXT run wait out a 120s startup budget and then fail. It reproduced
+// as pass-alone / fail-in-full-suite, which is the signature of shared mutable
+// state rather than a code defect. A temp dir cannot be shared with anything.
+const SOCK_DIR = mkdtempSync(join(tmpdir(), "heimdall-fastsearch-"));
+const SOCK = join(SOCK_DIR, "fastsearch-test.sock");
 const canRun = existsSync(VENV_PY) && existsSync(join(homedir(), ".heimdall", "global.db"));
 
 // The budget the task asks for. A cold machine or a first-call page-cache miss
@@ -52,6 +68,10 @@ function rpc(payload, { timeoutMs = 120_000 } = {}) {
 }
 
 let child = null;
+
+afterAll(() => {
+	try { rmSync(SOCK_DIR, { recursive: true, force: true }); } catch {}
+});
 
 describe.skipIf(!canRun)("fast search: fused lexical+semantic, sub-200ms", () => {
 	beforeAll(async () => {
@@ -157,11 +177,49 @@ describe.skipIf(!canRun)("fast search: fused lexical+semantic, sub-200ms", () =>
 // broken (DB lock, mmap thrash, dead model). Silence is the unacceptable
 // outcome — during this work a probe against a dead socket hung the agent with
 // nothing printed at all.
+// ── the deadline property, without needing a model ──────────────────────
+//
+// The skip above needs a real venv + built index because it drives a live
+// worker. But the property it protects -- an over-deadline request fails fast
+// instead of hanging -- lives entirely in query-server.py's _with_deadline,
+// and that module imports WITHOUT an encoder (the encoder is loaded lazily,
+// inside _load_encoder). So the safety net can be certified on any python3.
+//
+// Added 2026-10-23: without this, the only coverage of "refuses to hang" was
+// a test that skipped on every CI runner -- i.e. the one guarantee a daemon
+// most needs was never exercised in CI.
+describe("fast search: the deadline actually fails fast (no encoder needed)", () => {
+	it("_with_deadline raises DeadlineExceeded instead of hanging", () => {
+		// Resolve python by CAPABILITY (it must be able to import the server
+		// module), never by a hardcoded machine path.
+		const script = [
+			"import importlib.util,sys,time",
+			"s=importlib.util.spec_from_file_location('q','bin/query-server.py')",
+			"m=importlib.util.module_from_spec(s);sys.modules['q']=m;s.loader.exec_module(m)",
+			"t0=time.time()",
+			"try:",
+			"    m._with_deadline(lambda: time.sleep(5), 0.05)",
+			"    print('NO-RAISE')",
+			"except m.DeadlineExceeded:",
+			"    print('%.2f' % (time.time()-t0))",
+		].join("\n");
+		const r = spawnSync(python, ["-c", script],
+			{ cwd: repoRoot, encoding: "utf8", timeout: 120_000 });
+		assert.ok(r.status === 0,
+			`could not exercise the deadline (${r.status}): ${r.stderr}`);
+		assert.ok(!/NO-RAISE/.test(r.stdout),
+			"a 5s job under a 0.05s deadline returned instead of raising");
+		const elapsed = parseFloat(r.stdout.trim());
+		assert.ok(elapsed < 2,
+			`deadline took ${elapsed}s to fire against a 0.05s budget`);
+	});
+});
+
 describe.skipIf(!canRun)("fast search: hard 10s deadline", () => {
 	it("refuses to hang: an over-deadline request returns ok:false quickly", async () => {
 		// Drive the deadline directly rather than waiting 10 real seconds: one
 		// worker started with HEIMDALL_SEARCH_DEADLINE tiny, asked to do real work.
-		const slowSock = join(homedir(), ".heimdall", "fastsearch-deadline.sock");
+		const slowSock = join(SOCK_DIR, "fastsearch-deadline.sock");
 		try { if (existsSync(slowSock)) unlinkSync(slowSock); } catch {}
 		const slow = spawn(VENV_PY, [SERVER, "--socket", slowSock], {
 			stdio: "ignore",
