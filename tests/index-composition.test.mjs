@@ -415,7 +415,20 @@ import ast
 t = ast.parse(src)
 g = {"sqlite3": sqlite3, "re": __import__("re"), "DIM": 768, "contextlib": contextlib, "fcntl": fcntl}
 g["Busy"] = type("Busy", (Exception,), {})
-exec(compile(ast.Module(body=[n for n in t.body if isinstance(n, ast.FunctionDef) and n.name in {"init","_db_dim","status"}], type_ignores=[]), "m", "exec"), g)
+# Module-level CONSTANTS the extracted functions reference. Derive them from the
+# source instead of hardcoding: _db_dim/status use sentinels such as
+# _DIM_UNREADABLE, and a bare exec of just the FunctionDefs has no module
+# namespace to resolve them from. Measured 2026-10-23: adding _DIM_UNREADABLE
+# to embed-index.py broke this test with NameError until it was carried over.
+for _n in t.body:
+    if isinstance(_n, ast.Assign) and len(_n.targets) == 1 and isinstance(_n.targets[0], ast.Name):
+        _name = _n.targets[0].id
+        if _name.startswith("_") or _name in {"DIM", "MODEL", "MIN_FREE_GB"}:
+            try:
+                g[_name] = ast.literal_eval(_n.value)
+            except (ValueError, SyntaxError):
+                pass  # not a literal (e.g. a Path); the tests below do not need it
+exec(compile(ast.Module(body=[n for n in t.body if isinstance(n, ast.FunctionDef) and n.name in {"init","_db_dim","_db_dim_strict","status"}], type_ignores=[]), "m", "exec"), g)
 g["_acquire_read_lock"] = lambda: os.fdopen(os.dup(0), "r")
 FULL = "CREATE TABLE cards (id TEXT PRIMARY KEY, path TEXT UNIQUE NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, sha1 TEXT NOT NULL, root TEXT NOT NULL, mtime REAL NOT NULL, size INTEGER NOT NULL)"
 VEC = "CREATE VIRTUAL TABLE vec USING vec0(embedding float[768] distance_metric=cosine)"

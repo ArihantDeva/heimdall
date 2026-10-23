@@ -230,9 +230,46 @@ def _ram_ok(min_gb: float, what: str) -> bool:
 
 
 def _db_dim(c: sqlite3.Connection) -> int:
+    """The stored vector dimension, or -1 when there is no readable dimension.
+
+    -1 is a SENTINEL for "unknown", and it is dangerously overloaded: init()
+    treats a mismatch as "drop everything and recreate". Measured 2026-10-23:
+    a healthy index whose `vec` DDL spelled the dimension differently (a form
+    vec0 accepts, e.g. float32[768]) parsed as -1, so init() dropped `cards`
+    and lost every row even though the dimension was never wrong. So -1 must
+    now be reserved for "no vec table at all"; an unparseable vec is reported
+    by _db_dim_strict, which raises instead of quietly licenseing a rebuild.
+    """
     row = c.execute("SELECT sql FROM sqlite_master WHERE name='vec'").fetchone()
-    m = re.search(r"float\[(\d+)\]", row[0]) if row else None
-    return int(m.group(1)) if m else -1
+    if not row:
+        return -1  # genuinely absent: a rebuild here is additive and correct
+    # Accept the spellings vec0 accepts: float[N], float32[N], float64[N].
+    m = re.search(r"float(?:32|64)?\[\s*(\d+)\s*\]", row[0] or "", re.IGNORECASE)
+    if not m:
+        # vec EXISTS. We could not read its dimension, which means we do not
+        # know that a rebuild is safe — refuse to guess (see _db_dim_strict).
+        return _DIM_UNREADABLE
+    return int(m.group(1))
+
+
+_DIM_UNREADABLE = -2
+
+
+def _db_dim_strict(c: sqlite3.Connection) -> int:
+    """Dimension for callers that would DESTROY data on a wrong answer.
+
+    Returns -1 only when vec is truly absent. Raises when vec exists but its
+    dimension cannot be read, because "I could not tell" must never authorize
+    a DROP TABLE.
+    """
+    d = _db_dim(c)
+    if d == _DIM_UNREADABLE:
+        row = c.execute("SELECT sql FROM sqlite_master WHERE name='vec'").fetchone()
+        raise RuntimeError(
+            "cannot read the vector dimension from an existing 'vec' table; "
+            f"refusing to rebuild (a rebuild would delete every card). DDL: {(row[0] if row else '')[:200]!r}"
+        )
+    return d
 
 
 def init(c: sqlite3.Connection) -> None:
@@ -242,7 +279,9 @@ def init(c: sqlite3.Connection) -> None:
         c.execute("DROP TABLE IF EXISTS vec")
         cols = []
     rebuilt = False
-    if _db_dim(c) != DIM:
+    # STRICT: init() holds the DROP TABLEs. An unreadable dimension must raise
+    # here rather than be treated as a mismatch -- see _db_dim_strict.
+    if _db_dim_strict(c) != DIM:
         c.execute("DROP TABLE IF EXISTS vec")
         c.execute(f"CREATE VIRTUAL TABLE vec USING vec0(embedding float[{DIM}] distance_metric=cosine)")
         if cols:
@@ -670,6 +709,15 @@ def status() -> dict:
                 "files": None, "repos": [], "dim": _db_dim(c),
                 "dimension_ok": False, "schema_ok": False, "locked": False,
                 "incomplete_schema": "vec present without cards",
+            }
+        elif _db_dim(c) == _DIM_UNREADABLE:
+            # vec EXISTS but we cannot read its dimension. Do not create a second
+            # one "just in case" -- that is how a 768-dim index silently gains a
+            # 1024-dim table. Report the state so a human can look.
+            return {
+                "files": None, "repos": [], "dim": None,
+                "dimension_ok": False, "schema_ok": False, "locked": False,
+                "unreadable_dimension": "vec exists but its dimension could not be parsed",
             }
         elif _db_dim(c) < 0:
             # vec missing entirely: create it at the current DIM. No row is lost.
