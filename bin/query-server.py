@@ -153,6 +153,16 @@ def _with_deadline(fn, seconds: float):
             box["value"] = fn()
         except BaseException as e:  # surface even the odd exception to the caller
             box["error"] = e
+        finally:
+            # ALWAYS mark completion. Measured 2026-10-23: if fn() raised
+            # something that escaped the except above (it used to: SystemExit
+            # from embed-index.query(), before that was fixed to raise Busy),
+            # NEITHER key was set, the thread simply ended, and the caller then
+            # evaluated box["value"] -> KeyError: 'value'. The client got
+            # {"error": "KeyError: 'value'"} -- a message about a dict lookup,
+            # naming nothing about the real cause. A missing result must be
+            # reported as a missing result.
+            box.setdefault("finished", True)
 
     t = threading.Thread(target=run, daemon=True)
     t.start()
@@ -164,6 +174,13 @@ def _with_deadline(fn, seconds: float):
         )
     if "error" in box:
         raise box["error"]
+    if "value" not in box:
+        # The worker thread ended without producing a value and without an
+        # exception we caught. Never KeyError here: say what actually happened.
+        raise RuntimeError(
+            f"{fn} produced no result and raised nothing catchable "
+            f"(worker thread ended silently)"
+        )
     return box["value"]
 
 

@@ -11,13 +11,14 @@
 // survival, and the guard that a second worker cannot steal the socket.
 // node:test is the runner package.json actually invokes; see tests/lib/harness.mjs
 import { describe, it, expect, beforeAll, afterAll } from "./lib/harness.mjs";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createConnection } from "node:net";
+import { plainPython } from "./lib/python.mjs";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SERVER = join(REPO, "bin", "query-server.py");
@@ -38,6 +39,10 @@ const SOCK = join(SOCK_DIR, "query-server-test.sock");
 // this suite cannot prove anything real, so it must SKIP loudly rather than
 // pass green on a machine that never ran the code path.
 const canRun = existsSync(VENV_PY) && existsSync(join(homedir(), ".heimdall", "global.db"));
+
+// Any python3 runs the reply-contract tests below: they stub both module-top
+// imports, so no venv and no model are involved.
+const python = plainPython();
 
 function rpc(sockPath, payload, { timeoutMs = 90_000 } = {}) {
 	return new Promise((resolve) => {
@@ -222,4 +227,116 @@ describe.skipIf(!canRun)("query-server: stale lock does not lock the worker out"
 
 afterAll(() => {
 	try { rmSync(SOCK_DIR, { recursive: true, force: true }); } catch {}
+});
+
+// ── the request/reply contract, testable without a model ────────────────
+//
+// WHY THIS EXISTS (measured 2026-10-23)
+// embed-index.query() used to call sys.exit(3) on lock contention. serve()
+// runs the handler inside _with_deadline's daemon thread, and SystemExit
+// derives from BaseException — so it escaped `except Exception`, the thread
+// died BEFORE conn.sendall(), and the client received NO FRAME AT ALL and sat
+// until its own 90-120s timeout. The visible symptom was a "hung daemon"; the
+// real bug was a swallowed control-flow exception on the reply path.
+//
+// These two tests drive the REAL serve() loop with a stubbed embed-index, so
+// they need no venv, no model and no built index — they run everywhere,
+// including CI, where the suites above skip. Mutation-checked: reverting the
+// handler to `except Exception` fails the first test with an empty frame.
+describe("query-server: a request always produces exactly one reply", () => {
+	const runWith = (body, timeoutMs = 60_000) => {
+		const dir = mkdtempSync(join(tmpdir(), "heimdall-reply-"));
+		const sock = join(dir, "probe.sock");
+		const script = `
+import importlib.util, json, pathlib, socket, sys, threading, time, types
+for _n, _attrs in (("sqlite_vec", {"load": lambda *a, **k: None}),
+                   ("sentence_transformers", {"SentenceTransformer": lambda *a, **k: None})):
+    _m = types.ModuleType(_n)
+    for _k, _v in _attrs.items(): setattr(_m, _k, _v)
+    sys.modules[_n] = _m
+_s = importlib.util.spec_from_file_location("qs", ${JSON.stringify(SERVER)})
+qs = importlib.util.module_from_spec(_s); sys.modules["qs"] = qs; _s.loader.exec_module(qs)
+
+class FakeEI:
+    MODEL = None
+    def model(self): return None
+    def status(self): return {}
+    def query(self, q, n=5, related=False):
+${body}
+qs.load_embed_index = lambda: FakeEI()
+qs.build_fts = lambda ei: None
+qs._load_matrix = lambda ei: None
+
+err = {}
+def _run():
+    try: qs.serve(pathlib.Path(${JSON.stringify(sock)}), 30)
+    except BaseException:
+        import traceback; err["tb"] = traceback.format_exc()
+threading.Thread(target=_run, daemon=True).start()
+for _ in range(200):
+    if pathlib.Path(${JSON.stringify(sock)}).exists(): break
+    time.sleep(0.05)
+if "tb" in err:
+    print(json.dumps({"serve_failed": err["tb"][-500:]})); raise SystemExit(0)
+time.sleep(0.2)
+_c = socket.socket(socket.AF_UNIX); _c.settimeout(10)
+_c.connect(${JSON.stringify(sock)})
+_c.sendall(json.dumps({"op": "query", "q": "x", "n": 1}).encode() + b"\\n")
+try:
+    _d = _c.recv(65536)
+except socket.timeout:
+    _d = b""
+print(json.dumps({"frame": _d.decode("utf-8", "replace")}))
+`;
+		const r = spawnSync(python, ["-c", script], { encoding: "utf8", timeout: timeoutMs });
+		rmSync(dir, { recursive: true, force: true });
+		const out = (r.stdout || "").trim().split("\n").pop();
+		expect(r.status).toBe(0);
+		return JSON.parse(out);
+	};
+
+	it("replies rather than going silent when the handler raises SystemExit", () => {
+		// Exactly what the old code did on lock contention.
+		const got = runWith("        raise SystemExit(3)");
+		expect(Boolean(got.serve_failed)).toBe(false);
+		expect(got.frame).not.toBe("");            // an empty frame is the bug
+		const reply = JSON.parse(got.frame);
+		expect(reply.ok).toBe(false);
+		expect(reply.busy).toBe(true);             // named for what it is
+	});
+
+	it("never reports a bare KeyError when the search produced no result", () => {
+		// Unit-level, because the end-to-end path cannot reach this anymore: the
+		// thread body now catches BaseException, so box is always populated. The
+		// guard is still worth pinning — if someone narrows that catch again, the
+		// failure must be a named RuntimeError, not box["value"] -> KeyError.
+		const script = [
+			"import importlib.util, sys, types",
+			"for n in ('sqlite_vec', 'sentence_transformers'):",
+			"    m = types.ModuleType(n); m.load = lambda *a, **k: None",
+			"    m.SentenceTransformer = lambda *a, **k: None; sys.modules[n] = m",
+			`s = importlib.util.spec_from_file_location("qs", ${JSON.stringify(SERVER)})`,
+			"qs = importlib.util.module_from_spec(s); sys.modules['qs'] = qs",
+			"s.loader.exec_module(qs)",
+			"# A callable whose thread body dies without recording anything.",
+			"holder = {}",
+			"def fn():",
+			"    raise SystemExit(3)",
+			"try:",
+			"    qs._with_deadline(fn, 5)",
+			"    print('NO-RAISE')",
+			"except SystemExit as e:",
+			"    print('SYSTEMEXIT', e.code)",
+			"except KeyError as e:",
+			"    print('KEYERROR', e)",
+			"except RuntimeError as e:",
+			"    print('RUNTIMEERROR')",
+		].join("\n");
+		const r = spawnSync(python, ["-c", script], { encoding: "utf8", timeout: 60_000 });
+		expect(r.status).toBe(0);
+		const out = (r.stdout || "").trim();
+		// Whatever it does, it must NOT surface as a dict-lookup error.
+		expect(out.includes("KEYERROR")).toBe(false);
+		expect(out.includes("NO-RAISE")).toBe(false);
+	});
 });

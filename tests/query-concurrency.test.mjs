@@ -283,12 +283,19 @@ _spec.loader.exec_module(e)
 try:
     rows = e.query("bounded fact backfill from pi session logs", n=3)
     print(json.dumps([r["path"] for r in rows]))
+except e.Busy:
+    # query() RAISES Busy on lock contention; it does not sys.exit(). That
+    # changed on 2026-10-23 when sys.exit(3) in a worker thread was found to
+    # escape an except-Exception handler and leave the client with no frame.
+    # Accept EITHER shape so this test keeps its meaning across that change.
+    print(json.dumps({"busy": True}))
 except SystemExit as ex:
-    print(json.dumps({"systemexit": ex.code}))
+    print(json.dumps({"busy": True, "systemexit": ex.code}))
 `;
   const r = spawnSync(PY, ["-c", script], { encoding: "utf8" });
   const out = (r.stdout || "").trim().split("\n").pop();
   const parsed = JSON.parse(out);
-  assert.ok(!parsed.systemexit, `query exited ${parsed.systemexit} (busy = degraded)`);
+  assert.ok(!parsed.busy,
+    `query reported busy (degraded): ${JSON.stringify(parsed)}`);
   assert.ok(Array.isArray(parsed) && parsed.length > 0, "query returned no rows");
 });
