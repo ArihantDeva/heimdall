@@ -552,7 +552,14 @@ def query(q: str, n: int = 5, related: bool = False) -> list[dict]:
     except Busy:
         print("embed-index: busy; semantic skipped this call.", file=sys.stderr)
         record_semantic_state("busy")
-        sys.exit(3)  # loud: caller banners lexical-only degradation
+        # RAISE, do not sys.exit(). Measured 2026-10-23: query() is called from
+        # query-server.py inside a daemon thread (_with_deadline). SystemExit
+        # derives from BaseException, so it slipped past that caller's
+        # `except Exception` and killed the thread before any reply was written
+        # -- the client then hung until its own timeout (observed as a 90-120s
+        # stall and an empty frame). A library function must not decide to end a
+        # process it does not own; main() translates this to rc 3 below.
+        raise
     try:
         c = conn()
         db_d = _db_dim(c)
@@ -563,7 +570,7 @@ def query(q: str, n: int = 5, related: bool = False) -> list[dict]:
             DIM = db_d
         if not _ram_ok(MIN_FREE_GB, "query"):
             record_semantic_state("busy")  # RAM-gated: same observable effect
-            sys.exit(3)  # loud: rc!=0 makes kb-search.sh banner the degradation
+            raise Busy()  # same reason as above: never exit() from a worker thread
         vec = _flat_vec(encode_query(q))
         # Fetch a deeper pool than the display limit, then let the caller
         # truncate. Read-only: no re-pruning here (pruning is a BUILD-time
@@ -742,7 +749,13 @@ def main(argv: list[str]) -> int:
         args = argv[1:]
         n = int(args[args.index("-n") + 1]) if "-n" in args else 5
         q = next(a for a in args if not a.startswith("-") and a != str(n))
-        hits = query(q, n=n, related="--related" in args)
+        try:
+            hits = query(q, n=n, related="--related" in args)
+        except Busy:
+            # The documented CLI contract: rc 3 means "degraded, lexical only",
+            # which is what kb-search.sh banners. Preserved here, at the entry
+            # point, instead of inside the library call.
+            return 3
         for h in hits:
             t = h["title"] + (" ·related" if h.get("related") else "")
             print(f'[{h["score"]}] {t} — {h["path"]}')

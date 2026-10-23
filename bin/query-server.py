@@ -553,9 +553,24 @@ def serve(sock_path: pathlib.Path, idle_timeout: float) -> int:
                     else:
                         try:
                             reply, do_stop = handle_request(ei, req)
-                        except Exception as e:  # a bad request must not kill the worker
-                            log(f"request failed: {type(e).__name__}: {e}")
-                            reply, do_stop = {"ok": False, "error": f"{type(e).__name__}: {e}"}, False
+                        except BaseException as e:
+                            # BaseException, not Exception. Measured 2026-10-23:
+                            # embed-index.query() did sys.exit(3) on lock
+                            # contention. SystemExit derives from BaseException,
+                            # so it escaped this handler, the thread died before
+                            # sendall(), and the client received NO FRAME AT ALL
+                            # -- it sat on its socket until its own timeout
+                            # (90-120s) and then reported a timeout, which reads
+                            # like a hung daemon rather than "busy, degraded".
+                            # A request must always produce exactly one reply.
+                            if isinstance(e, SystemExit):
+                                log(f"request exited {e.code} (treated as busy)")
+                                reply = {"ok": False, "busy": True,
+                                         "error": "degraded: semantic leg unavailable (busy)"}
+                            else:
+                                log(f"request failed: {type(e).__name__}: {e}")
+                                reply = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+                            do_stop = False
                     last_activity = time.time()
                     conn.sendall((json.dumps(reply) + "\n").encode())
                     if do_stop:
