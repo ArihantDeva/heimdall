@@ -46,8 +46,25 @@ const DB = join(homedir(), ".heimdall", "global.db");
 // The behavioural lock tests exec() embed-index.py, which imports sqlite_vec.
 // The source-text assertions above them need no python at all, so the gate is
 // per-test: skipping the whole file would drop the cheap guards too.
+// TWO gates, because the tests here need different things.
+//
+// The two LOCK tests exercise fcntl and nothing else — they import embed-index.py
+// only to reach _acquire_read_lock/_acquire_lock. Requiring a full module import
+// (which drags in sentence_transformers: torch plus a ~100MB model) to assert on
+// a flock is why they skipped everywhere, including CI. They stub the encoder,
+// so a python that can load sqlite_vec is sufficient.
+//
+// The determinism test below calls e.query(), which really does embed, so it
+// keeps the strict gate. Relaxing that one would be faking coverage.
 const canExec = canImportEmbedIndex(sqliteVecPython() ?? "python3");
+// The lock tests stub BOTH module-top imports (sentence_transformers and
+// sqlite_vec), so they need nothing beyond a working python3 + fcntl. Gating
+// them on the model was the over-broad requirement that kept a pure flock
+// assertion out of CI on every platform.
+const canLock = spawnSync("python3", ["-c", "import fcntl"], { encoding: "utf8" }).status === 0;
+const LOCK_PY = "python3";
 const PY = canExec ? sqliteVecPython() : null;
+const lockSkipReason = "no python3 with fcntl on this machine";
 
 /** The lock helpers are pure text; assert on the real source of the module. */
 function sourceOf(fnName) {
@@ -82,7 +99,7 @@ test("a shared (LOCK_SH) read lock exists and is what queries take", () => {
 });
 
 test("a second concurrent reader is not rejected as busy",
-  { skip: canExec ? false : embedIndexSkipReason() }, () => {
+  { skip: canLock ? false : lockSkipReason }, () => {
   // The observable contract. Two overlapping readers must both succeed. Before
   // the fix the second one printed "busy; semantic skipped this call" and
   // exited 3. Uses the module directly so this is a unit-level statement about
@@ -91,6 +108,21 @@ test("a second concurrent reader is not rejected as busy",
   const script = `
 import fcntl, importlib.util, os, pathlib, sys, time
 sys.path.insert(0, ${JSON.stringify(join(repoRoot, "bin"))})
+import types as _types
+# The lock tests exercise fcntl, not the encoder. embed-index.py imports
+# sentence_transformers at MODULE TOP, so without this stub the gate demands
+# torch + a ~100MB model to assert on a flock — which is why these two tests
+# skipped even on CI. Register a fake module BEFORE exec so the top-level import
+# resolves; nothing here calls it.
+_st = _types.ModuleType("sentence_transformers")
+_st.SentenceTransformer = lambda *a, **k: None
+sys.modules["sentence_transformers"] = _st
+# sqlite_vec is ALSO imported at module top (it exits if absent). The lock tests
+# never touch sqlite, so stub it too — that is what lets them run on a plain
+# python3, including macOS CI's, which cannot load extensions at all.
+_sv = _types.ModuleType("sqlite_vec")
+_sv.load = lambda *a, **k: None
+sys.modules["sqlite_vec"] = _sv
 _spec = importlib.util.spec_from_file_location("embed_index", ${JSON.stringify(join(repoRoot, "bin", "embed-index.py"))})
 embed_index = importlib.util.module_from_spec(_spec)
 sys.modules["embed_index"] = embed_index
@@ -117,7 +149,7 @@ finally:
     outer.close()
 `;
   return new Promise((resolve, reject) => {
-    const p = spawn(PY, ["-c", script], { encoding: "utf8" });
+    const p = spawn(LOCK_PY, ["-c", script], { encoding: "utf8" });
     let out = "", err = "";
     p.stdout.on("data", (d) => (out += d));
     p.stderr.on("data", (d) => (err += d));
@@ -142,7 +174,7 @@ test("the build still takes an EXCLUSIVE lock (readers must not weaken writers)"
 });
 
 test("the lock matrix holds in both orders (real flock, not just source text)",
-  { skip: canExec ? false : embedIndexSkipReason() }, () => {
+  { skip: canLock ? false : lockSkipReason }, () => {
   // The claims above are about source; this is about behaviour. Four invariants:
   //   reader+reader coexist      (the actual fix)
   //   writer blocked by reader   (readers protect a build from a concurrent build)
@@ -151,6 +183,20 @@ test("the lock matrix holds in both orders (real flock, not just source text)",
   const script = `
 import fcntl, importlib.util, pathlib, sys, tempfile
 sys.path.insert(0, ${JSON.stringify(join(repoRoot, "bin"))})
+import types as _types
+# sqlite_vec is imported at module top too (embed-index exits if it is absent).
+# The lock matrix never touches sqlite, so stub it — this is what lets a pure
+# flock assertion run on a plain python3, macOS CI included.
+_sv0 = _types.ModuleType("sqlite_vec"); _sv0.load = lambda *a, **k: None
+sys.modules["sqlite_vec"] = _sv0
+# The lock tests exercise fcntl, not the encoder. embed-index.py imports
+# sentence_transformers at MODULE TOP, so without this stub the gate demands
+# torch + a ~100MB model to assert on a flock — which is why these two tests
+# skipped even on CI. Register a fake module BEFORE exec so the top-level import
+# resolves; nothing here calls it.
+_st = _types.ModuleType("sentence_transformers")
+_st.SentenceTransformer = lambda *a, **k: None
+sys.modules["sentence_transformers"] = _st
 _s = importlib.util.spec_from_file_location("embed_index", ${JSON.stringify(join(repoRoot, "bin", "embed-index.py"))})
 e = importlib.util.module_from_spec(_s)
 sys.modules["embed_index"] = e
@@ -177,7 +223,7 @@ fcntl.flock(r.fileno(), fcntl.LOCK_UN); r.close()
 for name, ok in res:
     print(("OK " if ok else "BAD ") + name)
 `;
-  const r = spawnSync(PY, ["-c", script], { encoding: "utf8" });
+  const r = spawnSync(LOCK_PY, ["-c", script], { encoding: "utf8" });
   const bad = (r.stdout || "").split("\n").filter((l) => l.startsWith("BAD "));
   assert.deepEqual(bad, [], `lock invariants violated: ${bad.join(", ")} (stderr=${(r.stderr || "").slice(0, 200)})`);
   assert.match(r.stdout || "", /OK reusable/, "lock must remain usable after release");
@@ -203,7 +249,12 @@ test("query() takes the read lock BEFORE any database read", () => {
 
 test("a query against a real index succeeds and is deterministic in one process",
   { skip: canExec ? false : embedIndexSkipReason() }, () => {
-  if (!existsSync(DB)) return; // no index on this machine; covered by the tests above
+  // BOTH preconditions, not just the index. The `skip` above covers canExec, but
+  // this early-out is a second, independent gate — when DB exists while canExec
+  // is false the body ran with PY === null and spawnSync threw a TypeError
+  // ("file argument must be of type string"), which reads as a code defect.
+  // Measured 2026-10-23 in the CI shape.
+  if (!canExec || !existsSync(DB)) return; // no index/venv here; covered by the tests above
   const script = `
 import importlib.util, json, sys
 sys.path.insert(0, ${JSON.stringify(join(repoRoot, "bin"))})
