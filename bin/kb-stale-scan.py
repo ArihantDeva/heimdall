@@ -52,8 +52,17 @@ def find_basename(base, tmpdir):
                 capture_output=True, text=True, timeout=120,
             ).stdout
             hits.extend(h for h in out.splitlines() if h)
-        except Exception:
-            pass
+        except Exception as e:
+            # Do NOT write a cache here. An empty cache file means "searched,
+            # found nothing", and kb-rehome.sh treats that as NOTFOUND, which
+            # the caller turns into `graft delete`. A timeout or an OS error
+            # says nothing about the file's existence. Return nothing and let
+            # the caller fall back to its own (fail-closed) search. Measured
+            # 2026-10-23: this `pass` was on the same delete path as the
+            # unchecked-find bug fixed in kb-rehome.sh.
+            print(f"WARN: search for {base!r} failed ({type(e).__name__}: {e}); "
+                  f"not caching a result", file=sys.stderr)
+            return cache if os.path.exists(cache) else ""
     with open(cache, "w") as f:
         f.write("\n".join(hits))
     return cache
@@ -87,7 +96,7 @@ def main(argv=None):
     rows = db.execute("SELECT hex(id), title, body FROM nodes").fetchall()
     db.close()
     total = len(rows)
-    stale = removed = rebuilt = ambiguous = 0
+    stale = removed = rebuilt = ambiguous = unresolved = 0
     tmpdir = tempfile.mkdtemp(prefix="kbrh-")
 
     for id_hex, title, body in rows:
@@ -115,6 +124,15 @@ def main(argv=None):
         finally:
             os.unlink(bodyf)
 
+        if out.startswith("SEARCHFAILED"):
+            # The search itself failed (permission denied, I/O error, timeout).
+            # That says NOTHING about whether the file exists, so do not touch
+            # the node: deleting on a transient read error is irreversible
+            # (graft delete) and would silently shrink the graph. Fail closed,
+            # matching the contract cli-main.mjs states for sensor loss.
+            unresolved += 1
+            print(f"UNRESOLVED  {path} [{out}]  {title[:60]}")
+            continue
         if out.startswith("REBUILT "):
             rebuilt += 1
             newpath = out.split(" ", 1)[1]
@@ -131,7 +149,7 @@ def main(argv=None):
             subprocess.run(["graft", "delete", id_hex], capture_output=True, text=True, timeout=15)
             print(f"REMOVED  {path} [{out}]  {title[:60]}")
 
-    print(f"\n== scan done: {total} nodes | {stale} stale | {rebuilt} rehomed | {removed} removed ({ambiguous} ambiguous)")
+    print(f"\n== scan done: {total} nodes | {stale} stale | {rebuilt} rehomed | {removed} removed | {ambiguous} ambiguous | {unresolved} unresolved (search failed, kept)")
 
 
 if __name__ == "__main__":
