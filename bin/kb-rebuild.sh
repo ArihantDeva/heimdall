@@ -19,6 +19,12 @@ TS=$(date +%Y%m%d-%H%M%S)
 BK="$KB/backups"
 mkdir -p "$BK"
 
+# ── fail-fast helpers ──────────────────────────────────────────────────────
+# This script DROPs every graph table. With `set -u` alone, a failed backup
+# printed an error and the wipe ran anyway (measured 2026-10-23): total loss with
+# exit 0. Every step that can destroy or strand data must therefore stop the run.
+die() { echo "kb-rebuild: ABORT — $*" >&2; exit 1; }
+
 echo "== 1/6 backup"
 # sqlite backup API — consistent snapshot even under WAL (a plain cp of a live
 # WAL db can be torn/incomplete).
@@ -29,8 +35,15 @@ con = sqlite3.connect(src)
 dst = sqlite3.connect(sys.argv[1])
 con.backup(dst)
 dst.close(); con.close()
-print(f"   backed up DB via sqlite backup API -> {sys.argv[1]}")
+# A backup that "succeeded" but wrote nothing is worse than a loud failure: the
+# next step DROPs every table and this file is the only restore source.
+if not os.path.exists(sys.argv[1]) or os.path.getsize(sys.argv[1]) == 0:
+    print(f"   FATAL backup produced no data: {sys.argv[1]}", file=sys.stderr)
+    sys.exit(1)
+print(f"   backed up DB via sqlite backup API -> {sys.argv[1]} ({os.path.getsize(sys.argv[1])} bytes)")
 EOF
+BK_RC=$?
+[ "$BK_RC" -eq 0 ] || die "sqlite backup failed (exit $BK_RC) — refusing to wipe the graph"
 sqlite3 "$DB" "SELECT hex(id), title, body FROM nodes;" > "$BK/nodes.$TS.tsv" 2>/dev/null
 echo "   node list saved -> $BK/nodes.$TS.tsv"
 
@@ -48,8 +61,10 @@ for row in con.execute("""SELECT hex(n.id) id, n.title, n.body, group_concat(k.t
     kw[row["id"]] = {"title": row["title"], "body": row["body"],
                      "keywords": (row["kws"] or "").split(",") if row["kws"] else []}
 json.dump(list(kw.values()), open(sys.argv[1], "w"))
-print(f"   dumped {len(kw)} nodes to {sys.argv[1]}")
 con.close()
+if not os.path.exists(sys.argv[1]) or os.path.getsize(sys.argv[1]) == 0:
+    sys.exit(1)
+
 """
 EOF
 
@@ -126,7 +141,12 @@ with ThreadPoolExecutor(max_workers=8) as ex:
         if f.result() == 0: ok += 1
         else: fail += 1
 print(f"   restored {ok} nodes ({fail} failed) in parallel")
+# The graph was already DROPped, so the JSON dump is now the only copy of these
+# nodes. A non-zero fail count means those nodes exist nowhere else.
+sys.exit(1 if fail else 0)
 EOF
+RS_RC=$?
+[ "$RS_RC" -eq 0 ] || die "restore failed (exit $RS_RC) — nodes are ONLY in $BK/nodes.$TS.json, graph left EMPTY. Re-run the restore before anything else."
 
 echo "== 4/6 re-seed inventory + full-history edit sync"
 bash "$HERE/seed-graft.sh" 2>&1 | tail -1
