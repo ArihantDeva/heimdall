@@ -351,6 +351,11 @@ def lexical_hits(ei, q: str, n: int, scope: str | None = None) -> list:
         c.close()
 
 
+# "ok" | "degraded" — set by fused_search when the semantic leg is skipped, and
+# read by handle_request to put the coverage into the reply.
+_SEM_COVERAGE = "ok"
+
+
 def fused_search(ei, q: str, n: int = 6, related: bool = False, scope: str | None = None) -> list:
     """Lexical + semantic in one warm process, ranked together.
 
@@ -358,6 +363,8 @@ def fused_search(ei, q: str, n: int = 6, related: bool = False, scope: str | Non
     the same +3.0 offset the shell used, so ordering behaviour is unchanged for
     callers while the source of both legs is now a single warm process.
     """
+    global _SEM_COVERAGE
+    _SEM_COVERAGE = "ok"
     hits = lexical_hits(ei, q, n, scope=scope)
     try:
         sem = _semantic_hits(ei, q, n=n, related=related)
@@ -373,6 +380,17 @@ def fused_search(ei, q: str, n: int = 6, related: bool = False, scope: str | Non
                 "related": bool(h.get("related")),
             })
     except Exception as e:
+        # DEGRADED, AND SAY SO IN THE REPLY. The stderr warning below is a
+        # human-facing side channel; a programmatic caller that talks to this
+        # socket never sees it, so before this the reply was identical to a
+        # healthy one that simply had no semantic hits. Measured 2026-10-23:
+        # running the suite's 65 files concurrently pushed the semantic leg past
+        # its deadline, fused_search returned LEXICAL-ONLY hits with ok:true, and
+        # the caller could not tell the difference between "the semantic leg
+        # found nothing" and "the semantic leg never ran". That is a partial
+        # answer presented as a complete one. `coverage` carries the distinction
+        # into the reply.
+        _SEM_COVERAGE = "degraded"
         print(f"SEMANTIC_ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         print("WARN: semantic layer failed — results are LEXICAL-ONLY (sem_coverage=degraded)", file=sys.stderr)
     # Dedupe by path, keep the best-scoring leg, then order.
@@ -447,7 +465,10 @@ def handle_request(ei, req):
             return {"ok": True, "hits": hits[:n]}, False
         # op == "search": fused lexical + semantic, in ONE process.
         hits = _with_deadline(lambda: fused_search(ei, q, n=n, related=related, scope=scope), SEARCH_DEADLINE_S)
-        return {"ok": True, "hits": hits}, False
+        # A fused reply is only complete if BOTH legs ran. Callers use this to
+        # decide whether to fall back; without it a degraded answer is
+        # indistinguishable from a complete one.
+        return {"ok": True, "hits": hits, "sem_coverage": _SEM_COVERAGE}, False
     return {"ok": False, "error": f"unknown op: {op!r} (valid: ping, query, search, stop)"}, False
 
 
