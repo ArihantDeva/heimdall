@@ -340,3 +340,45 @@ print(json.dumps({"frame": _d.decode("utf-8", "replace")}))
 		expect(out.includes("NO-RAISE")).toBe(false);
 	});
 });
+
+// ── a fatal startup failure must always be logged ───────────────────────
+//
+// WHY THIS EXISTS (measured 2026-10-23)
+// main() wrapped serve() in `except Exception`. Anything raising SystemExit —
+// which embed-index.py DID at module top when sqlite_vec was missing — skipped
+// that branch, so the one place that explains a startup failure printed
+// nothing. The worker died with a bare string and no "fatal:" line, which is
+// the same class as the sys.exit(3) bug one layer down.
+describe("query-server: fatal startup failures are always logged", () => {
+	const runMain = (exc) => {
+		const dir = mkdtempSync(join(tmpdir(), "heimdall-fatal-"));
+		const sock = join(dir, "f.sock");
+		const script = [
+			"import importlib.util, sys, types",
+			"for n in ('sqlite_vec', 'sentence_transformers'):",
+			"    m = types.ModuleType(n); m.load = lambda *a, **k: None",
+			"    m.SentenceTransformer = lambda *a, **k: None; sys.modules[n] = m",
+			`s = importlib.util.spec_from_file_location("qs", ${JSON.stringify(SERVER)})`,
+			"qs = importlib.util.module_from_spec(s); sys.modules['qs'] = qs",
+			"s.loader.exec_module(qs)",
+			exc,
+			`sys.exit(qs.main(["--socket", ${JSON.stringify(sock)}]))`,
+		].join("\n");
+		const r = spawnSync(python, ["-c", script], { encoding: "utf8", timeout: 60_000 });
+		rmSync(dir, { recursive: true, force: true });
+		return { rc: r.status, err: r.stderr || "" };
+	};
+
+	it("logs 'fatal:' when startup raises SystemExit, not Exception", () => {
+		const got = runMain("qs.load_embed_index = lambda: sys.exit('missing dep')");
+		expect(got.err).toMatch(/fatal:/);                 // the line that was missing
+		expect(got.rc).not.toBe(0);                        // a failed start is a failure
+	});
+
+	it("still logs 'fatal:' for an ordinary exception", () => {
+		// Guard against over-correcting: the normal path must keep working.
+		const got = runMain("qs.load_embed_index = lambda: (_ for _ in ()).throw(RuntimeError('boom'))");
+		expect(got.err).toMatch(/fatal:.*RuntimeError.*boom/);
+		expect(got.rc).not.toBe(0);
+	});
+});

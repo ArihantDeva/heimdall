@@ -633,7 +633,15 @@ def main(argv: list[str]) -> int:
     args = ap.parse_args(argv)
     try:
         return serve(pathlib.Path(args.socket).expanduser(), args.idle_timeout)
-    except Exception as e:
+    except BaseException as e:
+        # BaseException, not Exception. Measured 2026-10-23: anything that
+        # raised SystemExit (embed-index.py's module-top `sys.exit` on a missing
+        # package, or query()'s old sys.exit(3)) skipped this branch entirely,
+        # so the one place that explains a startup failure printed nothing and
+        # the worker died with a bare string. A fatal path must always be logged.
+        if isinstance(e, SystemExit):
+            log(f"fatal: SystemExit({e.code!r}) during startup")
+            return e.code if isinstance(e.code, int) else 1
         log(f"fatal: {type(e).__name__}: {e}")
         return 1
 

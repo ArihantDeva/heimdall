@@ -23,10 +23,28 @@ import time
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
+class MissingDependency(RuntimeError):
+    """A required python package is absent for THIS interpreter.
+
+    Raised (never sys.exit) so a long-lived importer can report it. Measured
+    2026-10-23: this module is exec'd by query-server.py's load_embed_index().
+    sys.exit() at module top raised SystemExit, which bypassed that file's
+    `except Exception` fatal log, so a missing package killed the worker with a
+    bare string and no context. Same class as the sys.exit(3) bug fixed in
+    query(): process-exit semantics inside library code.
+    """
+
+
 try:
     import sqlite_vec
-except ImportError:
-    sys.exit("pip install sqlite-vec into ~/.heimdall/venv first")
+except ImportError as _e:
+    # Name the interpreter that is actually missing the package. The old text
+    # hardcoded ~/.heimdall/venv even when running under some other python3,
+    # i.e. it told people to install into a venv they were not using.
+    raise MissingDependency(
+        f"sqlite_vec is not installed for {sys.executable}. "
+        f"Install it for that interpreter: {sys.executable} -m uv pip install sqlite-vec"
+    ) from _e
 
 from sentence_transformers import SentenceTransformer
 
