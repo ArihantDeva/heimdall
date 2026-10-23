@@ -472,6 +472,9 @@ def _build_inner(c: sqlite3.Connection, progress_every: int) -> int:
     known = {r[0]: (r[1], r[2], r[3]) for r in c.execute("SELECT id, sha1, mtime, size FROM cards")}
     claimed: set[str] = set(known.values())  # sha1 dedupe across whole corpus
     seen: set[str] = set()
+    # Files whose stat() failed. They are KEPT (added to `seen`) and reported,
+    # never pruned: a failed stat cannot prove absence.
+    stat_failures: list[tuple[str, int | None, str | None]] = []
 
     # Dataless iCloud placeholders: name-only card, no read → no download.
     # A later materialized file gets real content + content-sha and replaces
@@ -495,11 +498,21 @@ def _build_inner(c: sqlite3.Connection, progress_every: int) -> int:
 
     milestone = 0
     for p in text_paths:
+        cid = "f:" + str(p)
         try:
             st = p.stat()
-        except OSError:
+        except OSError as e:
+            # `continue` here USED TO PRUNE THE FILE. seen.add(cid) is what tells
+            # _prune_stale the file still exists; skipping it put a live file in
+            # the "vanished" list, and the tail prune then ran DELETE FROM cards.
+            # A stat() failure does not mean the file is gone — ELOOP (symlink
+            # loop), EACCES on a parent, EIO, or a TOCTOU recreate all look
+            # identical here. Treat it as UNKNOWN: keep the card, warn once.
+            # Measured 2026-10-23; same class as the failed-find and unreadable
+            # -dimension bugs found the same day.
+            seen.add(cid)   # we cannot prove it vanished, so do not delete it
+            stat_failures.append((str(p), e.errno, e.strerror))
             continue
-        cid = "f:" + str(p)
         rel = str(p.relative_to(HOME_ROOT))
         prev = known.get(cid)
         if prev and prev[1] == st.st_mtime and prev[2] == st.st_size:
@@ -539,6 +552,13 @@ def _build_inner(c: sqlite3.Connection, progress_every: int) -> int:
                 milestone = total // progress_every
                 print(f"embed-index: {total}/{len(text_paths)} embedded", flush=True)
     total += _upsert(c, m, batch)
+    if stat_failures:
+        print(f"embed-index: WARN {len(stat_failures)} file(s) could not be stat'd "
+              f"and were KEPT (not pruned):", file=sys.stderr)
+        for _p, _no, _msg in stat_failures[:10]:
+            print(f"  {_p}: [{_no}] {_msg}", file=sys.stderr)
+        if len(stat_failures) > 10:
+            print(f"  ... and {len(stat_failures) - 10} more", file=sys.stderr)
     _prune_stale(c, known, seen)
     _persist_search_roots(graft_dirs)
     print(f"embed-index: done — {total} embedded ({len(dataless)} name-only), "
