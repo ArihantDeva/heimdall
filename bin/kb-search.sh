@@ -217,9 +217,20 @@ fi
 # (facts)" header. Printing a header naming graft+semantic legs that never ran
 # is the same lie as showing code hits under a people question (finding 1).
 # kind=code and kind=print unchanged, so the default bytes are untouched.
+# The header must not advertise a leg that is not configured. Iteration 50 fixed
+# the same lie on the daemon path ("warm fused" printed unconditionally); the
+# fallback path still claimed "global semantic" while the next line reported
+# SEMANTIC_ERROR. Decide the wording from the SAME test that gates the leg, so
+# the two cannot disagree.
+SEM_READY=0
+[ -x "$HOME/.heimdall/venv/bin/python3" ] && [ -f "$HOME/.heimdall/global.db" ] && SEM_READY=1
 case "$KIND" in
 	person|fact|decision) ;;
-	*) echo "== retrieve (per-repo graft + global semantic): $Q" ;;
+	*) if [ "$SEM_READY" = 1 ]; then
+		echo "== retrieve (per-repo graft + global semantic): $Q"
+	   else
+		echo "== retrieve (per-repo graft only — semantic leg NOT configured): $Q"
+	   fi ;;
 esac
 # ── A person/fact query never runs the code legs at all.
 # The people and fact legs are a small self-contained Python block below (they
@@ -503,7 +514,7 @@ fi
 
 # Global semantic layer (bge-m3 embeddings over repo source).
 EMBED="$HOME/.heimdall/venv/bin/python3"
-if [ ! -x "$EMBED" ] || [ ! -f "$HOME/.heimdall/global.db" ]; then
+if [ "$SEM_READY" = 0 ]; then
 	echo "SEMANTIC_ERROR: not-configured (venv or global.db missing). Run: ~/.heimdall/venv/bin/python3 bin/embed-index.py build"
 fi
 

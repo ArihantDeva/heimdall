@@ -1,4 +1,4 @@
-== retrieve (per-repo graft + global semantic): example
+== retrieve (per-repo graft only — semantic leg NOT configured): example
 SEMANTIC_ERROR: not-configured (venv or global.db missing). Run: ~/.heimdall/venv/bin/python3 bin/embed-index.py build
  1. [NOPATH] cov100%  <TMP>/heimdall-golden-fixed/Repos/example/src/alpha.py
       alpha hit
