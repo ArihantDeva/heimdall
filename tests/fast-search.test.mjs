@@ -88,8 +88,16 @@ describe.skipIf(!canRun)("fast search: fused lexical+semantic, sub-200ms", () =>
 		while (Date.now() - t0 < 120_000) {
 			if (child.exitCode !== null) break; // it will never bind now
 			if (existsSync(SOCK)) {
+				// Wait for the SEMANTIC LEG to be usable, not merely for the socket
+				// to accept. Measured 2026-10-23: the model warms in 0.8s and the
+				// socket binds at once, but the 416MB vector snapshot builds on a
+				// background thread for ~5s more. A suite that pinged and went
+				// straight to `search` landed on the COLD fallback (4815ms against a
+				// 10s deadline) and, under load, blew the deadline and degraded to
+				// lexical-only — so "both legs represented" failed intermittently.
+				// `ping` now reports `warm`, so gate on the fact.
 				const r = await rpc({ op: "ping" });
-				if (r && !r.error) return;
+				if (r && !r.error && r.warm) return;
 			}
 			await new Promise((r) => setTimeout(r, 200));
 		}
@@ -119,7 +127,16 @@ describe.skipIf(!canRun)("fast search: fused lexical+semantic, sub-200ms", () =>
 		// Both legs alive: the fused set should contain lexical and semantic.
 		const legs = new Set(r.hits.map((h) => h.leg));
 		expect(legs.has("lexical")).toBe(true);
-		expect(legs.has("semantic")).toBe(true);
+		// If this fails, say WHICH leg was missing and whether the reply admitted
+		// it. Run #47 made fused_search report sem_coverage; a bare
+		// "expected false to be true" hides the difference between "the semantic
+		// leg found nothing" and "the semantic leg never ran".
+		expect(
+			legs.has("semantic"),
+			`semantic leg missing (sem_coverage=${r.sem_coverage ?? "absent"}); ` +
+			`legs present: ${[...legs].join(",")}. ` +
+			`sem_coverage=degraded means the leg failed, not that it found nothing.`,
+		).toBe(true);
 	}, 180_000);
 
 	it("serves a repeated query under 200ms (warm)", async () => {

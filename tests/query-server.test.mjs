@@ -72,8 +72,15 @@ async function waitForSocket(path, child = null, ms = 90_000) {
 		// produced "expected false to be true" instead of the reason.
 		if (child && child.exitCode !== null) return false;
 		if (existsSync(path)) {
+			// `warm`, not just "socket accepts". The model warms in 0.8s and the
+			// socket binds at once, but the 416MB vector snapshot builds on a
+			// background thread for ~5s more; a query issued before then takes the
+			// COLD fallback (measured 4815ms against a 10s deadline) and degrades
+			// to lexical-only under load. Measured 2026-10-23 under 65-way
+			// concurrency: this suite's semantic tests failed every round until the
+			// wait gated on warm.
 			const r = await rpc(path, { op: "ping" });
-			if (r && !r.error) return true;
+			if (r && !r.error && r.warm) return true;
 		}
 		await new Promise((r) => setTimeout(r, 200));
 	}

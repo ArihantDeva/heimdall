@@ -435,7 +435,21 @@ def handle_request(ei, req):
         return {"ok": False, "error": "request must be a JSON object"}, False
     op = req.get("op")
     if op == "ping":
-        return {"ok": True, "pid": os.getpid(), "model": getattr(ei, "MODEL", "?")}, False
+        # `warm` reports whether the vector snapshot is USABLE, which is a
+        # different question from "is the process alive". Measured 2026-10-23:
+        # the model warms in 0.8s and the socket binds immediately, but the
+        # snapshot for 135,490 x 768 vectors (416MB) is built on a background
+        # thread and takes ~5s more. A caller that pings, sees ok, and then issues
+        # a search can therefore land on the COLD fallback — measured 4815ms
+        # against a 10s deadline. There was no way to ask, so "warm" was an
+        # assumption rather than a fact. Report it.
+        return {
+            "ok": True,
+            "pid": os.getpid(),
+            "model": getattr(ei, "MODEL", "?"),
+            "warm": _VEC["mat"] is not None,
+            "loading": bool(_VEC["loading"]),
+        }, False
     if op in ("query", "search"):
         q = req.get("q")
         if not isinstance(q, str) or not q.strip():
