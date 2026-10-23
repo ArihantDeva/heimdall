@@ -172,6 +172,12 @@ import { installAdapter, detectHarnesses, KNOWN_HARNESSES } from "./adapters.mjs
 import { configPath } from "./depth.mjs";
 
 function runInit(args) {
+  // init WRITES config and installs adapters. Measured 2026-10-23: `init
+  // --bogus-typo` exited 0 with "ok: config already present" — it performed the
+  // mutation and silently ignored the flag. Same class checkFlags already covers
+  // for verify/score/reconcile/history/depth.
+  const bad = checkFlags("init", args, ["--detect", "--harness", "--quiet"]);
+  if (bad) return bad;
   if (args.includes("--detect")) {
     const found = detectHarnesses();
     console.log(found.length ? found.join("\n") : "(no harness configs found)");
@@ -312,6 +318,11 @@ async function runVerify(args) {
  * exclusion rule can never disagree about what "credential material" means.
  */
 async function runCredentials(args) {
+  // Read-only, but a typo'd filter must not silently report on everything: this
+  // is consumed by scripts (`--count` for a number), and exit 0 implies the flag
+  // was honoured.
+  const bad = checkFlags("credentials", args, ["--count"]);
+  if (bad) return bad;
   const { isCredentialPath } = await import("./reconcile.mjs");
   const { DatabaseSync } = await import("node:sqlite");
   // The INDEX, not the journal. "Retrievable" means a card exists in global.db,
