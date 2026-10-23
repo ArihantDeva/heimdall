@@ -64,9 +64,13 @@ function rpc(sockPath, payload, { timeoutMs = 90_000 } = {}) {
 
 let child = null;
 
-async function waitForSocket(path, ms = 90_000) {
+async function waitForSocket(path, child = null, ms = 90_000) {
 	const t0 = Date.now();
 	while (Date.now() - t0 < ms) {
+		// A child that has already exited will never bind the socket. Waiting out
+		// the full timeout to report that costs 90s and, measured 2026-10-23,
+		// produced "expected false to be true" instead of the reason.
+		if (child && child.exitCode !== null) return false;
 		if (existsSync(path)) {
 			const r = await rpc(path, { op: "ping" });
 			if (r && !r.error) return true;
@@ -80,9 +84,20 @@ describe.skipIf(!canRun)("query-server: warm semantic worker", () => {
 	beforeAll(async () => {
 		try { if (existsSync(SOCK)) unlinkSync(SOCK); } catch {}
 		try { if (existsSync(SOCK + ".lock")) unlinkSync(SOCK + ".lock"); } catch {}
-		child = spawn(VENV_PY, [SERVER, "--socket", SOCK], { stdio: "ignore", detached: false });
-		const up = await waitForSocket(SOCK);
-		if (!up) throw new Error(`query-server did not come up on ${SOCK}`);
+		// Capture stderr instead of discarding it. Measured 2026-10-23: with an
+		// unusable HOME the server failed to boot and this threw
+		// "query-server did not come up on <sock>" — true, and useless. The reason
+		// (a missing model cache) had been written to stderr and thrown away by
+		// stdio:"ignore", so the failure named the symptom and hid the cause.
+		child = spawn(VENV_PY, [SERVER, "--socket", SOCK], { stdio: ["ignore", "ignore", "pipe"], detached: false });
+		let bootErr = "";
+		child.stderr?.on("data", (d) => { bootErr = (bootErr + d).slice(-4000); });
+		const up = await waitForSocket(SOCK, child);
+		if (!up) throw new Error(
+			`query-server did not come up on ${SOCK}` +
+			(child.exitCode !== null ? ` (exited ${child.exitCode})` : " (still running, never bound)") +
+			(bootErr.trim() ? `\n--- server stderr ---\n${bootErr.trim()}` : "\n(no stderr captured)"),
+		);
 	}, 120_000);
 
 	afterAll(() => {
@@ -205,18 +220,27 @@ describe.skipIf(!canRun)("query-server: stale lock does not lock the worker out"
 		try { if (existsSync(sock)) unlinkSync(sock); } catch {}
 		// PID 999999 is not a real process; spawn with it recorded as the holder.
 		writeFileSync(lock, "999999");
-		const c = spawn(VENV_PY, [SERVER, "--socket", sock], { stdio: "ignore" });
+		// Same shape as the two suites above: capture stderr, and stop waiting when
+		// the child exits. This one waited its full 120s and then reported
+		// `expected false to be true`, with the reason discarded.
+		const c = spawn(VENV_PY, [SERVER, "--socket", sock], { stdio: ["ignore", "ignore", "pipe"] });
+		let bootErr = "";
+		c.stderr?.on("data", (d) => { bootErr = (bootErr + d).slice(-4000); });
 		try {
 			const t0 = Date.now();
 			let up = false;
 			while (Date.now() - t0 < 120_000) {
+				if (c.exitCode !== null) break; // it will never bind now
 				if (existsSync(sock)) {
 					const r = await rpc(sock, { op: "ping" });
 					if (r && !r.error) { up = true; break; }
 				}
 				await new Promise((r) => setTimeout(r, 200));
 			}
-			expect(up).toBe(true);
+			expect(up, up ? "" : `server did not start on ${sock}` +
+				(c.exitCode !== null ? ` (exited ${c.exitCode})` : " (running, never bound)") +
+				(bootErr.trim() ? `\n--- stderr ---\n${bootErr.trim()}` : "\n(no stderr)")
+			).toBe(true);
 		} finally {
 			try { c.kill(); } catch {}
 			try { if (existsSync(sock)) unlinkSync(sock); } catch {}

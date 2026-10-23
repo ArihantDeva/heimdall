@@ -76,16 +76,28 @@ afterAll(() => {
 describe.skipIf(!canRun)("fast search: fused lexical+semantic, sub-200ms", () => {
 	beforeAll(async () => {
 		try { if (existsSync(SOCK)) unlinkSync(SOCK); } catch {}
-		child = spawn(VENV_PY, [SERVER, "--socket", SOCK], { stdio: "ignore" });
+		// Capture stderr, and stop waiting the moment the child exits. Measured
+		// 2026-10-23: an unusable HOME made this throw "server did not start" after
+		// the full 120s. That message is true and names nothing; the real cause (a
+		// missing model cache) was written to stderr and thrown away by
+		// stdio:"ignore". A boot wait must report WHY, not just that.
+		child = spawn(VENV_PY, [SERVER, "--socket", SOCK], { stdio: ["ignore", "ignore", "pipe"] });
+		let bootErr = "";
+		child.stderr?.on("data", (d) => { bootErr = (bootErr + d).slice(-4000); });
 		const t0 = Date.now();
 		while (Date.now() - t0 < 120_000) {
+			if (child.exitCode !== null) break; // it will never bind now
 			if (existsSync(SOCK)) {
 				const r = await rpc({ op: "ping" });
 				if (r && !r.error) return;
 			}
 			await new Promise((r) => setTimeout(r, 200));
 		}
-		throw new Error("server did not start");
+		throw new Error(
+			`server did not start on ${SOCK}` +
+			(child.exitCode !== null ? ` (exited ${child.exitCode})` : " (still running, never bound)") +
+			(bootErr.trim() ? `\n--- server stderr ---\n${bootErr.trim()}` : "\n(no stderr captured)"),
+		);
 	}, 180_000);
 
 	afterAll(() => {
@@ -221,14 +233,25 @@ describe.skipIf(!canRun)("fast search: hard 10s deadline", () => {
 		// worker started with HEIMDALL_SEARCH_DEADLINE tiny, asked to do real work.
 		const slowSock = join(SOCK_DIR, "fastsearch-deadline.sock");
 		try { if (existsSync(slowSock)) unlinkSync(slowSock); } catch {}
+		// Capture stderr rather than discarding it: a boot failure otherwise shows
+		// up as "expected false to be true" after a full 120s wait.
 		const slow = spawn(VENV_PY, [SERVER, "--socket", slowSock], {
-			stdio: "ignore",
+			stdio: ["ignore", "ignore", "pipe"],
 			env: { ...process.env, HEIMDALL_SEARCH_DEADLINE: "0.05" },
 		});
+		let slowErr = "";
+		slow.stderr?.on("data", (d) => { slowErr = (slowErr + d).slice(-4000); });
 		try {
 			const t0 = Date.now();
 			let up = false;
 			while (Date.now() - t0 < 120_000) {
+				// Do not wait out the full 120s for a process that already exited.
+				if (slow.exitCode !== null && !existsSync(slowSock)) {
+					throw new Error(
+						`query-server exited ${slow.exitCode} without binding ${slowSock}` +
+						(slowErr.trim() ? `\n--- server stderr ---\n${slowErr.trim()}` : "\n(no stderr captured)"),
+					);
+				}
 				if (existsSync(slowSock)) {
 					const r = await new Promise((resolve) => {
 						const s = createConnection(slowSock);
