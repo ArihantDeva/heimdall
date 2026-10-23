@@ -44,7 +44,24 @@ print(f"   backed up DB via sqlite backup API -> {sys.argv[1]} ({os.path.getsize
 EOF
 BK_RC=$?
 [ "$BK_RC" -eq 0 ] || die "sqlite backup failed (exit $BK_RC) — refusing to wipe the graph"
-sqlite3 "$DB" "SELECT hex(id), title, body FROM nodes;" > "$BK/nodes.$TS.tsv" 2>/dev/null
+# The node list is a SECOND restore source and the only human-readable one. It
+# was written with stderr to /dev/null, its exit status ignored, and no emptiness
+# check — measured 2026-10-23: a valid-but-empty graft.db produced a 0-byte
+# nodes.$TS.tsv and the run proceeded to the wipe. A backup that silently holds
+# nothing is worse than a loud failure, because the next step DROPs the source.
+if ! sqlite3 "$DB" "SELECT hex(id), title, body FROM nodes;" > "$BK/nodes.$TS.tsv" 2>"$BK/nodes.$TS.err"; then
+	die "node list extraction failed (see $BK/nodes.$TS.err) — refusing to wipe the graph"
+fi
+if [ ! -s "$BK/nodes.$TS.tsv" ]; then
+	# An empty database is legitimate, so this is not an error on its own — but
+	# the node list must at least be written. Distinguish "no nodes" from
+	# "the query did not run" by checking the source count.
+	SRC_N=$(sqlite3 "$DB" "SELECT count(*) FROM nodes;" 2>/dev/null || echo "?")
+	if [ "$SRC_N" != "0" ]; then
+		die "node list is empty but the graph holds $SRC_N node(s) — extraction failed, refusing to wipe"
+	fi
+fi
+rm -f "$BK/nodes.$TS.err" 2>/dev/null
 echo "   node list saved -> $BK/nodes.$TS.tsv"
 
 echo "== 2/6 dump all nodes (title/body/keywords) + wipe graph"
