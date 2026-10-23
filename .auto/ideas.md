@@ -14,3 +14,12 @@
 - The inverse sweep (worth doing once): suites that DO spawn a script but pass it
   no arguments and ignore its exit status — a spawn that never asserts is as weak
   as a grep.
+- DONE (#59): kb-verify.sh scratch cleanup behaviour suite. Remaining backlog
+  item: tests/kb-rebuild-fail-closed.test.mjs and stale-node-absence-and-mass-guard
+  are still listed as TEXT-ONLY by the sweep even though behaviour suites now
+  exist alongside them. Consider whether the text-only ones earn their keep or
+  should shrink to the few shape facts that matter (the shape assertions are not
+  harmful, just insufficient).
+- Unexplored axis: scripts whose cleanup/guard branches are correct but never
+  REACHED (dead code after an early exit). Mutation = move the branch after a
+  `return`/`exit` and see if any suite notices.
