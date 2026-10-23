@@ -108,23 +108,64 @@ function guardBody(body) {
 	};
 }
 
+// A skipped describe NEVER RUNS its body, so node cannot count what was in it:
+//     describe.skip("x", () => { it("a",...); it("b",...); it("c",...); });
+// reports  ℹ tests 0   ℹ skipped 0  — the three tests do not exist.
+// Measured on node 26.10. Consequence for this repo (2026-10-23): the suite
+// printed `skipped 3` while SIXTEEN child tests sat behind those three suites
+// (14 product tests + 2 harness tests). Anyone reading "3 skipped" concludes
+// three assertions were deferred; the real figure was 16.
+//
+// The body genuinely must not run — that is what skipping means — so the child
+// names cannot be recovered. What CAN be fixed is the vanishing: register the
+// deferred block as one skipped test that carries its name and reason, so the
+// tally shows a deferral instead of nothing.
+// A LEAF test is the only shape node counts when skipped. A skipped SUITE
+// reports `ℹ skipped 0` no matter how many children it held (verified on node
+// 26.10 with describe.skip and with describe(name, {skip}, ...)), which is the
+// vanishing this function exists to prevent.
+function deferred(name, reason) {
+	const why = reason ? String(reason) : "canRun predicate was false";
+	nodeIt(`${name} — DEFERRED, its tests are not in the tally (${why})`,
+		{ skip: why }, () => {});
+}
 const describe = (name, body, ...rest) =>
 	describeBase(name, guardBody(body), ...rest);
-for (const key of ["skip", "only", "todo", "skipIf", "runIf"]) {
+
+// CAREFUL: node:test has NO describe.skipIf — it is bun-only, and adapt() above
+// implemented it on the wrapper. Copying modifiers off `describeBase` (which has
+// only skip/only/todo) therefore DROPPED skipIf, and three suites in this repo
+// call it. Evaluate the predicate here instead of delegating to node.
+const SKIP_KEYS = ["skip", "only", "todo"];
+for (const key of SKIP_KEYS) {
 	const mod = describeBase[key];
 	if (typeof mod === "function") {
-		describe[key] = (...args) => {
-			// args are (name, body[, ...]) or (cond)(name, body[, ...])
-			if (args.length >= 2 && typeof args[1] === "function") {
-				return mod(args[0], guardBody(args[1]), ...args.slice(2));
-			}
-			// predicate form: describe.skipIf(cond) -> registrar
-			const inner = mod(...args);
-			return typeof inner === "function"
-				? (n, b, ...r) => inner(n, guardBody(b), ...r)
-				: inner;
-		};
+		// `describe.skip` still drops children, so route it through deferred() to
+		// keep the count visible. only/todo keep node's own semantics.
+		describe[key] = key === "skip"
+			? (n) => deferred(n)
+			: (...args) => (typeof args[1] === "function"
+				? mod(args[0], guardBody(args[1]), ...args.slice(2))
+				: mod(...args));
 	}
+}
+// bun's skipIf/runIf take a boolean and RETURN A REGISTRAR of the same kind.
+for (const [key, want] of [["skipIf", false], ["runIf", true]]) {
+	describe[key] = (cond) => {
+		const on = typeof cond === "function" ? !!cond() : !!cond;
+		if (on !== want) {
+			return Object.assign(
+				(n, b, ...r) => (key === "skipIf"
+					? deferred(n)
+					: guardBody(b) === b ? undefined : describeBase(n, guardBody(b), ...r)),
+				{ skip: describeBase.skip, only: describeBase.only, todo: describeBase.todo },
+			);
+		}
+		return Object.assign(
+			(n, b, ...r) => describeBase(n, guardBody(b), ...r),
+			{ skip: describeBase.skip, only: describeBase.only, todo: describeBase.todo },
+		);
+	};
 }
 
 // bun spells these beforeAll/afterAll; node:test spells them before/after. Both
