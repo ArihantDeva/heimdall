@@ -73,7 +73,59 @@ function adapt(registrar) {
 
 const it = adapt(nodeIt);
 const test = adapt(nodeTest);
-const describe = adapt(nodeDescribe);
+const describeBase = adapt(nodeDescribe);
+
+// A describe BODY runs at REGISTRATION time, before any test executes. If it
+// throws — most easily from an `expect()` placed at the top of the block — node
+// reports the block as one failing suite and registers NONE of its children.
+// Measured on node 26.10: five intended `it()`s became zero, and the run
+// printed `✖ failing tests: ✖ block B` followed by `ℹ fail 0`. The process exit
+// code is 1, so CI is not fooled, but anything reading the COUNTS (including
+// this project's own experiment tooling) sees a clean run.
+//
+// So the wrapper converts a registration throw into a normal failing test, which
+// is counted, named, and attributable to the block that lost its children:
+//   ✖ describe "block B" threw while registering — 5 intended tests never ran
+// A block that loses its tests is exactly as dangerous as a swallowed exception,
+// and for the same reason: the run looks green while verifying nothing.
+// Wrap the BODY, not the registrar: whichever variant ends up executing it
+// (plain, .only, .runIf(true)) the guard applies, and the ones that never
+// execute it (.skip, .skipIf(true), .todo) are untouched by construction.
+function guardBody(body) {
+	if (typeof body !== "function") return body;
+	return (...a) => {
+		try {
+			return body(...a);
+		} catch (err) {
+			nodeIt(`describe threw while registering — its tests never ran`, () => {
+				throw err;
+			});
+			// Not rethrown: node's own suite-level error is not counted in the
+			// run's fail tally, and rethrowing would double-report without
+			// adding a counted failure. The nodeIt above IS the counted one.
+			return undefined;
+		}
+	};
+}
+
+const describe = (name, body, ...rest) =>
+	describeBase(name, guardBody(body), ...rest);
+for (const key of ["skip", "only", "todo", "skipIf", "runIf"]) {
+	const mod = describeBase[key];
+	if (typeof mod === "function") {
+		describe[key] = (...args) => {
+			// args are (name, body[, ...]) or (cond)(name, body[, ...])
+			if (args.length >= 2 && typeof args[1] === "function") {
+				return mod(args[0], guardBody(args[1]), ...args.slice(2));
+			}
+			// predicate form: describe.skipIf(cond) -> registrar
+			const inner = mod(...args);
+			return typeof inner === "function"
+				? (n, b, ...r) => inner(n, guardBody(b), ...r)
+				: inner;
+		};
+	}
+}
 
 // bun spells these beforeAll/afterAll; node:test spells them before/after. Both
 // register on the enclosing describe, so the alias is exact, not approximate.
