@@ -108,8 +108,24 @@ ec("double enqueue same path keeps one queue row", () => {
   } finally { s.clean(); }
 });
 ec("dequeue of never-enqueued path is a no-op", () => {
-  const s = sb(); try { s.journal.dequeue("/nope/x.py"); assert.ok(true); }
-  finally { s.clean(); }
+  // Was `assert.ok(true)` — deleting the dequeue() call entirely left this
+  // passing, so it named a no-op without observing one. A no-op is only
+  // meaningful relative to a queue that already holds something.
+  const s = sb(); try {
+    const p = s.file("keep.py", "x");
+    s.journal.enqueue(p, "t");
+    const before = s.journal.queueDepth();
+    assert.ok(before >= 1, "precondition: the queue must hold an entry");
+    s.journal.dequeue("/nope/x.py");
+    assert.equal(s.journal.queueDepth(), before, "dequeue of an unknown path changed the queue");
+    // A no-op assertion on its own cannot tell "did nothing" from "was never
+    // called" — deleting the call passed even after the first fix, because doing
+    // nothing IS the expected result. Pin the CONTRAST: a real dequeue on the
+    // same queue must move the depth, or the assertion above proves nothing.
+    s.journal.dequeue(p);
+    assert.equal(s.journal.queueDepth(), before - 1,
+      "dequeue of a known path did not remove it — the no-op assertion above is vacuous");
+  } finally { s.clean(); }
 });
 ec("generation increments across commits", () => {
   const s = sb(); try {
@@ -337,9 +353,15 @@ ec("reason preserved into queue", () => {
   const s = sb(); try {
     const f = join(s.dir, "h.jsonl");
     writeFileSync(f, JSON.stringify({ path: "/tmp/r.py", reason: "custom" }) + "\n");
+    const before = s.journal.queueDepth();
     ingestHints(f, s.journal);
-    // no direct queue read API — absence of throw plus count is the contract
-    assert.ok(true);
+    // Was `assert.ok(true)` with a comment admitting there was no observable.
+    // queueDepth() IS the observable: the hint must actually have been queued.
+    assert.equal(s.journal.queueDepth(), before + 1,
+      "the hint did not reach the queue");
+    const queued = s.journal.db.prepare(
+      "SELECT reason FROM queue WHERE path = ?").get("/tmp/r.py");
+    assert.equal(queued?.reason, "custom", "the reason was not preserved");
   } finally { s.clean(); }
 });
 ec("hint for nonexistent path still enqueues (advisory)", () => {
@@ -379,8 +401,9 @@ ec("corrupt lock content does not crash reclaim", () => {
   try {
     writeFileSync(lf, "not-a-pid!!!");
     const l = new Lock(lf);
-    l.acquire(); // must not throw
-    assert.ok(true);
+    // Was `assert.ok(true)`. acquire() returns a boolean, so observe it: a
+    // corrupt lock file must be RECLAIMED, not silently declined.
+    assert.equal(l.acquire(), true, "a corrupt lock file was not reclaimed");
   } finally { rmSync(dirname(lf), { recursive: true, force: true }); }
 });
 ec("withLock releases on inner throw", async () => {
@@ -405,18 +428,33 @@ ec("null-ish depth handled by audit (row.depth null)", () => {
     const p = s.file("nd.py", "def f(): pass\n");
     s.journal.enqueue(p, "t"); drainAll(s.ctx);
     s.journal.db.prepare(`UPDATE paths SET depth = NULL WHERE path = ?`).run(p);
-    // must not throw
-    audit(s.ctx, { enqueue: false });
-    assert.ok(true);
+    // Was `assert.ok(true)`. audit() RETURNS the drift it found, so assert on
+    // that rather than on the absence of a throw.
+    const drift = audit(s.ctx, { enqueue: false });
+    assert.ok(Array.isArray(drift), "audit must return its findings");
   } finally { s.clean(); }
 });
 ec("depthFor on directory returns something sane", () => {
   const d = mkdtempSync(join(tmpdir(), "heimdall-ec-d-"));
-  try { depthFor(d, { depth: "max" }, CAP); assert.ok(true); }
-  finally { rmSync(d, { recursive: true, force: true }); }
+  try {
+    // Was `assert.ok(true)` under a title claiming a value ("returns something
+    // sane") that was never inspected.
+    const got = depthFor(d, { depth: "max" }, CAP);
+    // depthFor returns {requested, effective, clamped}; assert the shape, not a
+    // throw-free run. `.effective` must be a real depth level.
+    assert.ok(got && typeof got === "object", "depthFor must return a result object");
+    assert.ok(["path", "file", "symbol", "graph"].includes(got.effective),
+      `depthFor returned effective=${JSON.stringify(got.effective)} for a directory`);
+    assert.equal(typeof got.clamped, "boolean");
+  } finally { rmSync(d, { recursive: true, force: true }); }
 });
 ec("depthFor on nonexistent path does not throw", () => {
-  depthFor("/nope/nothing-at-all.py", { depth: "max" }, CAP); assert.ok(true);
+  // Was `assert.ok(true)` — never inspected the return under a title claiming
+  // a value. A nonexistent path must still yield a depth, not undefined.
+  const got = depthFor("/nope/nothing-at-all.py", { depth: "max" }, CAP);
+  assert.ok(got && typeof got === "object", "depthFor must return a result object");
+  assert.ok(["path", "file", "symbol", "graph"].includes(got.effective),
+    `depthFor returned effective=${JSON.stringify(got.effective)} for a nonexistent path`);
 });
 
 // ── desiredState edges ────────────────────────────────────────────────────
@@ -584,7 +622,10 @@ ec("ownedEdges of unknown path returns empty array", () => {
 });
 ec("close() twice is idempotent (no ERR_INVALID_STATE)", () => {
   const s = sb(); s.clean();
-  s.journal.close(); s.journal.close(); assert.ok(true);
+  s.journal.close(); s.journal.close();
+  // Was `assert.ok(true)`. Idempotent means the SECOND close is harmless, which
+  // is only observable by proving the object is not left in a broken state.
+  assert.doesNotThrow(() => s.journal.close(), "a third close must also be harmless");
 });
 ec("generation of unknown path is 0", () => {
   const s = sb(); try { assert.equal(s.journal.generation("/nope/x.py"), 0); }
