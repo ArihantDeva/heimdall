@@ -389,11 +389,41 @@ def _dup_card(c: sqlite3.Connection, cid: str, rel: str, body: str,
     c.execute("INSERT INTO vec(rowid, embedding) VALUES (?,?)", (cur.lastrowid, src[0]))
 
 
+# A prune that removes more than this fraction of the index in ONE build is
+# treated as a bug in the walk, not as mass file deletion.
+_PRUNE_MAX_FRACTION = 0.5
+
+
 def _prune_stale(c: sqlite3.Connection, known: dict[str, str], seen: set[str]) -> None:
     """Remove cards whose files vanished. sqlite-vec keeps delete-tombstones;
     mass prunes are rare enough that per-row deletes stay correct in practice.
-    ponytail: if k-NN ever surfaces dead rows again, trigger full vec rebuild here."""
+    ponytail: if k-NN ever surfaces dead rows again, trigger full vec rebuild here.
+
+    CIRCUIT BREAKER (2026-10-23). Three separate error-path bugs were found in
+    one day that each fed this function a wrong `seen` — a failed find, an
+    unreadable dimension, a failed stat(). Each was fixed individually, but the
+    class remains: whatever `seen` this receives is trusted completely, and
+    `known` can be 135k cards. Point HEIMDALL_HOME at a wrong or half-mounted
+    path and the walk legitimately returns nothing, so `seen` is empty and this
+    would DELETE THE ENTIRE INDEX — no guard existed at any layer.
+    Mass deletion is not something a single build should ever do silently: if
+    more than half the index looks vanished, refuse, keep the rows, and say so.
+    Set HEIMDALL_PRUNE_ALLOW_MASS=1 when a mass deletion is genuinely intended.
+    """
     stale = [cid for cid in known if cid not in seen]
+    if known:
+        frac = len(stale) / len(known)
+        if frac > _PRUNE_MAX_FRACTION and os.environ.get("HEIMDALL_PRUNE_ALLOW_MASS") != "1":
+            print(
+                f"embed-index: REFUSING to prune {len(stale)}/{len(known)} cards "
+                f"({frac:.0%} of the index) in one build. That ratio usually means "
+                f"the walk did not see the tree (wrong HEIMDALL_HOME, unmounted "
+                f"volume, permissions) rather than mass deletion. Rows kept. "
+                f"Set HEIMDALL_PRUNE_ALLOW_MASS=1 to force.",
+                file=sys.stderr,
+            )
+            record_semantic_state("prune_refused")
+            return
     for cid in stale:
         row = c.execute("SELECT rowid FROM cards WHERE id=?", (cid,)).fetchone()
         if row:
@@ -448,6 +478,20 @@ def _purge_policy_excluded(c: sqlite3.Connection) -> int:
     # a card at /alternate-home/.claude/telemetry/a.py was purged 0 times even
     # though discovery excludes it.
     victims = [(rid, p) for rid, p in rows if should_exclude_path(p, str(HOME_ROOT))]
+    # Same circuit breaker as _prune_stale, for the same reason: a predicate fed
+    # a wrong HOME_ROOT can match everything. Refuse a delete-the-whole-index
+    # ratio rather than trusting one function's opinion of every row.
+    if rows and victims:
+        frac = len(victims) / len(rows)
+        if frac > _PRUNE_MAX_FRACTION and os.environ.get("HEIMDALL_PRUNE_ALLOW_MASS") != "1":
+            print(
+                f"embed-index: REFUSING to purge {len(victims)}/{len(rows)} cards "
+                f"({frac:.0%}) as policy-excluded. Set HEIMDALL_PRUNE_ALLOW_MASS=1 "
+                f"to force.",
+                file=sys.stderr,
+            )
+            record_semantic_state("purge_refused")
+            return 0
     for rid, _p in victims:
         c.execute("DELETE FROM vec WHERE rowid=?", (rid,))
         c.execute("DELETE FROM cards WHERE rowid=?", (rid,))
