@@ -22,6 +22,7 @@ import os
 import pathlib
 import socket
 import sys
+import time
 
 DEFAULT_SOCKET = pathlib.Path.home() / ".heimdall" / "query.sock"
 
@@ -70,13 +71,25 @@ def main(argv: list[str]) -> int:
         req["kind"] = kind
     if scope:
         req["scope"] = scope
+    # ONE DEADLINE FOR THE WHOLE EXCHANGE, not per-recv. `settimeout` applies to
+    # each individual socket operation, so a worker that trickles a byte at a time
+    # resets the clock on every recv: measured 2026-10-23, a 1s timeout took 7.7s
+    # against a server sending one byte every 0.3s. With the default 90s and a
+    # stalled worker that is an unbounded search — and every caller of
+    # kb-search.sh waits on it. The absolute deadline below cannot be reset.
+    timeout = float(os.environ.get("HEIMDALL_QUERY_TIMEOUT", "90"))
+    deadline = time.monotonic() + timeout
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-            s.settimeout(float(os.environ.get("HEIMDALL_QUERY_TIMEOUT", "90")))
+            s.settimeout(timeout)
             s.connect(str(sock_path))
             s.sendall((json.dumps(req) + "\n").encode())
             buf = b""
             while b"\n" not in buf:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"no complete reply within {timeout}s")
+                s.settimeout(remaining)
                 chunk = s.recv(65536)
                 if not chunk:
                     break
