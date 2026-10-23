@@ -85,7 +85,14 @@ async function runInsert(args) {
     mkdirSync(FACTS_DIR, { recursive: true });
     const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 80);
     const stamp = new Date().toISOString().slice(0, 10);
-    factPath = join(FACTS_DIR, `${stamp}-${slug || "fact"}.md`);
+    // Distinct titles can slug identically: "a b", "a-b" and "a/b" all reduce to
+    // "a-b", so the same-day path collided and writeFileSync silently destroyed
+    // the earlier card while exiting 0 (measured 2026-10-23: three inserts, one
+    // file, two facts gone). This file is the DURABLE record — losing it is not a
+    // cache miss. Disambiguate with a counter rather than overwriting.
+    const base = join(FACTS_DIR, `${stamp}-${slug || "fact"}`);
+    factPath = `${base}.md`;
+    for (let n = 2; existsSync(factPath); n += 1) factPath = `${base}-${n}.md`;
     const kw = kws.length ? `keywords: ${kws.join(", ")}\n` : "";
     const card = `# ${title}\n\n${kw}\n${body}\n\n(recorded ${new Date().toISOString()})\n`;
     writeFileSync(factPath, card, "utf8");
