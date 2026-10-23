@@ -89,6 +89,44 @@ test("pi: extensions copied into ~/.pi/agent/extensions + AGENTS.md block", () =
 	} finally { cleanup(); }
 });
 
+// Regression: the npm-only package detection missed the PATH-install shape
+// (settings.json packages[] naming a checkout dir), so every `heimdall init`
+// copied the four extensions into ~/.pi/agent/extensions/ next to the package
+// copies. pi then had two owners per tool name (kb_search/kb_insert/kb_sync)
+// and exited 1 at boot (reported 2026-10-01 and again 2026-10-23).
+test("pi: path-installed package is detected, no duplicate extension copies", () => {
+	const { home, cleanup } = freshHome();
+	try {
+		// A pi package on disk the settings.json points at (the local-dev shape).
+		const checkout = join(home, "Repos", "heimdall");
+		mkdirSync(join(checkout, "extensions"), { recursive: true });
+		writeFileSync(join(checkout, "package.json"), JSON.stringify({ name: "@arihantdeva/heimdall", pi: { extensions: ["./extensions"] } }));
+		mkdirSync(join(home, ".pi", "agent"), { recursive: true });
+		// Both entry forms must be recognised: bare path string, and object+filter.
+		for (const entry of [checkout, { source: checkout, extensions: ["extensions/*.ts", "!extensions/kb-search-guard.ts"] }]) {
+			writeFileSync(join(home, ".pi", "agent", "settings.json"), JSON.stringify({ packages: [entry] }));
+			rmSync(join(home, ".pi", "agent", "extensions"), { recursive: true, force: true });
+			const r = installAdapter("pi", home);
+			assert.match(r, /package-managed/, `bare-path entry not detected: ${JSON.stringify(entry)}`);
+			assert.ok(!existsSync(join(home, ".pi", "agent", "extensions", "kb-tools.ts")), "duplicate copy written");
+		}
+	} finally { cleanup(); }
+});
+
+// A pre-existing local file is either identical (no-op) or a deliberate user
+// override. The copy branch must never clobber it.
+test("pi: copy branch never overwrites an existing local extension", () => {
+	const { home, cleanup } = freshHome();
+	try {
+		const dir = join(home, ".pi", "agent", "extensions");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "kb-tools.ts"), "// user override\n");
+		installAdapter("pi", home);
+		assert.equal(readFileSync(join(dir, "kb-tools.ts"), "utf8"), "// user override\n", "override clobbered");
+		assert.ok(existsSync(join(dir, "kb-orient.ts")), "missing file was not copied");
+	} finally { cleanup(); }
+});
+
 test("opencode: plugin file + opencode.json mcp entry", () => {
 	const { home, cleanup } = freshHome();
 	try {

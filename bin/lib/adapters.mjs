@@ -99,10 +99,18 @@ function resolveCli() {
 // pi auto-discovers extensions from ~/.pi/agent/extensions/. The heimdall npm
 // package ships kb-tools.ts / kb-search-guard.ts / kb-autosync.ts / kb-orient.ts.
 function writePi(home) {
-	// If heimdall is already installed as a pi package (pi manifest in its
-	// package.json, under ~/.pi/agent/npm or a project .pi/npm), pi loads the
-	// extensions from the package itself — copying duplicates them. Wire the
-	// rules block only.
+	// If heimdall is already installed as a pi package, pi loads the extensions
+	// from the package itself — copying duplicates them and the copied files
+	// collide on tool names (kb_search/kb_insert/kb_sync), which makes pi exit 1
+	// at boot. Wire the rules block only.
+	//
+	// Two install shapes must both be detected:
+	//   1. npm/git package — manifest under ~/.pi/agent/npm or ~/.pi/npm.
+	//   2. PATH package — settings.json lists the checkout directory itself, e.g.
+	//      "/Users/me/Repos/heimdall" or the same as {"source": ..., "extensions": [...]}.
+	// The path shape is the common local-dev install and was MISSED by the
+	// original npm-only check, so every `heimdall init` recreated the duplicates
+	// (root cause of the recurring boot conflict, 2026-10-23).
 	const npmRoots = [join(home, ".pi", "agent", "npm", "node_modules"), join(home, ".pi", "npm", "node_modules")];
 	for (const root of npmRoots) {
 		for (const name of ["@arihantdeva/heimdall", "heimdall"]) {
@@ -116,6 +124,33 @@ function writePi(home) {
 			} catch { /* unreadable manifest — fall through to copy */ }
 		}
 	}
+	// Path/git package shape: a settings.json packages[] entry naming the checkout
+	// directory itself. pi accepts either a bare string or an object whose "source"
+	// is that path (docs/packages.md: local packages are identified by resolved
+	// absolute path). The bare-path form is the one the npm-only check missed.
+	for (const settingsPath of [join(home, ".pi", "agent", "settings.json"), join(home, ".pi", "settings.json")]) {
+		if (!existsSync(settingsPath)) continue;
+		let sources = [];
+		try {
+			sources = (JSON.parse(readFileSync(settingsPath, "utf8"))?.packages ?? [])
+				.map((e) => (typeof e === "string" ? e : e?.source))
+				.filter((s) => typeof s === "string");
+		} catch { continue; /* unreadable settings — fall through to copy */ }
+		const selfIsPackage = sources.some((s) => {
+			if (!s.startsWith("/")) return false;
+			const manifest = join(s, "package.json");
+			if (!existsSync(manifest)) return false;
+			try { return Boolean(JSON.parse(readFileSync(manifest, "utf8"))?.pi?.extensions?.length); } catch { return false; }
+		});
+		if (selfIsPackage) {
+			upsertMarkdownBlock(join(home, ".pi", "agent", "AGENTS.md"));
+			return "pi (package-managed — extensions loaded by pi, rules wired)";
+		}
+	}
+	// Not package-managed: copy is the only way to load the extensions, BUT never
+	// overwrite a file that already exists. A pre-existing copy is either the same
+	// file (harmless) or a user-local override this writer must not silently
+	// clobber. Overwriting made the copy branch destructive and hid the bug above.
 	const pkgExtensions = join(pkgRoot(), "extensions");
 	const targetDir = ensure(join(home, ".pi", "agent", "extensions"));
 	const libTarget = ensure(join(targetDir, "lib"));
@@ -123,10 +158,14 @@ function writePi(home) {
 	const copied = [];
 	for (const f of files) {
 		const src = join(pkgExtensions, f);
-		if (existsSync(src)) { copyFileSync(src, join(targetDir, f)); copied.push(f); }
+		const dest = join(targetDir, f);
+		// Never clobber an existing file: it is either byte-identical (no-op) or a
+		// user-local override this writer must not destroy.
+		if (existsSync(src) && !existsSync(dest)) { copyFileSync(src, dest); copied.push(f); }
 	}
 	const coreSrc = join(pkgExtensions, "lib", "kb-guard-core.mjs");
-	if (existsSync(coreSrc)) copyFileSync(coreSrc, join(libTarget, "kb-guard-core.mjs"));
+	const coreDest = join(libTarget, "kb-guard-core.mjs");
+	if (existsSync(coreSrc) && !existsSync(coreDest)) copyFileSync(coreSrc, coreDest);
 	upsertMarkdownBlock(join(home, ".pi", "agent", "AGENTS.md"));
 	return "pi";
 }
