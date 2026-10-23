@@ -67,8 +67,19 @@ export function runIndex({ root = homedir(), embedScript = null, budgetMs = 20 *
 			results.push({ repo, status: "skipped", detail: "graft unavailable — npm i -g @nanonets/graft" });
 			continue;
 		}
+		// The per-repo timeout must be bounded by the REMAINING budget, not a flat
+		// two minutes. With a flat timeout the loop can overrun the whole budget by
+		// 120s per repo — and this function's docstring promises it self-terminates.
+		const repoBudget = deadline - Date.now();
+		if (repoBudget <= 0) {
+			results.push({ repo, status: "skipped", detail: "time budget exhausted — rerun heimdall index" });
+			continue;
+		}
 	try {
-		const r = spawnSync("graft", ["build"], { cwd: repo, stdio: "ignore", timeout: 120_000 });
+		const r = spawnSync("graft", ["build"], {
+			cwd: repo, stdio: "ignore",
+			timeout: Math.min(120_000, repoBudget),
+		});
 		if (r.status !== 0 || r.error) {
 			results.push({ repo, status: "failed", detail: r.error?.message ?? `graft build exit ${r.status}` });
 		} else {
@@ -85,8 +96,18 @@ export function runIndex({ root = homedir(), embedScript = null, budgetMs = 20 *
 	const script = embedScript ?? join(BIN_DIR, "embed-index.py");
 	if (existsSync(py) && existsSync(script)) {
 		try {
-			const remaining = Math.max(60_000, deadline - Date.now());
-			const r = spawnSync(py, [script, "build"], { stdio: "ignore", timeout: remaining });
+			// Math.max(60_000, ...) FLOORED the remaining budget at a full minute, so
+			// an exhausted budget still granted 60s of overrun (measured
+			// 2026-10-23: deadline passed by 5s -> remaining = 60000). Respect the
+			// deadline: if nothing is left, skip and say so; never extend it.
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) {
+				embedNote = "embed: skipped (time budget exhausted — rerun heimdall index)";
+				return { repos: results, embed: embedNote };
+			}
+			const r = spawnSync(py, [script, "build"], {
+				stdio: "ignore", timeout: Math.min(remaining, 120_000),
+			});
 			embedNote = r.status !== 0 || r.error ? `embed: failed (${r.error?.message ?? `exit ${r.status}`})` : "embed: global.db built/updated";
 		} catch {
 			embedNote = "embed: failed (see ~/.heimdall)";
