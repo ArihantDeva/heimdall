@@ -384,15 +384,25 @@ async function runScore(args) {
     // raise the score by dropping its warnings. Count the missing reading as
     // one warning and surface it explicitly.
     const staleWarn = stale ? stale.stale : 0;
+    // A dead sensor is ONE warning, and it must appear in the report as well as
+    // in the score. Measured 2026-10-23: the score was computed with the +1 but
+    // the report spread the raw counts, so a corrupt graph printed
+    // {score: 97, warnings: 0} — three points unaccounted for, and a reader could
+    // not tell why the score was not 100. The report and the score must be the
+    // same arithmetic.
     const staleIssue = stale ? 0 : 1;
+    const warnings = counts.warnings + staleWarn + staleIssue;
     const { score, band } = computeHealthScore({
       errors: counts.errors,
-      warnings: counts.warnings + staleWarn + staleIssue,
+      warnings,
       infos: counts.infos,
     });
     const out = {
       score, band,
-      issues: { ...counts, staleNodesPending: stale?.stale ?? null, staleNodesTotal: stale?.nodes ?? null,
+      // Report the counts the score was actually computed from, not the raw
+      // drift counts — otherwise the numbers cannot be reconciled with the score.
+      issues: { ...counts, warnings,
+        staleNodesPending: stale?.stale ?? null, staleNodesTotal: stale?.nodes ?? null,
         staleScanFailed: !stale },
     };
     console.log(JSON.stringify(out, null, 2));
