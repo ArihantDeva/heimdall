@@ -206,39 +206,6 @@ case "$KIND" in
 	person|fact|decision) ;;
 	*) echo "== retrieve (per-repo graft + global semantic): $Q" ;;
 esac
-if [ ! -x "$GRAFT" ]; then
-	# Not a tool failure: a fresh/unconfigured machine has validly zero results.
-	# Exit 0 so callers (MCP kb_search) get an answer, not isError.
-	echo "WARN: graft binary not found at $GRAFT (set GRAFT=/path/to/graft). Install: npm i -g @nanonets/graft. Search unavailable until indexed — this is an empty result, not an error."
-	exit 0
-fi
-
-# Global semantic layer (bge-m3 embeddings over repo source).
-EMBED="$HOME/.heimdall/venv/bin/python3"
-if [ ! -x "$EMBED" ] || [ ! -f "$HOME/.heimdall/global.db" ]; then
-	echo "SEMANTIC_ERROR: not-configured (venv or global.db missing). Run: ~/.heimdall/venv/bin/python3 bin/embed-index.py build"
-fi
-
-# Repo roots: env override, else ~/Repos (expand ~). Colon-separated.
-if [ -n "${HEIMDALL_REPOS:-}" ]; then
-	REPOS="${HEIMDALL_REPOS//\~/$HOME}"
-	IFS=':' read -ra REPO_LIST <<< "$REPOS"
-else
-	REPO_LIST=()
-	if [ -d "$HOME/Repos" ]; then
-		for d in "$HOME"/Repos/*/; do
-			[ -d "${d%/}/graft" ] && REPO_LIST+=("${d%/}")
-		done
-	fi
-fi
-
-if [ ${#REPO_LIST[@]} -eq 0 ] && [ -z "${SCOPE:-}" ]; then
-	# Fresh install / no indexed repos yet: valid empty answer (exit 0), with
-	# setup guidance in-band. Exit 1 here broke MCP kb_search (isError) on CI.
-	echo "No repos with a graft graph found under ~/Repos yet. Index one: cd <repo> && heimdall index (or graft build). Search returns no hits until then."
-	exit 0
-fi
-
 # ── A person/fact query never runs the code legs at all.
 # The people and fact legs are a small self-contained Python block below (they
 # need sqlite3 and $Q/$N); the main code worker never sees those kinds, because
@@ -299,6 +266,45 @@ if kind == "person":
         print('No ~/.heimdall/people.db yet. Create one with: '
               'heimdall person add --name "Full Name"')
         sys.exit(0)
+    # Try the cheap direct read first, then fall back to a self-contained copy.
+    #
+    # Measured 2026-10-23: a WAL-mode database that has no -wal/-shm sidecars
+    # CANNOT be opened with `mode=ro` — sqlite raises "unable to open database
+    # file", because a read-only connection cannot create the sidecars it needs.
+    # That is not exotic: it is exactly the state of a store that was just
+    # created and checkpointed, copied in by a backup, or moved between machines.
+    # The person leg then died with a raw traceback instead of answering, and
+    # every people query returned nothing.
+    #
+    # The fact leg below already documents this same trap and solves it with the
+    # BACKUP API + journal_mode=DELETE into a self-contained temp file. The person
+    # leg never got that fix, so it carries the guard here too — the direct path
+    # stays for the common warm case (sidecars present), the copy handles the rest.
+    # Probe cheaply: the direct open either works for every later query or not.
+    direct_ok = True
+    try:
+        rows_from(db, "SELECT 1 FROM people LIMIT 1", ())
+    except sqlite3.OperationalError:
+        direct_ok = False
+    db_for_read = db
+    if not direct_ok:
+        # Rebuild a compact, sidecar-free snapshot then read THAT.
+        snap = tempfile.mktemp(suffix=".db")
+        try:
+            src = sqlite3.connect(db)          # read-write: allowed to checkpoint
+            try:
+                out = sqlite3.connect(snap)
+                try:
+                    src.backup(out)
+                    out.execute("PRAGMA journal_mode=DELETE")
+                    out.commit()
+                finally:
+                    out.close()
+            finally:
+                src.close()
+            db_for_read = snap
+        except Exception:
+            db_for_read = db               # let the real error surface below
     # Token-OR matching, not one whole-string LIKE. A person is asked about
     # in a sentence -- "who is Dinesh Sayana", "who maintains heimdall" --
     # and `LIKE '%who is Dinesh Sayana%'` matches no row at all, so the
@@ -312,7 +318,7 @@ if kind == "person":
         "(name LIKE ? OR aliases LIKE ? OR org LIKE ? OR role LIKE ? OR notes LIKE ?)"
         for _ in toks)
     args = tuple(f"%{t}%" for t in toks for _ in range(5))
-    rows = rows_from(db, f"SELECT * FROM people WHERE {where}", args)
+    rows = rows_from(db_for_read, f"SELECT * FROM people WHERE {where}", args)
     out = [{"id": r["id"], "row": dict(r)} for r in rows]
     # Alias-exact first, in JS: a SQL compare against the comma-joined alias
     # string is wrong (it only fires when aliases is empty), and LIKE alone
@@ -369,7 +375,19 @@ try:
     # "unable to open database file" this path reported, turning the whole
     # fact leg into a silent zero while the run still counted as valid.
     # Same pattern, same reason, as bin/kb-rebuild.sh and the people backup.
-    con = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
+    #
+    # BUT the source must be opened READ-WRITE, not `mode=ro`. Measured
+    # 2026-10-23: a WAL database with no -wal/-shm sidecars cannot be opened
+    # read-only at all -- sqlite has to create the sidecars and a read-only
+    # connection is not allowed to, so connecting raises "unable to open
+    # database file" BEFORE the backup ever runs. That is the exact state this
+    # comment is about (a store with no live reconciler, freshly created or
+    # copied), so the guard was defeated precisely where it was needed and the
+    # whole fact leg answered "WARN: fact leg failed: unable to open database
+    # file" -- a silent zero that still counted as a valid run.
+    # A read-write connection may create the sidecars, which is all the backup
+    # needs; the copy is into `tmp`, so the source is never written through.
+    con = sqlite3.connect(src)
     try:
         out = sqlite3.connect(tmp)
         try:
@@ -461,6 +479,39 @@ sys.exit(0)
 PYEOF
 	exit 0
 fi
+if [ ! -x "$GRAFT" ]; then
+	# Not a tool failure: a fresh/unconfigured machine has validly zero results.
+	# Exit 0 so callers (MCP kb_search) get an answer, not isError.
+	echo "WARN: graft binary not found at $GRAFT (set GRAFT=/path/to/graft). Install: npm i -g @nanonets/graft. Search unavailable until indexed — this is an empty result, not an error."
+	exit 0
+fi
+
+# Global semantic layer (bge-m3 embeddings over repo source).
+EMBED="$HOME/.heimdall/venv/bin/python3"
+if [ ! -x "$EMBED" ] || [ ! -f "$HOME/.heimdall/global.db" ]; then
+	echo "SEMANTIC_ERROR: not-configured (venv or global.db missing). Run: ~/.heimdall/venv/bin/python3 bin/embed-index.py build"
+fi
+
+# Repo roots: env override, else ~/Repos (expand ~). Colon-separated.
+if [ -n "${HEIMDALL_REPOS:-}" ]; then
+	REPOS="${HEIMDALL_REPOS//\~/$HOME}"
+	IFS=':' read -ra REPO_LIST <<< "$REPOS"
+else
+	REPO_LIST=()
+	if [ -d "$HOME/Repos" ]; then
+		for d in "$HOME"/Repos/*/; do
+			[ -d "${d%/}/graft" ] && REPO_LIST+=("${d%/}")
+		done
+	fi
+fi
+
+if [ ${#REPO_LIST[@]} -eq 0 ] && [ -z "${SCOPE:-}" ]; then
+	# Fresh install / no indexed repos yet: valid empty answer (exit 0), with
+	# setup guidance in-band. Exit 1 here broke MCP kb_search (isError) on CI.
+	echo "No repos with a graft graph found under ~/Repos yet. Index one: cd <repo> && heimdall index (or graft build). Search returns no hits until then."
+	exit 0
+fi
+
 
 # ── FAST PATH: warm fused search (2026-10-22) ────────────────────────────────
 #

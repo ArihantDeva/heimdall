@@ -35,9 +35,21 @@ JSON
 
 // The hit lines carry the absolute path, which includes $HOME. A mkdtemp()
 // home would bake a RANDOM path into the golden and never match again, so the
-// home is a fixed name under the OS temp dir and the whole tree is removed
-// after each run.
+// home is a fixed name under the OS temp dir.
+//
+// Even a fixed NAME is not enough: the temp ROOT differs per machine and per
+// platform (/var/folders/sm/<hash>/T/ on macOS, /tmp on Linux, and a runner's
+// hash is not the operator's). Committing that root made this golden pass only
+// on the machine that recorded it and fail in BOTH CI jobs, which is a golden
+// pinning the environment rather than the behaviour. The root is normalised to
+// <TMP> before comparison, so the golden now pins hit ORDER, the coverage
+// column, the titles, and the "anchor is gone" note — the things the spec is
+// actually about — and nothing about where the files happened to live.
 const FIXED_HOME = join(tmpdir(), "heimdall-golden-fixed");
+const TMP_ROOT = tmpdir();
+
+/** Replace the machine-specific temp root with a stable token. */
+const normalize = (s) => s.split(TMP_ROOT).join("<TMP>");
 
 function fakeHome() {
   rmSync(FIXED_HOME, { recursive: true, force: true });
@@ -60,13 +72,14 @@ shellTest("default output is byte-identical to the committed golden", () => {
   try {
     const r = search(home);
     assert.equal(r.status, 0, `search failed: ${r.stderr}`);
+    const actual = normalize(r.stdout);
     if (process.env.UPDATE_GOLDEN) {
-      writeFileSync(GOLDEN, r.stdout);
+      writeFileSync(GOLDEN, actual);
       return;
     }
     const expected = readFileSync(GOLDEN, "utf8");
     assert.equal(
-      r.stdout,
+      actual,
       expected,
       "default kb_search output changed. If this is intentional, re-record with " +
         "UPDATE_GOLDEN=1 and read the diff — the spec requires the no-flag " +
@@ -85,7 +98,8 @@ shellTest("passing --kind code is byte-identical to passing no flag", () => {  /
     const code = search(home, ["--kind", "code"]);
     assert.equal(bare.status, 0);
     assert.equal(code.status, 0);
-    assert.equal(code.stdout, bare.stdout, "--kind code changed the default output");
+    assert.equal(normalize(code.stdout), normalize(bare.stdout),
+      "--kind code changed the default output");
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

@@ -134,8 +134,9 @@ HOME_PRUNE_PREFIXES = (
     "go/pkg/mod/",                       # GOPATH module cache — 46,947, zero authored
     "backups/",                           # dated machine-state snapshots — 44,581
     "Documents/curseforge/",              # game installs — 18,618
-    "Desktop/Lumina/_work/",              # scraped page dumps — 30,366 ($HOME-anchored so a
-                                          # project's own _work/ is untouched)
+    "Desktop/Code Projects/Lumina/_work/",  # scraped page dumps — 30,366 ($HOME-anchored so a
+                                          # project's own _work/ is untouched). Path moved from
+                                          # Desktop/Lumina/ on 2026-10-16 desktop reorg.
     "equitylens/research/hyperagent-sales-prospector/data/",  # 119,530 generated
                                           # llm_queue/locks/mx_cache rows; 1 file tracked in git
     "equitylens/data/vendor/",            # 18,443 vendored third-party tree

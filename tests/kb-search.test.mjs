@@ -9,6 +9,28 @@ import test from "node:test";
 const shellTest = process.platform === "win32" ? test.skip : test;
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
+// Removing a sandbox is racy by nature here: kb-search.sh may leave a warm
+// query worker behind (it starts one with start_new_session, so it outlives the
+// shell), and that worker creates its socket/lock under $HOME asynchronously.
+// Measured 2026-10-23: an ENOTEMPTY from rmSync failed a test that had ALREADY
+// asserted correctly — the teardown raced a worker finishing its setup. Retry
+// briefly, then force: cleanup must never be the reason a green test goes red.
+function rmSandbox(dir) {
+  for (let i = 0; i < 20; i++) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch (e) {
+      if (e.code !== "ENOTEMPTY" && e.code !== "EBUSY") throw e;
+      // Synchronous backoff: this file uses spawnSync throughout, so there is
+      // no event loop to yield to between attempts.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+  }
+  rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+}
+
+
 shellTest("kb-search passes the resolved graft path to its Python worker", () => {
   const home = mkdtempSync(join(tmpdir(), "heimdall-kb-search-"));
   try {
@@ -25,7 +47,7 @@ shellTest("kb-search passes the resolved graft path to its Python worker", () =>
 
     assert.match(stdout, /Expected hit/);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSandbox(home);
   }
 });
 
@@ -46,7 +68,7 @@ shellTest("kb-search defaults to the graft backend with zero config", () => {
     assert.match(stdout, /GraftRan/);
     assert.doesNotMatch(stdout, /Mnemo hit/);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSandbox(home);
   }
 });
 
@@ -67,7 +89,7 @@ shellTest("kb-search HEIMDALL_BACKEND=mnemosyne routes through recall --json", (
     assert.match(stdout, /Mnemo hit/);
     assert.doesNotMatch(stdout, /== retrieve \(per-repo graft/);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSandbox(home);
   }
 });
 
@@ -83,7 +105,7 @@ shellTest("kb-search mnemosyne backend missing binary exits 0 with guidance", ()
     assert.match(res.stdout + res.stderr, /mnemosyne/i);
     assert.match(res.stdout + res.stderr, /pip install|uv pip|install/i);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSandbox(home);
   }
 });
 
@@ -133,7 +155,7 @@ shellTest("kb-search verdict gate: zero-coverage semantic hit stays WEAK", () =>
     assert.match(stdout, /unrelated\.py/, "semantic hit path present");
     assert.doesNotMatch(stdout, /STRONG/, "never STRONG without lexical corroboration");
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSandbox(home);
   }
 });
 
@@ -165,7 +187,7 @@ shellTest("kb-search dead semantic leg emits SEMANTIC_ERROR with reason", () => 
     assert.match(stdout, /GraftOnly/, "lexical hits still served");
     assert.doesNotMatch(stdout, /Traceback/, "no raw traceback in output");
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSandbox(home);
   }
 });
 
@@ -204,6 +226,6 @@ shellTest("kb-search hits carry freshness as_of + fresh/possibly_stale", () => {
     assert.match(stdout, /as_of=[\d.]+[hd]/, "as_of age token present");
     assert.match(stdout, /possibly_stale/, "10-day-lagged card reported stale");
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSandbox(home);
   }
 });

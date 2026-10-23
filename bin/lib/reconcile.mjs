@@ -143,8 +143,22 @@ export function skipPath(path, home) {
   // <repo>/.env is NOT a dotdir-under-HOME path, which is exactly the case the
   // two predicates disagreed on (tests/predicate-parity.test.mjs).
   if (isCredentialPath(norm)) return true;
-  if (EPHEMERAL_PREFIXES.some((p) => norm.startsWith(p))) return true;
 
+  // HOME-RELATIVE ADMISSION RUNS BEFORE THE ABSOLUTE TEMP RULE.
+  //
+  // Measured 2026-10-23: every `home`-relative carve-out below lived inside
+  // `if (home)`, i.e. AFTER the EPHEMERAL_PREFIXES check. When HOME itself sat
+  // under a temp prefix — a sandbox HOME, a CI-fidelity run, `mktemp -d` on a
+  // macOS box where TMPDIR is /var/folders/... — the ephemeral rule matched
+  // FIRST and returned true, so ~/.pi/agent/sessions/<x>.jsonl was skipped even
+  // though it is the documented second fact source. The same path was admitted
+  // under /Users/<name> and rejected under /var/folders/...: identical input,
+  // decision made by where the operator's home happens to live.
+  //
+  // The relative rule is more specific, so it must win: "a session log inside
+  // HOME is a fact source" is true regardless of whether HOME is on a temp
+  // volume. Ephemeral paths OUTSIDE home remain skipped — that is what the rule
+  // is for (scratch files that change constantly).
   if (home) {
     // Every check below uses `norm`, not `path`. Using the raw string only for
     // the absolute-prefix rule above let a normalized alias bypass the rest:
@@ -171,6 +185,9 @@ export function skipPath(path, home) {
     if (norm.startsWith(`${home}/.`)) return true;
     if (norm.startsWith(`${home}/Library/`)) return true;
   }
+  // Absolute temp/scratch prefixes, checked AFTER the home-relative carve-outs
+  // so a fact source inside HOME is never skipped for living on a temp volume.
+  if (EPHEMERAL_PREFIXES.some((p) => norm.startsWith(p))) return true;
   return /\/(node_modules|\.git|__pycache__|\.venv|venv|dist|build|DerivedData|Pods|\.build)\//.test(norm);
 }
 

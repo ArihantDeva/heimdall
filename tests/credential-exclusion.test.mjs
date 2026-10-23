@@ -28,10 +28,12 @@ import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import test from "node:test";
+import { plainPython } from "./lib/python.mjs";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-const VENV_PY = join(homedir(), ".heimdall", "venv", "bin", "python3");
-const PY = existsSync(VENV_PY) ? VENV_PY : "python3";
+// This suite only imports embed_walker, which is stdlib-only — a plain python3
+// is sufficient, so it must NOT be gated on sqlite_vec.
+const PY = plainPython();
 
 /** Ask the real policy predicate about a list of paths. */
 function excluded(paths) {

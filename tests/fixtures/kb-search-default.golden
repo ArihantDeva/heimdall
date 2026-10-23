@@ -1,8 +1,8 @@
 == retrieve (per-repo graft + global semantic): example
 SEMANTIC_ERROR: not-configured (venv or global.db missing). Run: ~/.heimdall/venv/bin/python3 bin/embed-index.py build
- 1. [NOPATH] cov100%  /var/folders/sm/lpp1_zgj30n2hb054_pfn5ch0000gn/T/heimdall-golden-fixed/Repos/example/src/alpha.py
+ 1. [NOPATH] cov100%  <TMP>/heimdall-golden-fixed/Repos/example/src/alpha.py
       alpha hit
       anchor is gone from disk
- 2. [NOPATH] cov100%  /var/folders/sm/lpp1_zgj30n2hb054_pfn5ch0000gn/T/heimdall-golden-fixed/Repos/example/src/beta.py
+ 2. [NOPATH] cov100%  <TMP>/heimdall-golden-fixed/Repos/example/src/beta.py
       beta hit
       anchor is gone from disk

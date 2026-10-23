@@ -419,7 +419,15 @@ def handle_request(ei, req):
             hits = _with_deadline(lambda: _semantic_hits(ei, q, n=n, related=related), SEARCH_DEADLINE_S)
             if scope:
                 hits = [h for h in hits if scope in (h.get("path") or "")]
-            return {"ok": True, "hits": hits}, False
+            # `n` is a CAP on the reply, not a hint. Neither producer honours it
+            # on every path: embed-index.query() overfetches n*OVERFETCH rows and
+            # says "let the caller truncate", and a `related` request appends
+            # same-directory siblings on top. Measured 2026-10-23: the first call
+            # after a worker start returned 48 hits for n=3, and every later call
+            # returned 3 — so the answer shrank as the worker warmed and the same
+            # query appeared to change its mind. kb-search.sh passes --related on
+            # every semantic call, so this was the normal path, not an edge case.
+            return {"ok": True, "hits": hits[:n]}, False
         # op == "search": fused lexical + semantic, in ONE process.
         hits = _with_deadline(lambda: fused_search(ei, q, n=n, related=related, scope=scope), SEARCH_DEADLINE_S)
         return {"ok": True, "hits": hits}, False

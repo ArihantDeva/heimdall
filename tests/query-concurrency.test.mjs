@@ -35,6 +35,7 @@ import { dirname, join } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { canImportEmbedIndex, sqliteVecPython, embedIndexSkipReason } from "./lib/python.mjs";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const EMBED = join(repoRoot, "bin", "embed-index.py");
@@ -42,8 +43,11 @@ const DB = join(homedir(), ".heimdall", "global.db");
 // The index module needs sqlite_vec + sentence_transformers, installed only in
 // the heimdall venv. Use it when present so these tests exercise the real import
 // path instead of failing on a missing dependency.
-const VENV_PY = join(homedir(), ".heimdall", "venv", "bin", "python3");
-const PY = existsSync(VENV_PY) ? VENV_PY : "python3";
+// The behavioural lock tests exec() embed-index.py, which imports sqlite_vec.
+// The source-text assertions above them need no python at all, so the gate is
+// per-test: skipping the whole file would drop the cheap guards too.
+const canExec = canImportEmbedIndex(sqliteVecPython() ?? "python3");
+const PY = canExec ? sqliteVecPython() : null;
 
 /** The lock helpers are pure text; assert on the real source of the module. */
 function sourceOf(fnName) {
@@ -77,7 +81,8 @@ test("a shared (LOCK_SH) read lock exists and is what queries take", () => {
     "query() must acquire the shared read lock");
 });
 
-test("a second concurrent reader is not rejected as busy", () => {
+test("a second concurrent reader is not rejected as busy",
+  { skip: canExec ? false : embedIndexSkipReason() }, () => {
   // The observable contract. Two overlapping readers must both succeed. Before
   // the fix the second one printed "busy; semantic skipped this call" and
   // exited 3. Uses the module directly so this is a unit-level statement about
@@ -136,7 +141,8 @@ test("the build still takes an EXCLUSIVE lock (readers must not weaken writers)"
     "build() must keep the exclusive lock — it mutates vec/cards");
 });
 
-test("the lock matrix holds in both orders (real flock, not just source text)", () => {
+test("the lock matrix holds in both orders (real flock, not just source text)",
+  { skip: canExec ? false : embedIndexSkipReason() }, () => {
   // The claims above are about source; this is about behaviour. Four invariants:
   //   reader+reader coexist      (the actual fix)
   //   writer blocked by reader   (readers protect a build from a concurrent build)
@@ -195,7 +201,8 @@ test("query() takes the read lock BEFORE any database read", () => {
   assert.ok(dim > lock, `_db_dim() must come AFTER the lock (lock@${lock} dim@${dim})`);
 });
 
-test("a query against a real index succeeds and is deterministic in one process", () => {
+test("a query against a real index succeeds and is deterministic in one process",
+  { skip: canExec ? false : embedIndexSkipReason() }, () => {
   if (!existsSync(DB)) return; // no index on this machine; covered by the tests above
   const script = `
 import importlib.util, json, sys

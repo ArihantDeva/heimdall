@@ -9,14 +9,16 @@
 //
 // These tests pin the CONTRACT, not the timing: framing, ordering, error
 // survival, and the guard that a second worker cannot steal the socket.
-import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+// node:test is the runner package.json actually invokes; see tests/lib/harness.mjs
+import { describe, it, expect, beforeAll, afterAll } from "./lib/harness.mjs";
 import { spawn } from "node:child_process";
 import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createConnection } from "node:net";
 
-const REPO = join(import.meta.dir, "..");
+const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SERVER = join(REPO, "bin", "query-server.py");
 const VENV_PY = join(homedir(), ".heimdall", "venv", "bin", "python3");
 // A PRIVATE socket. This suite used the production path and unlinked it in

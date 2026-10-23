@@ -37,14 +37,15 @@ import { dirname, join } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { hasSqliteVec, sqliteVecPython, sqliteVecSkipReason } from "./lib/python.mjs";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-// sqlite_vec + sentence_transformers live only in the heimdall venv; the system
-// python3 fails to import the index module at all. Same resolution as
-// tests/query-concurrency.test.mjs, so the destructive-schema test exercises the
-// real code path instead of erroring on a missing dependency.
-const VENV_PY = join(homedir(), ".heimdall", "venv", "bin", "python3");
-const PY = existsSync(VENV_PY) ? VENV_PY : "python3";
+// ONLY the destructive-schema test needs the sqlite_vec extension; everything
+// else here imports embed_walker, which is stdlib-only and runs under any
+// python3. So the gate is per-test, not per-file: gating the whole file would
+// throw away real exclusion coverage on a machine that can run it.
+const canProbeSchema = hasSqliteVec();
+const PY = canProbeSchema ? sqliteVecPython() : null;
 
 /** Run the real discover_files over a synthetic tree; return relative paths + rules. */
 function walk(relPaths) {
@@ -180,7 +181,7 @@ test("generated-data classes are excluded (measured 2026-10-15)", () => {
     "go/pkg/mod/github.com/x/y@v1/z.go",
     "backups/agent-state/20261011-041211/thing.json",
     "Documents/curseforge/minecraft/Instances/a/config.txt",
-    "Desktop/Lumina/_work/b3_vc1/corpus/page.md",
+    "Desktop/Code Projects/Lumina/_work/b3_vc1/corpus/page.md",
     "equitylens/research/hyperagent-sales-prospector/data/llm_queue/a.response.json",
     "equitylens/data/vendor/some/lib.py",
     "arihantdeva-content/.pi/workflows/wf_1/index.json",
@@ -188,13 +189,13 @@ test("generated-data classes are excluded (measured 2026-10-15)", () => {
     "equitylens/.worktrees/doc-gen/src/main.py",
     // authored content that must survive
     "Repos/app/src/main.ts",
-    "Desktop/Lumina/src/real.py",
+    "Desktop/Code Projects/Lumina/src/real.py",
     "go/personal/notes.md",
   ]);
-  const leaked = r.paths.filter((p) => !/^(Repos\/|Desktop\/Lumina\/src\/|go\/personal\/)/.test(p));
+  const leaked = r.paths.filter((p) => !/^(Repos\/|Desktop\/Code Projects\/Lumina\/src\/|go\/personal\/)/.test(p));
   assert.deepEqual(leaked, [],
     `generated-data classes still reach the index:\n  ${leaked.join("\n  ")}`);
-  for (const want of ["Repos/app/src/main.ts", "Desktop/Lumina/src/real.py", "go/personal/notes.md"]) {
+  for (const want of ["Repos/app/src/main.ts", "Desktop/Code Projects/Lumina/src/real.py", "go/personal/notes.md"]) {
     assert.ok(r.paths.includes(want), `${want} must survive — exclusions must be path-anchored`);
   }
 });
@@ -392,7 +393,11 @@ print(json.dumps({
   assert.equal(r.worktree_src, true, "documented trade: .worktrees/ is pruned at any depth");
 });
 
-test("status() must never delete rows and must not crash on odd schemas", () => {
+// The status() probe exec()s embed-index.py, which imports sqlite_vec. Absent
+// the extension this is unverifiable, not broken — skip with the reason rather
+// than failing on an import the suite was never given (that is what CI did).
+test("status() must never delete rows and must not crash on odd schemas",
+  { skip: canProbeSchema ? false : sqliteVecSkipReason() }, () => {
   // Adversarial review 2026-10-15, P1: status() called init() with no lock, and
   // init() DROPs cards+vec on a dimension mismatch. Reproduced: 1 card at dim 768
   // -> status() -> 0 cards at dim 384, while the same call reported

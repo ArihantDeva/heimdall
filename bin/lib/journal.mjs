@@ -415,6 +415,22 @@ export class Journal {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       for (const n of o.nodes) {
+        // Fail HERE, in our code, rather than at the driver boundary.
+        //
+        // Measured 2026-10-23: node 22's node:sqlite throws on an undefined bind;
+        // node 26 silently coerces it to NULL. `owned_nodes.node_id` is
+        // `TEXT PRIMARY KEY`, which SQLite allows to be NULL (only INTEGER
+        // PRIMARY KEY implies NOT NULL), so on node 26 an `undefined` node_id
+        // wrote a corrupt row instead of failing — the caller's typo (`id` for
+        // `node_id`) became invisible data corruption that only surfaced on a
+        // different runtime. A named error beats both a driver quirk and a
+        // nullable key nobody asked for.
+        if (n.node_id == null) {
+          throw new TypeError(
+            `journal.commit: node is missing node_id (got ${JSON.stringify(n)}); ` +
+            "the documented shape is {node_id, kind, symbol?, line?}",
+          );
+        }
         insNode.run(
           n.node_id, o.path, n.kind, n.symbol ?? null,
           n.line ?? null, n.label ?? null, n.sink_id ?? null,

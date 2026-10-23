@@ -51,7 +51,17 @@ test("reconcilePath retracts a path that policy now excludes", () => {
       // `kind: "code"` deliberately: retracting a `fact` writes fact_history rows
       // (a fact is a belief, so its retraction is a belief change). This test is
       // about the path lifecycle, so keep the fixture free of fact bookkeeping.
-      nodes: [{ id: "n1", kind: "code", title: "t", body: "b", keywords: [] }],
+      // `node_id`, not `id`: that is the documented shape (see commit()'s
+      // @param). This fixture said `id`, so node_id was `undefined` and every
+      // insert bound NULL into the PRIMARY KEY.
+      //
+      // That went unnoticed because of a version difference, measured 2026-10-23
+      // on the exact CI matrix: node 22's node:sqlite THROWS on an undefined
+      // bind (fail loud, correct), while node 26 silently coerces it to NULL.
+      // So the test passed on node 26 by writing a corrupt row, and ci.yml pins
+      // node 22, where it failed. Fixing the field name is the real fix; the
+      // guard added in commit() stops the silent-NULL half from coming back.
+      nodes: [{ node_id: "n1", kind: "code", title: "t", body: "b", keywords: [] }],
       edges: [], pending: [],
     });
     assert.equal(s.journal.getPath(p).state, "present", "precondition: row is present");
