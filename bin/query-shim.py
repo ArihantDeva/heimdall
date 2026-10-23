@@ -107,6 +107,22 @@ def main(argv: list[str]) -> int:
         print(f"query-shim: {reply.get('error', 'unknown error')}", file=sys.stderr)
         return 1
 
+    # FORWARD the coverage the server reported. `ok` only means the request was
+    # understood; it says nothing about whether BOTH legs ran. Measured
+    # 2026-10-23: fused_search degraded to lexical-only (semantic leg blew its
+    # deadline), the server correctly reported sem_coverage=degraded, and this
+    # shim dropped the field on the floor — so kb-search.sh printed
+    # "retrieve (warm fused: lexical + semantic)" for a lexical-only answer.
+    # The docstring above promises a missing semantic leg is never silent; a
+    # DEGRADED reply is the same failure with the worker still alive, so it gets
+    # the same treatment: say so on stderr, where kb-search.sh already looks.
+    coverage = reply.get("sem_coverage")
+    if coverage == "degraded":
+        print(
+            "WARN: semantic layer failed — results are LEXICAL-ONLY (sem_coverage=degraded)",
+            file=sys.stderr,
+        )
+
     for h in reply.get("hits") or []:
         title = h.get("title", "")
         if h.get("related"):

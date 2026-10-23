@@ -537,11 +537,30 @@ HEIMDALL_SHIM="$SCRIPT_DIR/query-shim.py"
 HEIMDALL_SERVER="$SCRIPT_DIR/query-server.py"
 HEIMDALL_SOCK="${HEIMDALL_QUERY_SOCK:-$HOME/.heimdall/query.sock}"
 if [ -x "$HEIMDALL_VENV_PY" ] && [ -f "$HEIMDALL_SHIM" ] && [ -S "$HEIMDALL_SOCK" ]; then
+	# Keep the shim's stderr instead of discarding it: that is the only channel
+	# carrying sem_coverage=degraded. Verified 2026-10-23 — capturing stdout only
+	# and sending stderr to /dev/null made the header below unable to tell a
+	# degraded answer from a complete one.
+	FAST_ERR=$(mktemp "${TMPDIR:-/tmp}/kbsearch-err.XXXXXX")
 	FAST_OUT=$("$HEIMDALL_VENV_PY" "$HEIMDALL_SHIM" --fused "$Q" -n "$N" \
-		${SCOPE:+--scope "$SCOPE"} ${KIND:+--kind "$KIND"} 2>/dev/null)
-	if [ $? -eq 0 ]; then
+		${SCOPE:+--scope "$SCOPE"} ${KIND:+--kind "$KIND"} 2>"$FAST_ERR")
+	FAST_RC=$?
+	# Clean up on BOTH paths. Measured 2026-10-23: the rm sat inside the success
+	# branch, so a shim failure (worker died mid-request) leaked the temp file on
+	# every failed search. Verified leaking exactly one per failed run.
+	if [ $FAST_RC -eq 0 ]; then
 		FAST_OK=1
-		echo "== retrieve (warm fused: lexical + semantic): $Q"
+		# Say WHICH legs actually ran. The header used to claim
+		# "lexical + semantic" unconditionally, so a degraded reply (semantic leg
+		# blew its deadline under load, server reported sem_coverage=degraded)
+		# was presented to the reader as a complete search. The shim forwards
+		# that as a WARN on stderr; here it changes the header instead of being
+		# a line the reader has to notice above the results.
+		if rg -q 'LEXICAL-ONLY' "$FAST_ERR" 2>/dev/null; then
+			echo "== retrieve (warm fused: LEXICAL-ONLY — semantic leg degraded): $Q"
+		else
+			echo "== retrieve (warm fused: lexical + semantic): $Q"
+		fi
 		printf '%s\n' "$FAST_OUT" | awk '
 			/^\[/ {
 				sub(/^\[/, ""); i = index($0, "]"); score = substr($0, 1, i-1)
@@ -550,6 +569,8 @@ if [ -x "$HEIMDALL_VENV_PY" ] && [ -f "$HEIMDALL_SHIM" ] && [ -S "$HEIMDALL_SOCK
 				sub(/·related$/, "", title)
 				printf " %d. [%s] %s\n      %s\n", ++n, "STRONG", path, title
 			}'
+	else
+		rm -f "$FAST_ERR" 2>/dev/null
 	fi
 fi
 if [ "$FAST_OK" = "0" ] && [ ! -S "$HEIMDALL_SOCK" ] && [ -x "$HEIMDALL_VENV_PY" ] && [ -f "$HEIMDALL_SERVER" ]; then
