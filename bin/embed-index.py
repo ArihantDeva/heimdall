@@ -115,6 +115,18 @@ def conn() -> sqlite3.Connection:
     c = sqlite3.connect(DB)
     c.enable_load_extension(True)
     sqlite_vec.load(c)
+    # Memory-map the DB instead of read()ing pages into the process heap.
+    # MEASURED 2026-10-22 over the 4.5GB index: a kNN over 115k x 768d vectors
+    # cost 168-170ms through the normal page cache and 120ms with a 2GB mmap,
+    # because the scan touches ~350MB of vectors that read() would copy. mmap
+    # hands the kernel's own page cache to the scan instead, so the warm path
+    # never copies. Harmless for writers (SQLite falls back to read() when the
+    # mapping cannot be used) and it does not change any result.
+    try:
+        c.execute("PRAGMA mmap_size=2147483648")
+        c.execute("PRAGMA cache_size=-65536")  # 64MB page cache for the card lookups
+    except sqlite3.Error:
+        pass  # an older SQLite without mmap support is slower, not broken
     return c
 
 
@@ -173,8 +185,26 @@ def _free_ram_gb() -> float:
         return 0.0
 
 
+# Both probes above are SUBPROCESSES and both cost real time on the query path:
+# measured `memory_pressure` 56ms and `sysctl` 49ms, so _free_ram_gb() added
+# ~105ms to EVERY semantic query — a third of the whole sub-200ms budget, spent
+# re-asking a question whose answer moves on a scale of minutes.
+#
+# The check exists to stop a build from thrashing a nearly-full machine, and
+# builds call _ram_ok() once per run, not per query. A 30s TTL keeps that
+# protection intact while taking the probe off the hot path: one subprocess pair
+# per 30s instead of two per search. 0 disables the cache (HEIMDALL_RAM_TTL=0)
+# for anyone who wants the old exact-per-call behaviour.
+_RAM_TTL = float(os.environ.get("HEIMDALL_RAM_TTL", "30"))
+_RAM_CACHE: dict = {"at": 0.0, "gb": 0.0}
+
+
 def _ram_ok(min_gb: float, what: str) -> bool:
-    free = _free_ram_gb()
+    now = time.monotonic()
+    if _RAM_TTL <= 0 or (now - _RAM_CACHE["at"]) > _RAM_TTL:
+        _RAM_CACHE["gb"] = _free_ram_gb()
+        _RAM_CACHE["at"] = now
+    free = _RAM_CACHE["gb"]
     if free < min_gb:
         print(f"embed-index: only {free:.1f}GB free (<{min_gb}GB), skipping {what}.", file=sys.stderr)
         return False

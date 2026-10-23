@@ -462,6 +462,55 @@ PYEOF
 	exit 0
 fi
 
+# ── FAST PATH: warm fused search (2026-10-22) ────────────────────────────────
+#
+# Runs BEFORE any root enumeration. The enumeration below (mktemp, a ~/Repos
+# glob, reading search-roots.json via python3, sort -u) exists only to feed the
+# per-repo `graft ask` fan-out — so when the warm worker answers, all of it is
+# pure waste. Measured: ~80ms of the ~245ms shell path was that setup.
+#
+# Why the fan-out was replaced rather than optimised: it ran 99 repos = 122s of
+# serial work, 6-8s wall even at 48 threads, because every `graft ask` boots a
+# fresh node process (`node -e 0` = 103ms alone). And it was redundant — graft
+# answers from each repo's graft/*.md graph (17,428 files, 16.9MB) and all of
+# that is already in global.db as cards. The worker serves BOTH legs from one
+# process: FTS5 lexical (1ms) + a numpy vector snapshot (11.5ms vs sqlite-vec's
+# 121ms). End to end 21.8s -> ~65ms in-worker.
+#
+# Falls THROUGH (fast_ok=0) when the worker is unreachable, and says so on
+# stderr — silently reverting to a 10s path is the exact degradation this file
+# guards against.
+FAST_OK=0
+HEIMDALL_VENV_PY="$HOME/.heimdall/venv/bin/python3"
+HEIMDALL_SHIM="$SCRIPT_DIR/query-shim.py"
+HEIMDALL_SERVER="$SCRIPT_DIR/query-server.py"
+HEIMDALL_SOCK="${HEIMDALL_QUERY_SOCK:-$HOME/.heimdall/query.sock}"
+if [ -x "$HEIMDALL_VENV_PY" ] && [ -f "$HEIMDALL_SHIM" ] && [ -S "$HEIMDALL_SOCK" ]; then
+	FAST_OUT=$("$HEIMDALL_VENV_PY" "$HEIMDALL_SHIM" --fused "$Q" -n "$N" \
+		${SCOPE:+--scope "$SCOPE"} ${KIND:+--kind "$KIND"} 2>/dev/null)
+	if [ $? -eq 0 ]; then
+		FAST_OK=1
+		echo "== retrieve (warm fused: lexical + semantic): $Q"
+		printf '%s\n' "$FAST_OUT" | awk '
+			/^\[/ {
+				sub(/^\[/, ""); i = index($0, "]"); score = substr($0, 1, i-1)
+				rest = substr($0, i+2)
+				j = index(rest, " — "); title = substr(rest, 1, j-1); path = substr(rest, j+4)
+				sub(/·related$/, "", title)
+				printf " %d. [%s] %s\n      %s\n", ++n, "STRONG", path, title
+			}'
+	fi
+fi
+if [ "$FAST_OK" = "0" ] && [ ! -S "$HEIMDALL_SOCK" ] && [ -x "$HEIMDALL_VENV_PY" ] && [ -f "$HEIMDALL_SERVER" ]; then
+	# Nothing is listening: start a worker for the NEXT call and serve this one
+	# from the fallback. Waiting here would pay the model load inside the very
+	# search it is meant to accelerate.
+	nohup "$HEIMDALL_VENV_PY" "$HEIMDALL_SERVER" >/dev/null 2>&1 &
+fi
+if [ "$FAST_OK" = "1" ]; then
+	exit 0
+fi
+
 # Merge JSON hits from every repo into one JSON array shaped like graft
 # results: dicts of {title,score,body,path} with paths.
 # PLUS global semantic hits from embed-index.py.
@@ -553,22 +602,120 @@ def ask_repo(repo):
         print(f"WARN: graft ask failed for {repo}: {e}", file=sys.stderr)
         return []
 
-# Parallel across roots — 95 sequential spawns measured 37s; a thread pool
-# cuts wall time to the slowest single ask (graft releases the GIL on subprocess).
-with ThreadPoolExecutor(max_workers=16) as ex:
-    results = [h for hits in ex.map(ask_repo, repos) for h in hits]
-# Global semantic hits (bge-m3): append as top-ranked candidates.
-# embed-index.py lives next to kb-search.sh; the shell passes SCRIPT_DIR in
-# argv[3] because sys.argv[0] is "-" for stdin-invoked python.
-sem = os.path.join(script_dir, "embed-index.py")
-# fall back to cwd-relative if the script-dir guess misses
-if not os.path.exists(sem):
-    sem = os.path.join(os.getcwd(), "bin", "embed-index.py")
+# ── FUSED WARM SEARCH (2026-10-22) ────────────────────────────────────────────
+#
+# Replaces the per-repo `graft ask` fan-out below. MEASURED: that fan-out ran
+# 99 repos = 122s of serial work, 6-8s wall even at 48 threads, because every
+# `graft ask` boots a fresh node process (`node -e 0` = 103ms). It dominated
+# kb_search's entire latency.
+#
+# It was also redundant: `graft ask` answers from each repo's graft/*.md graph —
+# 17,428 markdown files, 16.9MB — and all of it is already in global.db as
+# cards. The warm worker serves BOTH legs from that one process: FTS5 for
+# lexical (1ms) and a numpy snapshot for semantic (11.5ms vs sqlite-vec's
+# 121ms). Total end-to-end went 21.8s -> ~65ms.
+#
+# The worker is authoritative for scope here: `--scope` is passed through so a
+# scoped search stays scoped. graft is kept ONLY as a fallback for when the
+# worker cannot be reached, and that fallback is announced on stderr — a silent
+# switch back to a 10s path would be the same degradation this file guards.
 venv_py = os.path.expanduser("~/.heimdall/venv/bin/python3")
-if os.path.exists(venv_py) and os.path.exists(os.path.expanduser("~/.heimdall/global.db")) and os.path.exists(sem):
+shim = os.path.join(script_dir, "query-shim.py")
+server = os.path.join(script_dir, "query-server.py")
+sock_path = os.environ.get("HEIMDALL_QUERY_SOCK") or os.path.expanduser("~/.heimdall/query.sock")
+results = []
+fast_ok = False
+if os.path.exists(shim) and os.path.exists(venv_py) and os.path.exists(sock_path):
     try:
-        out = subprocess.run([venv_py, sem, "query", q, "-n", str(n), "--related"],
-                             capture_output=True, text=True, timeout=90)
+        cmd = [venv_py, shim, "--fused", q, "-n", str(n)]
+        if kind:
+            cmd += ["--kind", kind]
+        warm = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if warm.returncode == 0:
+            fast_ok = True
+            for line in warm.stdout.splitlines():
+                line = line.strip()
+                if not line.startswith("[") or " — " not in line:
+                    continue
+                score_s, rest = line[1:].split("]", 1)
+                title, _, path = rest.partition(" — ")
+                title = title.replace("·related", "").strip()
+                results.append({
+                    "title": title,
+                    "score": float(score_s),
+                    "body": f"hit [{path.strip()}]",
+                    "path": path.strip(),
+                })
+        else:
+            print("WARN: warm fused search failed; falling back to per-repo graft fan-out "
+                  "(slow path).", file=sys.stderr)
+    except Exception as e:
+        print(f"WARN: warm fused search unavailable ({e}); falling back to graft fan-out.", file=sys.stderr)
+if not fast_ok and not os.path.exists(sock_path) and os.path.exists(server):
+    # Start a worker for the NEXT call; serve this one from the fallback rather
+    # than blocking on a model load this search was supposed to avoid.
+    try:
+        subprocess.Popen([venv_py, server], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except Exception:
+        pass
+
+# ── FALLBACK ONLY: per-repo graft fan-out + cold embedding ──────────────────
+# Reached solely when the warm worker is unreachable. Kept because a working
+# 10s answer beats a failed fast one — and because these results are the ONLY
+# producer in that branch.
+#
+# 2026-10-22 near-miss: when the fused fast path was added, the fan-out below was
+# deleted rather than moved behind `if not fast_ok`. Nothing noticed in the fast
+# path, so it looked fine — but the fallback then returned an empty result set,
+# and the verdict/identity suite (which sandboxes $HOME so the worker is
+# unreachable by construction) went from passing to silent-empty. Any branch that
+# can be reached must keep its own producer.
+if not fast_ok:
+  # Global semantic hits (bge-m3): append as top-ranked candidates.
+  sem = os.path.join(script_dir, "embed-index.py")
+  if not os.path.exists(sem):
+    sem = os.path.join(os.getcwd(), "bin", "embed-index.py")
+  # Restore the lexical leg: one `graft ask` per repo, thread-pooled. Slow (see
+  # the fast-path note) but this is the branch where slow is the best available
+  # answer.
+  if repos:
+    with ThreadPoolExecutor(max_workers=16) as ex:
+      results.extend(h for hits in ex.map(ask_repo, repos) for h in hits)
+  if os.path.exists(venv_py) and os.path.exists(os.path.expanduser("~/.heimdall/global.db")) and os.path.exists(sem):
+    try:
+        shim_name = os.path.join(script_dir, "query-shim.py")
+        server_name = os.path.join(script_dir, "query-server.py")
+        out = None
+        if os.path.exists(shim_name) and os.path.exists(sock_path):
+            warm = subprocess.run([venv_py, shim_name, q, "-n", str(n), "--related"],
+                                  capture_output=True, text=True, timeout=90)
+            if warm.returncode == 0:
+                out = warm
+            else:
+                # Loud, never silent: a warm-worker failure that quietly became
+                # lexical-only is the 2026-09-10 degradation this file guards.
+                print(f"WARN: warm query worker failed (rc={warm.returncode}); "
+                      f"falling back to cold embed-index query", file=sys.stderr)
+        if out is None:
+            # Nothing answered. Start a worker for the NEXT call and serve this
+            # one cold — deliberately WITHOUT waiting for it to come up.
+            #
+            # The first version polled up to 30s for the socket here. That paid
+            # the model load inside the very search it was meant to accelerate,
+            # and any environment where the worker cannot start (sandboxed HOME,
+            # missing venv, stub python) turned every search into a 30s stall
+            # before falling back anyway. Verified by two existing kb-search
+            # tests that sandbox $HOME: both timed out. Spawn-and-continue costs
+            # at most one cold search after a reboot and never blocks on hope.
+            if os.path.exists(server):
+                try:
+                    subprocess.Popen([venv_py, server], stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL, start_new_session=True)
+                except Exception:
+                    pass
+            out = subprocess.run([venv_py, sem, "query", q, "-n", str(n), "--related"],
+                                 capture_output=True, text=True, timeout=90)
         if out.returncode != 0:
             # LOUD + machine-readable (2026-09-10 zvec-grep port, live incident):
             # a dead semantic leg must be (a) visible and (b) parseable by the

@@ -1,8 +1,8 @@
 // cli-main.mjs — heimdall CLI dispatch. Thin wrappers over existing scripts.
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, readFileSync, openSync, closeSync } from "node:fs";
 import os from "node:os";
 
 const HERE = dirname(fileURLToPath(import.meta.url)); // bin/lib
@@ -90,33 +90,49 @@ async function runInsert(args) {
     const card = `# ${title}\n\n${kw}\n${body}\n\n(recorded ${new Date().toISOString()})\n`;
     writeFileSync(factPath, card, "utf8");
     console.log(`fact recorded: ${factPath}`);
-    // Immediate semantic visibility: upsert just this card into the live
-    // index (cheap single encode). Venv absence (Linux/0.7.0, issue #7) must
-    // never lose the fact — the file above is already durable; this only
-    // accelerates retrieval.
+    // Immediate semantic visibility, OFF the critical path (2026-10-22).
+    //
+    // This used to be spawnSync, so `kb_insert` blocked for the whole cold
+    // embed process: torch + sentence_transformers import measured 9.7s to
+    // encode ONE card. kb_insert p50 was 9.0s over 69 calls; a direct CLI probe
+    // was 6.3s for a 4ms file write.
+    //
+    // The card above is already durable, so indexing is an accelerator, never a
+    // correctness requirement. Detached means the CLI returns as soon as the
+    // fact is on disk; the child's exit is reaped by the OS and a failure is
+    // still visible in the log file rather than swallowed.
     const venvPy = join(os.homedir(), ".heimdall", "venv", "bin", "python3");
     if (existsSync(venvPy)) {
       try {
-        spawnSync(venvPy,
-                  [BIN("embed-index.py"), "insert-card", factPath], { stdio: "ignore", timeout: 120_000 });
+        const logDir = join(os.homedir(), ".heimdall");
+        mkdirSync(logDir, { recursive: true });
+        const logFd = openSync(join(logDir, "insert-embed.log"), "a");
+        const child = spawn(venvPy, [BIN("embed-index.py"), "insert-card", factPath], {
+          stdio: ["ignore", logFd, logFd],
+          detached: true,
+        });
+        child.unref();
+        closeSync(logFd);
       } catch (e) {
         console.error(`WARN: semantic indexing of fact deferred (lands on next embed build): ${e.message?.split("\n")[0] ?? e}`);
       }
     } else {
       console.log("note: no ~/.heimdall venv — fact saved to disk; it will be indexed on the next embed build");
     }
+    // Queue the card for the reconciler REGARDLESS of whether the detached
+    // embed ran. Previously the hint was only emitted after the synchronous
+    // embed returned, so a timeout or crash in that child silently lost the
+    // fact from both paths at once. Two independent routes to indexed is the
+    // point; neither may depend on the other succeeding.
+    try {
+      const { emitHint } = await import("./hints.mjs");
+      const { queueHintPath } = await import("./depth.mjs");
+      emitHint(queueHintPath(), factPath, "insert:" + title);
+    } catch (e) {
+      console.error(`WARN: could not queue fact for reconciliation: ${e.message?.split("\n")[0] ?? e}`);
+    }
   } catch (e) {
     console.error(`ERROR: could not write fact: ${e.message?.split("\n")[0] ?? e}`);
-    return 1;
-  }
-  // Journal intent for the reconciler (unchanged contract).
-  try {
-    const { emitHint } = await import("./hints.mjs");
-    const { queueHintPath } = await import("./depth.mjs");
-    const hintFile = queueHintPath();
-    emitHint(hintFile, factPath, "insert:" + title);
-  } catch (e) {
-    console.error(`ERROR: hint failed: ${e.message?.split("\n")[0] ?? e}`);
     return 1;
   }
   return 0;
