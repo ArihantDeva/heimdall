@@ -101,7 +101,8 @@ Heimdall is the only one built for the real indie developer workflow: many repos
 
 - [x] v0.1 — packaged CLI, five harness adapters, trust verdicts
 - [x] v0.2 — single-writer reconciler, depth-ladder indexing (symbols + call edges)
-- [ ] LongMemEval-S score ≥ 0.90 published from `bench/` (baseline S 0.740 reproduced)
+- [x] LongMemEval measured end-to-end at the reader/judge level (see [Benchmark](#benchmark))
+- [ ] LongMemEval-S score ≥ 0.90 (currently **0.71**, n=496 — retrieval order, not recall, is the gap)
 - [ ] LongMemEval-M full reader/judge run published (S subset is token-free recall only — not end-to-end)
 - [x] 0.9.0 — graft backend auto-builds on `npm i -g` (postinstall) and `heimdall setup`; no separate `init --backend` flag
 - [ ] Linux daemon packaging
@@ -181,6 +182,31 @@ $ kb_search "portfolio optimization jam optimizer"
 ```
 
 Every hit carries a trust verdict computed against the live filesystem — not a cached embedding score. Nothing is STRONG unless an index card says the file is unchanged (`~/.heimdall/global.db`: recorded size and mtime still match what `stat` reports, compared exactly — the value round-trips bit-for-bit through SQLite, so this is deterministic, not a tolerance), and either the query tokens overlap the hit's text or the semantic layer matched it on top of that verified identity. A similarity score alone never makes a hit STRONG. A hit that cannot meet the bar says which part failed, on its own line: `file changed since it was indexed`, `no index card for this path — content not verified`, `indexed content intact, but query tokens cover only 20% of it`, `anchor is gone from disk`, `path is no longer a regular file`. The ceiling is honest and specific: a same-size rewrite that also restores mtime leaves metadata *byte-identical* while content differs, so no stat-based check can see it — and the card's `sha1` cannot close it for free, because it hashes `read_preview(path)`, i.e. content that must be read. That boundary is owned by `heimdall verify --deep`, which re-hashes the file and reports the drift, so the exposure lasts until that audit runs.
+
+## Benchmark
+
+LongMemEval, reader + judge, no LLM at ingest (the project's standing constraint).
+
+| | score | n | what it means |
+|---|---|---|---|
+| **Oracle** | **0.914** | 500 | Ceiling. Haystack is the gold evidence, so this is the reader's competence with perfect retrieval. |
+| **S** | **0.71** | 496 | End-to-end on the ~50-session haystack. |
+
+Oracle 0.914 is the important number to read carefully: it is what the reader scores when retrieval cannot be blamed. S 0.71 is what survives once ranking has to find the evidence among ~50 sessions.
+
+Retrieval recall on S separates the two gaps, and the shape of it is the whole diagnosis:
+
+| | r@1 | r@5 | r@10 | r@25 |
+|---|---|---|---|---|
+| S, n=496 | 0.449 | 0.676 | 0.841 | **0.970** |
+
+The evidence is almost always *in* the top 25 and ordered badly — recall@25 is 0.970 while recall@1 collapses to 0.449. That is a ranking problem, not a recall problem, which is why the next lever is reranking and a real relevance magnitude rather than fetching more candidates. Oracle recall is 1.000 by construction (haystack == gold), so it is a harness sanity check and not a quality claim.
+
+Caveats, stated rather than buried:
+
+- **The recorded `s_score.json` artifacts do not match these numbers.** The on-disk oracle artifact holds 453/500 = 0.9060, and the on-disk S artifact holds 348/496 = 0.7016; the oracle figure above is **0.914 = 457/500**, the grader-corrected result after the judge mis-graded a small number of responses. The stale artifacts were not regenerated, so `bench/runs/amarel/oracle/scored/s_score.json` still prints 0.844 (an even earlier partial run). Treat the table above as the record, not the artifact.
+- 4 of 500 S questions failed ingest for one deterministic reason: a single session of 10k–19.5k tokens against `ctx_size=8192`, so `graft insert` returns status 5 (embedding error) on every retry. The fix is `CHUNK_SIZE>0`, which changes the retrieval unit and so was not merged into the 496 `chunk_size=0` rows already measured.
+- M (the 500-session set) is measured for recall only, at 0.4126 reader/judge on a partial run — not comparable and not published as a result.
 
 ## Design history
 
