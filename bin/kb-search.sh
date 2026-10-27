@@ -558,6 +558,10 @@ fi
 # stderr — silently reverting to a 10s path is the exact degradation this file
 # guards against.
 FAST_OK=0
+FAST_INPUT=""
+# A warm reply still needs the SAME identity/coverage verdict pass as a cold
+# reply. Keep its JSON in a private temp file, not an argv/env-sized payload.
+trap '[ -z "$FAST_INPUT" ] || rm -f "$FAST_INPUT"' EXIT
 HEIMDALL_VENV_PY="$HOME/.heimdall/venv/bin/python3"
 HEIMDALL_SHIM="$SCRIPT_DIR/query-shim.py"
 HEIMDALL_SOCK="${HEIMDALL_QUERY_SOCK:-$HOME/.heimdall/query.sock}"
@@ -567,7 +571,7 @@ if [ -x "$HEIMDALL_VENV_PY" ] && [ -f "$HEIMDALL_SHIM" ] && [ -S "$HEIMDALL_SOCK
 	# and sending stderr to /dev/null made the header below unable to tell a
 	# degraded answer from a complete one.
 	FAST_ERR=$(mktemp "${TMPDIR:-/tmp}/kbsearch-err.XXXXXX")
-	FAST_OUT=$("$HEIMDALL_VENV_PY" "$HEIMDALL_SHIM" --fused "$Q" -n "$N" \
+	FAST_OUT=$("$HEIMDALL_VENV_PY" "$HEIMDALL_SHIM" --fused --json -- "$Q" -n "$N" \
 		${SCOPE:+--scope "$SCOPE"} ${KIND:+--kind "$KIND"} 2>"$FAST_ERR")
 	FAST_RC=$?
 	# Clean up on BOTH paths. Measured 2026-10-23: the rm sat inside the success
@@ -581,27 +585,31 @@ if [ -x "$HEIMDALL_VENV_PY" ] && [ -f "$HEIMDALL_SHIM" ] && [ -S "$HEIMDALL_SOCK
 		# was presented to the reader as a complete search. The shim forwards
 		# that as a WARN on stderr; here it changes the header instead of being
 		# a line the reader has to notice above the results.
-		if rg -q 'LEXICAL-ONLY' "$FAST_ERR" 2>/dev/null; then
+		if grep -q 'LEXICAL-ONLY' "$FAST_ERR"; then
 			echo "== retrieve (warm fused: LEXICAL-ONLY — semantic leg degraded): $Q"
 		else
 			echo "== retrieve (warm fused: lexical + semantic): $Q"
 		fi
-		printf '%s\n' "$FAST_OUT" | awk '
-			/^\[/ {
-				sub(/^\[/, ""); i = index($0, "]"); score = substr($0, 1, i-1)
-				rest = substr($0, i+2)
-				j = index(rest, " — "); title = substr(rest, 1, j-1); path = substr(rest, j+4)
-				sub(/·related$/, "", title)
-				printf " %d. [%s] %s\n      %s\n", ++n, "STRONG", path, title
-			}'
+		# Transport success is NOT verification. In particular, a cached hit
+		# may point to a changed/deleted file or an unreadable index. Feed it
+		# through the common zero-content-read verdict pass below instead of
+		# printing an unconditional STRONG and exiting here.
+		FAST_INPUT="$FAST_ERR"
+		printf '%s\n' "$FAST_OUT" > "$FAST_INPUT"
 	else
 		rm -f "$FAST_ERR" 2>/dev/null
 	fi
 fi
-if [ "$FAST_OK" = "1" ]; then
-	exit 0
-fi
-
+# Resolved rebase conflict (2026-10-27) between #26 and this branch:
+#  - #26 deliberately REMOVED the cold-path `nohup query-server.py` spawn that the
+#    incoming side still carried (one detached worker per cold request moved into
+#    kb-search's python section). Keep the removal: resurrecting it here would run
+#    two workers for one cold search.
+#  - this branch removes the `if FAST_OK = 1; exit 0` early exit, which is the
+#    whole point of the fix: a warm transport success must still pass the same
+#    identity/coverage verdict pass before anything is labelled STRONG.
+# So: drop both sides' early-spawn and early-exit, keep flowing into the shared
+# verification path below.
 # Merge JSON hits from every repo into one JSON array shaped like graft
 # results: dicts of {title,score,body,path} with paths.
 # PLUS global semantic hits from embed-index.py.
@@ -609,6 +617,12 @@ fi
 # whose path contains 'poker' (e.g. ~/poker-bot). Roots persisted by
 # embed-index.py build in ~/.heimdall/search-roots.json enumerate every
 # graft-bearing project on the volume — not just ~/Repos/*/graft.
+if [ "$FAST_OK" = "1" ]; then
+	# No root enumeration or second worker request on a warm answer. The one
+	# sentinel keeps empty-array expansion safe under macOS bash 3.2 + set -u;
+	# it is never used as a repo because the warm producer already answered.
+	ROOT_ARGS=("")
+else
 ALL_ROOTS=$(mktemp)
 {
 	# bash 3.2 + set -u: "${ARR[@]}" on an empty array aborts as unbound —
@@ -640,9 +654,10 @@ ROOT_ARGS=()
 while IFS= read -r root; do
 	[ -n "$root" ] && ROOT_ARGS+=("$root")
 done <<< "$SCOPE_ROOTS"
+fi
 
-python3 - "$Q" "$N" "$SCRIPT_DIR" "$KIND" "$RECENCY" "$LONG" "${ROOT_ARGS[@]}" <<'PYEOF'
-import json, os, sqlite3, subprocess, sys, time
+python3 - "$Q" "$N" "$SCRIPT_DIR" "$KIND" "$RECENCY" "$LONG" "$FAST_INPUT" "$SCOPE" "${ROOT_ARGS[@]}" <<'PYEOF'
+import json, math, os, sqlite3, subprocess, sys, time
 import re as _re
 
 
@@ -667,7 +682,9 @@ script_dir = sys.argv[3]
 kind = sys.argv[4] or "code"
 recency = sys.argv[5] == "1"
 long_out = sys.argv[6] == "1"
-repos = sys.argv[7:]
+fast_input = sys.argv[7]
+scope = sys.argv[8]
+repos = sys.argv[9:]
 graft = os.environ.get("GRAFT", "graft")
 from concurrent.futures import ThreadPoolExecutor
 
@@ -714,29 +731,51 @@ venv_py = os.path.expanduser("~/.heimdall/venv/bin/python3")
 shim = os.path.join(script_dir, "query-shim.py")
 server = os.path.join(script_dir, "query-server.py")
 sock_path = os.environ.get("HEIMDALL_QUERY_SOCK") or os.path.expanduser("~/.heimdall/query.sock")
+def warm_results(reply):
+    """Preserve worker provenance, never interpret its ranking score as trust."""
+    if (not isinstance(reply, dict) or reply.get("ok") is not True
+            or not isinstance(reply.get("hits"), list)):
+        raise ValueError("warm worker reply must contain ok:true and a hits list")
+    out = []
+    for h in reply["hits"]:
+        if (not isinstance(h, dict) or not isinstance(h.get("path"), str)
+                or not isinstance(h.get("title"), str)):
+            raise ValueError("warm worker hit must carry a path and title")
+        score = h.get("score")
+        if (not isinstance(score, (int, float)) or isinstance(score, bool)
+                or not math.isfinite(score)):
+            raise ValueError("warm worker hit must carry a finite numeric score")
+        out.append({
+            "title": h["title"], "path": h["path"],
+            "score": float(score), "body": "",
+            "semantic": h.get("leg") == "semantic" and not h.get("related"),
+            "warm": True,
+        })
+    return out
+
 results = []
 fast_ok = False
-if os.path.exists(shim) and os.path.exists(venv_py) and os.path.exists(sock_path):
+if fast_input:
     try:
-        cmd = [venv_py, shim, "--fused", q, "-n", str(n)]
+        with open(fast_input) as f:
+            results = warm_results(json.load(f))
+        fast_ok = True
+    except (OSError, ValueError, TypeError) as e:
+        print(f"SEARCH_ERROR: invalid warm reply ({e})")
+        sys.exit(1)
+if not fast_ok and os.path.exists(shim) and os.path.exists(venv_py) and os.path.exists(sock_path):
+    try:
+        cmd = [venv_py, shim, "--fused", "--json", "--", q, "-n", str(n)]
         if kind:
             cmd += ["--kind", kind]
+        if scope:
+            cmd += ["--scope", scope]
         warm = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         if warm.returncode == 0:
+            results = warm_results(json.loads(warm.stdout))
             fast_ok = True
-            for line in warm.stdout.splitlines():
-                line = line.strip()
-                if not line.startswith("[") or " — " not in line:
-                    continue
-                score_s, rest = line[1:].split("]", 1)
-                title, _, path = rest.partition(" — ")
-                title = title.replace("·related", "").strip()
-                results.append({
-                    "title": title,
-                    "score": float(score_s),
-                    "body": f"hit [{path.strip()}]",
-                    "path": path.strip(),
-                })
+            if "LEXICAL-ONLY" in warm.stderr:
+                print("WARN: semantic layer failed — results are LEXICAL-ONLY (sem_coverage=degraded)")
         else:
             print("WARN: warm fused search failed; falling back to per-repo graft fan-out "
                   "(slow path).", file=sys.stderr)
@@ -770,7 +809,7 @@ if not fast_ok:
         shim_name = os.path.join(script_dir, "query-shim.py")
         out = None
         if os.path.exists(shim_name) and os.path.exists(sock_path):
-            warm = subprocess.run([venv_py, shim_name, q, "-n", str(n), "--related"],
+            warm = subprocess.run([venv_py, shim_name, "--", q, "-n", str(n), "--related"],
                                   capture_output=True, text=True, timeout=90)
             if warm.returncode == 0:
                 out = warm
@@ -832,10 +871,11 @@ if not fast_ok:
     except Exception as e:
         print(f"SEMANTIC_ERROR: semantic layer exception: {e}", file=sys.stderr)
         print("WARN: semantic layer failed — results are LEXICAL-ONLY (sem_coverage=degraded)", file=sys.stderr)
-# dedupe by title, keep top score
+# Preserve the warm worker's path dedupe (different files may share a title);
+# the fallback keeps its existing title dedupe and ranking unchanged.
 seen = {}
 for r in sorted(results, key=lambda x: -x["score"]):
-    seen.setdefault(r["title"], r)
+    seen.setdefault(r["path"] if r.get("warm") else r["title"], r)
 # The `[:n]` truncation is DEFERRED when --recency is on (reviewer finding 3):
 # truncating first and weighting after means a 5-month-old file that was cut at
 # rank 7 can never be promoted back in, so the flag could only reorder the
@@ -891,6 +931,7 @@ import sqlite3, stat, time
 
 card_mtimes = {}
 card_sizes = {}
+card_bodies = {}
 # Index availability is part of the verdict: when the cards table cannot be
 # read, NO hit can be identity-checked, so every result degrades to WEAK. That
 # must be visible on the stream the caller actually reads — this script's own
@@ -905,10 +946,11 @@ if os.path.exists(db_path):
         hit_paths = [r["path"] for r in merged if r.get("path")]
         if hit_paths:
             qm = ",".join("?" * len(hit_paths))
-            for p_, mt_, sz_ in con.execute(
-                    f"SELECT path, mtime, size FROM cards WHERE path IN ({qm})", hit_paths):
+            for p_, mt_, sz_, body_ in con.execute(
+                    f"SELECT path, mtime, size, body FROM cards WHERE path IN ({qm})", hit_paths):
                 card_mtimes[p_] = mt_
                 card_sizes[p_] = sz_
+                card_bodies[p_] = body_ if isinstance(body_, str) else ""
         con.close()
     except Exception as e:
         print(f"WARN: freshness lookup failed: {e}", file=sys.stderr)
@@ -919,6 +961,7 @@ if os.path.exists(db_path):
         index_reason = f"index unreadable — content not verified ({e})"
         card_mtimes = {}
         card_sizes = {}
+        card_bodies = {}
 for i, r in enumerate(merged, 1):
     p = r["path"]
     exists = os.path.exists(p)
@@ -932,7 +975,18 @@ for i, r in enumerate(merged, 1):
     # the query, which is the only thing this bar is for. Tokens here come from
     # the card body ([path] is appended) or the backend's snippet, so a hit
     # whose text genuinely contains the query still passes.
-    covered = title_l + " " + body_l
+    # Warm titles are normally relative filenames, not prose. Use the indexed
+    # preview from the SAME card lookup as identity, never a synthetic body or
+    # filename as relevance evidence. This reads the index, not the hit file.
+    if r.get("warm"):
+        preview = card_bodies.get(p, "")
+        # embed-index deliberately emits these name-only placeholders without
+        # indexing file content. Their generated filename is not evidence of
+        # relevance, even when the metadata matches an unchanged empty file.
+        name_only = preview.startswith(("[minimal file]\n", "[dataless placeholder — filename only, content in iCloud]\n"))
+        covered = "" if name_only else preview.lower()
+    else:
+        covered = title_l + " " + body_l
     # ...and the path must be REMOVED from that text, not merely excluded as a
     # field: every producer embeds it in the body (graft: `snippet [path]`,
     # semantic: `semantic hit [path]`), so leaving it in re-admits exactly the
