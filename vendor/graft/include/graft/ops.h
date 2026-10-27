@@ -23,6 +23,8 @@ mg_err_t mg_op_classify(mg_ctx_t *ctx, mpack_node_t args, mpack_writer_t *result
 mg_err_t mg_op_insert(mg_ctx_t *ctx, mpack_node_t args, mpack_writer_t *result);
 mg_err_t mg_op_query(mg_ctx_t *ctx, mpack_node_t args, mpack_writer_t *result);
 mg_err_t mg_op_retrieve(mg_ctx_t *ctx, mpack_node_t args, mpack_writer_t *result);
+/* Bounded compute-only scoring; storage/embed may be NULL. */
+mg_err_t mg_op_score_candidates(mg_ctx_t *ctx, mpack_node_t args, mpack_writer_t *result);
 mg_err_t mg_op_explore(mg_ctx_t *ctx, mpack_node_t args, mpack_writer_t *result);
 mg_err_t mg_op_get(mg_ctx_t *ctx, mpack_node_t args, mpack_writer_t *result);
 mg_err_t mg_op_stats(mg_ctx_t *ctx, mpack_node_t args, mpack_writer_t *result);

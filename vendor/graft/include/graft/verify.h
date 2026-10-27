@@ -38,5 +38,8 @@ mg_err_t mg_verify_score(
 
 /* Jaccard su trigram di caratteri normalizzati (utility) */
 float mg_text_trigram_jaccard(const char *a, const char *b);
+/* Same exact overlap, but distinguish unavailable/invalid input and allocation
+ * failure from a genuine zero. Legacy wrapper/gating fallback stays unchanged. */
+mg_err_t mg_text_trigram_jaccard_checked(const char *a, const char *b, float *out);
 
 #endif

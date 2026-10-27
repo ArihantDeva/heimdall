@@ -41,6 +41,7 @@ mg_err_t mg_wire_op_from_string(const char *s, mg_op_t *out) {
     if (!strcmp(s, "delete"))      { *out = MG_OP_DELETE;      return MG_OK; }
     if (!strcmp(s, "view"))        { *out = MG_OP_VIEW;        return MG_OK; }
     if (!strcmp(s, "remote_sync")) { *out = MG_OP_REMOTE_SYNC; return MG_OK; }
+    if (!strcmp(s, "score_candidates")) { *out = MG_OP_SCORE_CANDIDATES; return MG_OK; }
     return MG_ERR_INVALID_ARG;
 }
 
@@ -57,6 +58,7 @@ const char *mg_wire_op_to_string(mg_op_t op) {
         case MG_OP_DELETE:      return "delete";
         case MG_OP_VIEW:        return "view";
         case MG_OP_REMOTE_SYNC: return "remote_sync";
+        case MG_OP_SCORE_CANDIDATES: return "score_candidates";
     }
     return NULL;
 }

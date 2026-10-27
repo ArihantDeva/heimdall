@@ -159,7 +159,7 @@ static uint32_t *mg_make_trigrams(const char *s, size_t *out_count) {
   return grams;
 }
 
-float mg_text_trigram_jaccard(const char *a, const char *b) {
+mg_err_t mg_text_trigram_jaccard_checked(const char *a, const char *b, float *out) {
   uint32_t *ga;
   uint32_t *gb;
   size_t na = 0;
@@ -169,21 +169,18 @@ float mg_text_trigram_jaccard(const char *a, const char *b) {
   size_t intersection = 0;
   size_t uni;
 
-  if (!a || !b) {
-    return 0.0f;
-  }
+  if (!out) return MG_ERR_INVALID_ARG;
+  *out = NAN;
+  if (!a || !b) return MG_ERR_INVALID_ARG;
 
   ga = mg_make_trigrams(a, &na);
   gb = mg_make_trigrams(b, &nb);
-  if (na == 0u && nb == 0u) {
+  /* A nonempty string always has padded trigrams. Distinguish allocation
+   * failure from a genuine zero overlap for ranking diagnostics. */
+  if ((!ga && a[0]) || (!gb && b[0])) {
     free(ga);
     free(gb);
-    return 0.0f;
-  }
-  if ((na > 0u && !ga) || (nb > 0u && !gb)) {
-    free(ga);
-    free(gb);
-    return 0.0f;
+    return MG_ERR_OOM;
   }
 
   while (ia < na && ib < nb) {
@@ -201,7 +198,15 @@ float mg_text_trigram_jaccard(const char *a, const char *b) {
   uni = na + nb - intersection;
   free(ga);
   free(gb);
-  return uni == 0u ? 0.0f : (float)intersection / (float)uni;
+  *out = uni == 0u ? 0.0f : (float)intersection / (float)uni;
+  return MG_OK;
+}
+
+float mg_text_trigram_jaccard(const char *a, const char *b) {
+  float value = NAN;
+  /* Preserve the existing query/cache utility's exact error fallback. Only
+   * the new scorer uses the checked form to retain missingness on error. */
+  return mg_text_trigram_jaccard_checked(a, b, &value) == MG_OK ? value : 0.0f;
 }
 
 mg_err_t mg_verify_score(mg_verify_ctx_t *ctx,
