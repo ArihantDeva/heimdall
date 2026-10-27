@@ -735,7 +735,7 @@ def query(q: str, n: int = 5, related: bool = False) -> list[dict]:
             card = c.execute("SELECT title, path, root FROM cards WHERE rowid=?", (rowid,)).fetchone()
             if card:
                 out.append({"title": card[0], "path": card[1], "repo": card[2],
-                            "score": round(1.0 - dist, 4)})
+                            "score": round(1.0 - dist, 4), "s_vec": 1.0 - dist})
         if related and out:
             _siblings(c, out[0]["path"], out)
         record_semantic_state("ok")
