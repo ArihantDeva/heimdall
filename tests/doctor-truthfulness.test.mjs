@@ -128,13 +128,26 @@ test("doctor must NOT report HEALTHY when score is critical with errors", () => 
 });
 
 test("doctor must exit non-zero when verify reports drift", () => {
-  const sb = sandbox({ scoreJson: SCORE_CRITICAL, scoreExit: 1, verifyJson: VERIFY_DRIFT, verifyExit: 1 });
+  // SCORE_HEALTHY (not SCORE_CRITICAL) on purpose. With a critical score the
+  // script exits at the score gate and the drift gate below never runs, so this
+  // test used to pass without ever exercising the code it claims to cover. A
+  // healthy score forces control down to the verify payload — which is exactly
+  // where a valid {ok:false,drift:[...]} verdict was being mislabeled
+  // "malformed (ok-not-true)" and handed a schema-repair hint instead of the
+  // drift count, reasons and reconcile remedy.
+  const sb = sandbox({ scoreJson: SCORE_HEALTHY, verifyJson: VERIFY_DRIFT, verifyExit: 1 });
   try {
     const r = runHealth(sb);
     const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
     assert.notEqual(r.status, 0, `verify drift must fail the health check.\n--- output ---\n${out}`);
-    assert.match(out, /drift|FAIL|not healthy|critical/i,
-      `failure must name the reason so the user can act.\n--- output ---\n${out}`);
+    assert.doesNotMatch(out, /^\s*HEALTHY\s*$/m, `drift must not read as healthy.\n--- output ---\n${out}`);
+    // The diagnosis must name the drift (count + reason) and the remedy that
+    // clears it — not hand the operator a schema-repair hint for a valid payload.
+    assert.match(out, /1 drift row/, `must name the drift count.\n--- output ---\n${out}`);
+    assert.match(out, /missing/, `must name the drift reason.\n--- output ---\n${out}`);
+    assert.match(out, /reconcile --all/, `must name the remedy.\n--- output ---\n${out}`);
+    assert.doesNotMatch(out, /malformed|Required: an object/i,
+      `a valid ok:false drift payload is not malformed.\n--- output ---\n${out}`);
   } finally { cleanup(sb); }
 });
 
@@ -294,7 +307,7 @@ fi
 // ---------------------------------------------------------------------------
 
 /** Drive the real script with a stubbed CLI and a chosen verify payload. */
-function runGate(verifyBody, verifyRc = 0) {
+function runGate(verifyBody, verifyRc = 0, extraEnv = {}) {
   const home = mkdtempSync(join(tmpdir(), "heimdall-gate-"));
   const shim = mkdtempSync(join(tmpdir(), "heimdall-gate-shim-"));
   try {
@@ -314,7 +327,7 @@ else console.log("{}");
     mkdirSync(join(home, "Repos", "example", "graft"), { recursive: true });
     const r = spawnSync("bash", [HEALTH], {
       encoding: "utf8",
-      env: { ...process.env, HOME: home, PATH: `${shim}:${process.env.PATH}`, GRAFT: graft, HEIMDALL_BIN: cli },
+      env: { ...process.env, HOME: home, PATH: `${shim}:${process.env.PATH}`, GRAFT: graft, HEIMDALL_BIN: cli, ...extraEnv },
     });
     return { status: r.status, out: (r.stdout || "") + (r.stderr || "") };
   } finally {
@@ -355,4 +368,140 @@ test("a well-formed healthy payload still passes (negative control)", () => {
   const r = runGate({ ok: true, drift: [] }, 0);
   assert.equal(r.status, 0, `a healthy index must still exit 0:\n${r.out}`);
   assert.match(r.out, /HEALTHY/);
+});
+
+// ---------------------------------------------------------------------------
+// Valid-drift diagnosis (the fix this suite pins).
+//
+// runVerify legitimately emits ok:false in two shapes that are NOT malformed:
+//   dirty index  -> {ok:false, drift:[{path,why}, ...]}
+//   broken graph -> {ok:false, drift:[], graph:{state:'corrupt'|'unreadable', why}}
+//
+// The schema gate used to require ok === true, so both were mislabeled
+// "malformed (ok-not-true)" and given a schema-repair hint. They must keep
+// FAILING (exit non-zero) — only the diagnosis changes: name the drift count and
+// reasons with the reconcile remedy, or name the graph state, and never print a
+// schema error for a payload that is well-formed.
+// ---------------------------------------------------------------------------
+
+test("a valid ok:false drift payload fails with the drift diagnosis, not a schema error", () => {
+  const r = runGate({ ok: false, drift: [{ path: "/gone.md", why: "missing" }], graph: { state: "present" } }, 1);
+  assert.equal(r.status, 1, `valid drift must fail:\n${r.out}`);
+  assert.match(r.out, /1 drift row/);
+  assert.match(r.out, /missing/);
+  assert.match(r.out, /reconcile --all/);
+  assert.doesNotMatch(r.out, /malformed|Required: an object/i,
+    `a valid drift verdict must not be called malformed:\n${r.out}`);
+});
+
+test("a corrupt graph store with no drift fails naming the graph state", () => {
+  const r = runGate({ ok: false, drift: [], graph: { state: "corrupt", path: "/x/graft.db", why: "missing sqlite header" } }, 1);
+  assert.equal(r.status, 1, `a corrupt graph store must fail:\n${r.out}`);
+  assert.match(r.out, /graph store is corrupt/i, `must name the graph state:\n${r.out}`);
+  assert.match(r.out, /missing sqlite header/, `must carry the probe's reason:\n${r.out}`);
+  assert.doesNotMatch(r.out, /malformed|Required: an object/i,
+    `a valid broken-graph verdict is not malformed:\n${r.out}`);
+  assert.doesNotMatch(r.out, /^HEALTHY/m);
+});
+
+test("an unreadable graph store with no drift fails naming the graph state", () => {
+  const r = runGate({ ok: false, drift: [], graph: { state: "unreadable", why: "EACCES" } }, 1);
+  assert.equal(r.status, 1, `an unreadable graph store must fail:\n${r.out}`);
+  assert.match(r.out, /graph store is unreadable/i);
+  assert.doesNotMatch(r.out, /malformed|Required: an object/i);
+});
+
+test("ok:false with zero rows and no graph state fails as unverified, not malformed", () => {
+  const r = runGate({ ok: false, drift: [] }, 0);
+  assert.equal(r.status, 1, `ok:false with 0 rows must fail:\n${r.out}`);
+  assert.match(r.out, /did not complete|UNKNOWN/i);
+  assert.doesNotMatch(r.out, /malformed|Required: an object/i,
+    `ok:false is a real verdict, not a schema error:\n${r.out}`);
+  assert.doesNotMatch(r.out, /^HEALTHY/m);
+});
+
+// Malformed booleans / rows / contradictions stay fail-closed.
+
+test("a non-boolean ok (missing, string, number, null) is malformed and fails closed", () => {
+  for (const body of [{ drift: [] }, { ok: "true", drift: [] }, { ok: 1, drift: [] }, { ok: null, drift: [] }]) {
+    const r = runGate(body, 0);
+    assert.equal(r.status, 1, `ok=${JSON.stringify(body.ok)} passed as healthy:\n${r.out}`);
+    assert.match(r.out, /malformed/i, `must name the schema defect:\n${r.out}`);
+    assert.doesNotMatch(r.out, /^HEALTHY/m);
+  }
+});
+
+test("drift rows that are not objects are malformed and fail closed", () => {
+  for (const rows of [["nope"], [null], [42]]) {
+    const r = runGate({ ok: false, drift: rows }, 0);
+    assert.equal(r.status, 1, `drift=${JSON.stringify(rows)} passed:\n${r.out}`);
+    assert.match(r.out, /malformed|drift-row/i);
+    assert.doesNotMatch(r.out, /^HEALTHY/m);
+  }
+});
+
+test("a contradictory ok:true with drift rows is malformed and fails closed", () => {
+  const r = runGate({ ok: true, drift: [{ path: "/x", why: "missing" }] }, 0);
+  assert.equal(r.status, 1, `ok:true with rows passed:\n${r.out}`);
+  assert.match(r.out, /contradict|malformed/i);
+  assert.doesNotMatch(r.out, /^HEALTHY/m);
+});
+
+test("a well-formed healthy payload with an absent graph still passes (control)", () => {
+  const r = runGate({ ok: true, drift: [], graph: { state: "absent", path: "/x/graft.db" } }, 0);
+  assert.equal(r.status, 0, `a healthy index must still exit 0:\n${r.out}`);
+  assert.match(r.out, /HEALTHY/);
+});
+
+test("99/100 healthy severity does not certify an index with valid drift", () => {
+  const sb = sandbox({
+    scoreJson: JSON.stringify({ score: 99, band: "healthy", issues: { errors: 0, warnings: 0, infos: 1 } }),
+    verifyJson: JSON.stringify({ ok: false, drift: [{ path: "/changed.py", why: "mtime/size" }] }),
+    verifyExit: 1,
+  });
+  try {
+    const r = runHealth(sb);
+    const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+    assert.equal(r.status, 1);
+    assert.match(out, /1 drift row/);
+    assert.match(out, /mtime\/size/);
+    assert.doesNotMatch(out, /malformed|^HEALTHY/m);
+  } finally { cleanup(sb); }
+});
+
+test("ok:true cannot overrule an explicitly broken graph", () => {
+  for (const state of ["corrupt", "unreadable"]) {
+    const r = runGate({ ok: true, drift: [], graph: { state } });
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, /contradictory/);
+    assert.doesNotMatch(r.out, /^HEALTHY/m);
+  }
+});
+
+test("malformed drift reasons fail as schema errors, not parser crashes", () => {
+  for (const why of [[], {}, null]) {
+    const r = runGate({ ok: false, drift: [{ path: "/x", why }] });
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, /malformed.*drift-reason-not-a-string/);
+    assert.doesNotMatch(r.out, /unparseable|^HEALTHY/m);
+  }
+});
+
+test("Unicode drift evidence remains a drift verdict under an ASCII locale", () => {
+  const r = runGate({ ok: false, drift: [{ path: "/x", why: "depth file → symbol" }] }, 1, {
+    LC_ALL: "C", PYTHONUTF8: "0", PYTHONCOERCECLOCALE: "0",
+  });
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /1 drift row/);
+  assert.match(r.out, /depth file.*symbol/);
+  assert.doesNotMatch(r.out, /malformed|unparseable|^HEALTHY/m);
+});
+
+test("an explicitly malformed graph shape cannot certify a healthy payload", () => {
+  for (const graph of [null, [], { state: null }, { state: "unknown" }]) {
+    const r = runGate({ ok: true, drift: [], graph });
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, /malformed.*graph-/);
+    assert.doesNotMatch(r.out, /^HEALTHY/m);
+  }
 });
