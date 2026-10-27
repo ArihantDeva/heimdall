@@ -933,6 +933,11 @@ card_ctimes = {}
 card_mtimes = {}
 card_sizes = {}
 card_bodies = {}
+# sha1 is how a dataless card is recognisable: embed-index marks those rows with
+# a `dataless:<digest>` sentinel so a name-only card is never mistaken for a
+# verified empty file. Read alongside the other card evidence, in the same
+# snapshot, so the reason chosen below cannot disagree with the identity check.
+card_shas = {}
 # Index availability is part of the verdict: when the cards table cannot be
 # read, NO hit can be identity-checked, so every result degrades to WEAK. That
 # must be visible on the stream the caller actually reads — this script's own
@@ -957,11 +962,12 @@ if os.path.exists(db_path):
                 f"SELECT path, ctime_ns FROM cards WHERE path IN ({ct_qm})", hit_paths))
         if hit_paths:
             qm = ",".join("?" * len(hit_paths))
-            for p_, mt_, sz_, body_ in con.execute(
-                    f"SELECT path, mtime, size, body FROM cards WHERE path IN ({qm})", hit_paths):
+            for p_, mt_, sz_, body_, sha_ in con.execute(
+                    f"SELECT path, mtime, size, body, sha1 FROM cards WHERE path IN ({qm})", hit_paths):
                 card_mtimes[p_] = mt_
                 card_sizes[p_] = sz_
                 card_bodies[p_] = body_ if isinstance(body_, str) else ""
+                card_shas[p_] = sha_ if isinstance(sha_, str) else ""
         con.close()
     except Exception as e:
         print(f"WARN: freshness lookup failed: {e}", file=sys.stderr)
@@ -974,6 +980,7 @@ if os.path.exists(db_path):
         card_mtimes = {}
         card_sizes = {}
         card_bodies = {}
+        card_shas = {}
 for i, r in enumerate(merged, 1):
     p = r["path"]
     exists = os.path.exists(p)
@@ -1091,7 +1098,19 @@ for i, r in enumerate(merged, 1):
         why = "path is no longer a regular file (directory or symlink)"
     elif identity is False:
         verdict = "WEAK"
-        why = "file changed since it was indexed"
+        # A dataless (iCloud-evicted) file got a deliberate name-only card:
+        # size 0, mtime 0.0, sha1 `dataless:...`, because embed-index never read
+        # it. Its placeholder therefore NEVER matches the live stat, so identity
+        # is always False here — but nothing changed. Reporting "file changed
+        # since it was indexed" sent the caller hunting an edit that never
+        # happened, when the real answer is that the content is offloaded and
+        # the card cannot be verified until it is materialised. Measured
+        # 2026-10-27 on 27 such cards in the live index.
+        if str(card_shas.get(p, "")).startswith("dataless:"):
+            why = ("content is offloaded to iCloud and was never read by the index "
+                   "— download the file to verify it")
+        else:
+            why = "file changed since it was indexed"
     elif ctime_unverified:
         verdict = "WEAK"
         why = "index card has no change-time evidence — reindex this path to verify"
