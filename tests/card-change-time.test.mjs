@@ -17,11 +17,10 @@
 //   * the search verdict requires an exact integer ctime match and demotes a
 //     legacy/NULL/invalid card to WEAK with a reindex reason (never INDEX_ERROR).
 //
-// The real module is driven directly. sqlite_vec and sentence_transformers are
-// stubbed at the import boundary (the same technique as
-// tests/vec-dim-no-destructive-rebuild.test.mjs) so this runs on a plain python
-// with no venv, no model and no extension loading — no downloads, and no skip
-// that would let the suite go green while testing nothing.
+// The real module is driven directly. Heavy imports/encoder and the vector
+// connection are fixture seams: plain SQLite represents vec rows and rejects
+// extension loading. All index state is isolated before module import. This
+// runs on stdlib Python without a model/download or a coverage-hiding skip.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -44,7 +43,15 @@ const python = plainPython();
 // the shipping module, never a reimplementation.
 const embedProbe = () => {
 	const script = `
-import importlib.util, json, os, pathlib, shutil, sqlite3, sys, tempfile, types
+import atexit, importlib.util, json, os, pathlib, shutil, sqlite3, sys, tempfile, types
+
+# Sandbox BEFORE importing: DB-derived lock/state globals must never point at
+# the operator HOME, even if a later fixture override regresses.
+root = pathlib.Path(tempfile.mkdtemp(prefix="heimdall-ctime-probe-")).resolve()
+atexit.register(shutil.rmtree, root, ignore_errors=True)
+os.environ["HOME"] = str(root / "process-home")
+os.environ["HEIMDALL_HOME"] = str(root / "home")
+os.environ["HEIMDALL_DB"] = str(root / "bootstrap.db")
 
 # Stub the two heavy imports at the boundary, exactly as the vec-dim suite does.
 for n in ("sqlite_vec", "sentence_transformers"):
@@ -74,7 +81,24 @@ ei.model = lambda: Stub()
 ei._ram_ok = lambda *a, **k: True
 
 out = {}
-root = pathlib.Path(tempfile.mkdtemp())
+ei.LOCK_PATH = root / "fixture.lock"
+ei.STATE_PATH = root / "semantic-state.json"
+
+# Model a stdlib Python whose SQLite cannot load extensions. Every connection
+# is also confined to the private fixture, so accidental production conn() use
+# fails safely instead of making the test depend on the operator environment.
+_connect = sqlite3.connect
+class PlainConnection(sqlite3.Connection):
+    def enable_load_extension(self, *args, **kwargs):
+        raise AttributeError("fixture SQLite has no extension-loading API")
+
+def fixture_connect(database, *args, **kwargs):
+    if str(database) != ":memory:":
+        path = pathlib.Path(database).resolve()
+        assert root in path.parents, "connection escaped the private fixture"
+    kwargs["factory"] = PlainConnection
+    return _connect(database, *args, **kwargs)
+sqlite3.connect = fixture_connect
 
 def plain(dbpath):
     # A PLAIN vec table whose declared dimension _db_dim() can parse: this keeps
@@ -83,6 +107,10 @@ def plain(dbpath):
     c = sqlite3.connect(str(dbpath))
     c.execute("CREATE TABLE IF NOT EXISTS vec (embedding float[%d])" % DIM)
     return c
+
+# The real insert/upsert code runs against the same plain SQLite fixture as
+# build. Production conn() deliberately requires sqlite-vec; this unit does not.
+ei.conn = lambda: plain(ei.DB)
 
 # 1. fresh init() creates ctime_ns
 c = plain(root / "fresh.db")
@@ -232,9 +260,12 @@ after = race.stat()
 row = card_row(ei.DB, "f:" + str(race))
 out["race_rc"] = rc
 out["race_card_body_is_old"] = "AAAA" in row[3]
-out["race_card_ctime_is_preedit"] = row[0] != after.st_ctime_ns
+out["race_card_ctime_is_preedit"] = row[0] == race_before.st_ctime_ns
+out["race_ctime_changed"] = after.st_ctime_ns != race_before.st_ctime_ns
 out["race_mtime_restored"] = after.st_mtime_ns == race_before.st_mtime_ns
 out["race_size_preserved"] = after.st_size == race_before.st_size
+out["private_lock_used"] = ei.LOCK_PATH.parent == root and ei.LOCK_PATH.is_file()
+out["private_state_path"] = ei.STATE_PATH.parent == root
 
 shutil.rmtree(root)
 print(json.dumps(out))
@@ -293,9 +324,16 @@ test("insert_card records the file's ctime, and stats before it reads", () => {
 	assert.equal(embed.race_card_body_is_old, true, "fixture: the card must hold the pre-edit body");
 	assert.equal(embed.race_mtime_restored, true, "fixture: the mid-read rewrite must restore mtime");
 	assert.equal(embed.race_size_preserved, true, "fixture: only ctime should expose the mid-read rewrite");
+	assert.equal(embed.race_ctime_changed, true, "fixture: the rewrite must actually advance ctime");
 	assert.equal(embed.race_card_ctime_is_preedit, true,
 		"stat must come BEFORE the read: a mid-read write must leave the card's ctime stale (unverifiable), " +
 		"not paired with post-edit metadata");
+});
+
+test("the insert probe uses private lock/state paths and needs no extension-loading API", () => {
+	assert.equal(embed.private_lock_used, true, "insert_card must use the fixture lock, never an operator lock");
+	assert.equal(embed.private_state_path, true, "telemetry must also stay inside the fixture");
+	assert.equal(embed.insert_rc, 0, "the real insert path must work with the extension-free fixture connection");
 });
 
 // ── the search verdict side ─────────────────────────────────────────────────
@@ -420,6 +458,12 @@ shellTest("ctime evidence: the verdict pass opens no target file", () => {
 		const opens = readFileSync(auditLog, "utf8");
 		assert.match(opens, /loaded/, "the audit instrument must be active");
 		assert.doesNotMatch(opens, /TARGET_OPEN/, "the ctime check must be a stat, not a read");
+		// Positive control: the instrument must detect a deliberate fixture open,
+		// not merely announce that sitecustomize loaded successfully.
+		execFileSync(python, ["-c", "import os; open(os.environ['AUDIT_TARGET'], 'rb').close()"], {
+			env: { ...process.env, PYTHONPATH: hookDir, AUDIT_LOG: auditLog, AUDIT_TARGET: hit },
+		});
+		assert.match(readFileSync(auditLog, "utf8"), /TARGET_OPEN/, "audit hook must detect an actual target open");
 	} finally {
 		rmSync(hookDir, { recursive: true, force: true });
 		cleanup();
