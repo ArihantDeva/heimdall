@@ -307,7 +307,36 @@ export class Journal {
       .all(...symbols);
   }
 
-  // ── the one write path ───────────────────────────────────────────────────
+  /**
+   * Refresh only metadata after reconcile has verified identical bytes/depth.
+   * Ownership, projection ids and fact history are unchanged. The conditional
+   * update is the same generation guard as commit(), plus a present/hash/depth
+   * guard so this cannot certify changed content or resurrect an absent row.
+   * Queue removal and the stamp still commit atomically with FULL durability.
+   * @returns {boolean} false leaves both the row and its queue entry untouched
+   */
+  restamp({ path, startGeneration, hash, size, mtimeMs, depth, capMax }) {
+    const db = this.db;
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const { changes } = db.prepare(
+        `UPDATE paths SET size = ?, mtime_ms = ?, cap_max = ?, reconciled_at = ?
+         WHERE path = ? AND generation = ? AND state = 'present' AND hash = ? AND depth = ?`,
+      ).run(size, mtimeMs, capMax ?? null, Date.now(), path, startGeneration, hash, depth);
+      if (!changes) {
+        db.exec("ROLLBACK");
+        return false;
+      }
+      db.prepare(`DELETE FROM queue WHERE path = ?`).run(path);
+      db.exec("COMMIT");
+      return true;
+    } catch (err) {
+      try { db.exec("ROLLBACK"); } catch { /* already rolled back */ }
+      throw err;
+    }
+  }
+
+  // ── the ownership-replacement write path ──────────────────────────────────
 
   /**
    * Atomically replace everything owned by `path`.

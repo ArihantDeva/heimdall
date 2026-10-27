@@ -224,7 +224,6 @@ export function reconcilePath(ctx, path) {
 
   const { effective } = depthFor(path, ctx.config, ctx.cap);
   const prior = journal.getPath(path);
-  const priorNodes = journal.ownedNodes(path);
 
   // ── unchanged: the hot path ────────────────────────────────────────────
   // Forty agents editing one file collapse to one hash comparison.
@@ -247,19 +246,17 @@ export function reconcilePath(ctx, path) {
     // CONTENT is unchanged: cap_max on a capability bounce, or mtime/size
     // after a touch (utimes). Without the stat refresh, audit's cheap screen
     // re-flags the same file every cycle — verify stays permanently red.
-    // The commit is ownership-exact, so it must be handed back everything the
-    // path currently owns; passing empty arrays here would wipe the file's
-    // nodes while claiming present/depth.
+    // Identical bytes/depth mean ownership is unchanged. A metadata-only stamp
+    // must not delete/reinsert nodes, edges, pending work or fact text.
     const statStale =
       prior.size !== desired.size || prior.mtime_ms !== desired.mtimeMs;
     if (prior.cap_max !== (ctx.cap?.max ?? null) || statStale) {
-      journal.commit({
+      const ok = journal.restamp({
         path, startGeneration,
         hash: desired.hash, size: desired.size, mtimeMs: desired.mtimeMs,
-        depth: desired.depth, capMax: ctx.cap?.max ?? null, state: "present",
-        nodes: priorNodes.map((n) => ({ ...n })),
-        edges: journal.ownedEdges(path), pending: journal.pendingFrom(path),
+        depth: desired.depth, capMax: ctx.cap?.max ?? null,
       });
+      if (!ok) return { action: "stale", path };
     } else {
       journal.dequeue(path);
     }
@@ -271,6 +268,7 @@ export function reconcilePath(ctx, path) {
   // path dirty, so it is redone — safe precisely because reconcile is
   // idempotent. The reverse order could mark a path clean that was never
   // projected, which is the one failure we cannot detect later.
+  const priorNodes = journal.ownedNodes(path);
   const priorBySymbol = new Map(priorNodes.map((n) => [n.node_id, n]));
 
   const nodes = [];
