@@ -263,6 +263,10 @@ esac
 # Reproduced by adversarial review — `bad-verify`, `empty-verify` and
 # `false-verify` each printed HEALTHY and exited 0. An unreadable drift payload is
 # an UNKNOWN, and an unknown must never be reported as healthy.
+#
+# `ok` is the verifier verdict, not a schema constant. A valid ok:false
+# payload can report real drift or a corrupt/unreadable graph. Keep it failing,
+# but name the evidence and repair direction instead of claiming a broken schema.
 DRIFT_JSON="$(timeout_run $HEIMDALL_CMD verify --json 2>/dev/null)"
 DRIFT_RC=$?
 if [ -z "$DRIFT_JSON" ]; then
@@ -272,61 +276,79 @@ if [ -z "$DRIFT_JSON" ]; then
 fi
 DRIFT_LINE="$(printf '%s' "$DRIFT_JSON" | python3 -c '
 import json, sys, collections
+# Preserve diagnostics even under an ASCII-only pipe encoding.
+sys.stdout.reconfigure(errors="backslashreplace")
 try:
-    d = json.load(sys.stdin)
+    d = json.load(sys.stdin.buffer)
 except Exception:
     print("PARSE_ERROR"); raise SystemExit(0)
-# The SCHEMA is part of the contract, not just parseability. A payload that parses
-# but does not carry an explicit boolean verdict and an explicit list of rows is
-# UNKNOWN, and the old code coerced it to healthy: reproduced by adversarial review
-# 2026-10-15 — {"ok":true}, {"ok":true,"drift":false} and {"ok":true,"drift":[]}
-# each printed HEALTHY and exited 0, and the verifier process had itself exited 7.
+
+def emit(token, message):
+    print(token + " " + message)
+    raise SystemExit(0)
+
+# Validate shape, not the truth value: runVerify uses ok:false for real drift
+# and for a broken graph. Neither is a malformed payload or a healthy index.
 if not isinstance(d, dict):
-    print("SCHEMA_ERROR not-an-object"); raise SystemExit(0)
-if d.get("ok") is not True:
-    print("SCHEMA_ERROR ok-not-true"); raise SystemExit(0)
+    emit("SCHEMA_ERROR", "not-an-object")
+if not isinstance(d.get("ok"), bool):
+    emit("SCHEMA_ERROR", "ok-missing-or-not-boolean")
 rows = d.get("drift")
 if not isinstance(rows, list):
-    print("SCHEMA_ERROR drift-not-a-list"); raise SystemExit(0)
-c = collections.Counter(r.get("why", "?") for r in rows)
-print(len(rows), d.get("ok"), "; ".join(f"{k}={v}" for k, v in c.most_common()))
+    emit("SCHEMA_ERROR", "drift-missing-or-not-a-list")
+if any(not isinstance(r, dict) for r in rows):
+    emit("SCHEMA_ERROR", "drift-row-not-an-object")
+if any(not isinstance(r.get("why", "?"), str) for r in rows):
+    emit("SCHEMA_ERROR", "drift-reason-not-a-string")
+graph = d.get("graph", {})
+if not isinstance(graph, dict):
+    emit("SCHEMA_ERROR", "graph-not-an-object")
+state = graph.get("state")
+if "state" in graph and state not in ("present", "absent", "corrupt", "unreadable"):
+    emit("SCHEMA_ERROR", "graph-state-not-recognized")
+graph_broken = state in ("corrupt", "unreadable")
+if d["ok"] and (rows or graph_broken):
+    emit("SCHEMA_ERROR", "contradictory ok:true with drift rows or a broken graph")
+
+if rows:
+    c = collections.Counter(r.get("why", "?") for r in rows)
+    reasons = "; ".join(f"{k}={v}" for k, v in c.most_common())
+    graph_note = f" Graph store is {state}; inspect verify --json before repair." if graph_broken else ""
+    emit("DRIFT", f"{len(rows)} drift row(s) - retrieval is stale for those paths ({reasons})." + graph_note)
+if not d["ok"]:
+    detail = f"the graph store is {state}" if graph_broken else "the verifier did not complete; health is UNKNOWN, not healthy"
+    if graph_broken and isinstance(graph.get("why"), str):
+        detail += " (" + graph["why"] + ")"
+    emit("UNHEALTHY", "index verify reported ok=false with 0 drift rows - " + detail + ".")
+emit("CLEAN", "no drift (0 row(s), verify ok)")
 ' 2>/dev/null || echo 'PARSE_ERROR')"
 case "$DRIFT_LINE" in
   PARSE_ERROR)
     fail "index drift payload unparseable — health is UNKNOWN, not healthy.\
   A health check must never read a broken payload as healthy.\
   Fix: $HEIMDALL_CMD verify --json   # see the error" ;;
-  SCHEMA_ERROR*)
+  SCHEMA_ERROR\ *)
     fail "index drift payload malformed (${DRIFT_LINE#SCHEMA_ERROR }) — health is UNKNOWN, not healthy.\
-  Required: an object with ok === true and drift as a LIST of rows.\
-  A payload missing either cannot prove the index is clean, so it must not pass.\
+  Required: an object with boolean ok and drift as a LIST of row objects, without contradictory verdicts.\
   Fix: $HEIMDALL_CMD verify --json   # inspect the payload shape" ;;
-  *)
-    set -- $DRIFT_LINE
-    _n="$1"; _ok="$2"; shift 2
-    if [ "$_n" != "0" ]; then
-      echo "FAIL: ${_n} drift row(s) — retrieval is stale for those paths (${*:-none})."
-      echo "  Fix: heimdall reconcile --all && heimdall verify"
-      exit 1
-    fi
-    # A non-zero verifier exit means the tool itself judged the index unhealthy.
-    # `verify` returns `drift.length ? 1 : 0` (bin/lib/cli-main.mjs), so it is a
-    # real verdict and not a crash code. Gating on it closes the last fail-open:
-    # adversarial review reproduced a verifier exiting 7 with a well-formed
-    # {"ok":true,"drift":[]} body, which the payload checks alone could not catch.
+  DRIFT\ *)
+    echo "FAIL: ${DRIFT_LINE#DRIFT }"
+    echo "  Fix: heimdall reconcile --all && heimdall verify"
+    exit 1 ;;
+  UNHEALTHY\ *)
+    fail "${DRIFT_LINE#UNHEALTHY }\
+  Health cannot be certified; a negative verdict is not a schema defect.\
+  Fix: $HEIMDALL_CMD verify --json   # inspect the verifier or graph-store failure before repair" ;;
+  CLEAN\ *)
+    # A clean-looking payload cannot overrule a failing verifier process.
     if [ "${DRIFT_RC:-0}" != "0" ]; then
       fail "index verify exited ${DRIFT_RC} — health is UNKNOWN, not healthy.\
   A verifier that fails to complete cannot certify the index, even if its payload looks clean.\
   Fix: $HEIMDALL_CMD verify --json   # see the error"
     fi
-    # Zero rows is necessary but not sufficient: `verify` also reports its own
-    # verdict, and ok:false with no rows means the check could not complete.
-    if [ "$_ok" != "True" ]; then
-      fail "index verify reported ok=${_ok} with 0 drift rows — the drift check did not complete.\
-  Health is UNKNOWN, not healthy.\
-  Fix: $HEIMDALL_CMD verify --deep --json   # see what the verifier is unhappy about"
-    fi
-    ok "no drift ($_n row(s), verify ok)" ;;
+    ok "${DRIFT_LINE#CLEAN }" ;;
+  *)
+    fail "unexpected index drift verdict: $DRIFT_LINE" ;;
 esac
 
 # Credential material in the index is a distinct class of un-health that the drift
