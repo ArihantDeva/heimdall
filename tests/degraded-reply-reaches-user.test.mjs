@@ -97,9 +97,13 @@ describe("a degraded reply is not presented as a complete search", () => {
 		// The first version put the rm inside the success branch and leaked one
 		// file per failed search (verified: before=0 after=1).
 		const src = readFileSync(join(REPO, "bin", "kb-search.sh"), "utf8");
-		const successRm = /printf '%s\\n' "\$FAST_OUT"[\s\S]{0,80}?rm -f "\$FAST_ERR"/.test(src);
+		// A successful reply now survives until the shared verdict pass: the
+		// EXIT trap owns that file instead of deleting it before it is read.
+		// warm-search-identity.test.mjs also checks the real temp directory.
+		const successHandoff = src.includes('FAST_INPUT="$FAST_ERR"');
+		const successTrap = src.includes('trap \'[ -z "$FAST_INPUT" ] || rm -f "$FAST_INPUT"\' EXIT');
 		const failureRm = /else\s*\n\s*rm -f "\$FAST_ERR"/.test(src);
 		expect(failureRm, "no cleanup on the failure path").toBe(true);
-		expect(successRm, "cleanup must run earlier, not only on success").toBe(false);
+		expect(successHandoff && successTrap, "warm payload must be cleaned after verification").toBe(true);
 	});
 });

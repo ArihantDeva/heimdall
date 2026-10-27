@@ -6,7 +6,9 @@ Prints EXACTLY what `embed-index.py query <q> -n N --related` prints:
     [{score}] {title} — {path}
     [{score}] {title} ·related — {path}
 
-so kb-search.sh's parser needs no branch. The shim only rewrites transport.
+so existing text callers need no branch. --json preserves the complete worker
+reply (including leg/related provenance) for kb-search.sh's shared verdict pass.
+The shim only rewrites transport; a successful reply is not a trust verdict.
 
 Exit codes are the shell's decision point:
     0  answered (hits may legitimately be empty)
@@ -28,42 +30,52 @@ DEFAULT_SOCKET = pathlib.Path.home() / ".heimdall" / "query.sock"
 
 
 def main(argv: list[str]) -> int:
-    # --fused asks the worker for the combined lexical+semantic search instead of
-    # semantic-only. kb-search.sh uses it to replace its 99-repo graft fan-out
-    # with one warm round trip; plain `query` keeps the old semantic behaviour
-    # for callers that only want that leg.
-    fused = "--fused" in argv
-    argv = [a for a in argv if a != "--fused"]
-    # --kind/--scope are accepted so a scoped search stays scoped. The worker
-    # narrows on `scope` as a path substring, matching the old --scope contract.
-    kind = None
-    scope = None
-    for flag, name in (("--kind", "kind"), ("--scope", "scope")):
-        if flag in argv:
-            try:
-                val = argv[argv.index(flag) + 1]
-            except IndexError:
-                print(f"query-shim: {flag} requires a value", file=sys.stderr)
+    # Consume option values as data: globally removing "--json" would also
+    # remove a literal scope with that name. -- consumes ONE literal query, so
+    # internal callers can transport flag-shaped queries and options after it.
+    fused = json_out = related = False
+    kind = scope = q = None
+    n = 5
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        i += 1
+        if arg == "--":
+            if i == len(argv) or q is not None:
+                print("query-shim: -- requires one query", file=sys.stderr)
                 return 1
-            if name == "kind":
-                kind = val
+            q = argv[i]
+            i += 1
+        elif arg == "--fused":
+            fused = True
+        elif arg == "--json":
+            json_out = True
+        elif arg == "--related":
+            related = True
+        elif arg in ("--kind", "--scope", "-n"):
+            if i == len(argv):
+                print(f"query-shim: {arg} requires a value", file=sys.stderr)
+                return 1
+            value = argv[i]
+            i += 1
+            if arg == "--kind":
+                kind = value
+            elif arg == "--scope":
+                scope = value
             else:
-                scope = val
-            i = argv.index(flag)
-            argv = argv[:i] + argv[i + 2:]
-
-    q = argv[0] if argv else ""
-    if not q.strip():
+                try:
+                    n = int(value)
+                except ValueError:
+                    print("query-shim: -n requires an integer", file=sys.stderr)
+                    return 1
+        elif q is None:
+            q = arg
+        else:
+            print(f"query-shim: unexpected argument {arg}", file=sys.stderr)
+            return 1
+    if q is None or not q.strip():
         print("query-shim: empty query", file=sys.stderr)
         return 1
-    n = 5
-    related = "--related" in argv
-    if "-n" in argv:
-        try:
-            n = int(argv[argv.index("-n") + 1])
-        except (IndexError, ValueError):
-            print("query-shim: -n requires an integer", file=sys.stderr)
-            return 1
 
     sock_path = pathlib.Path(os.environ.get("HEIMDALL_QUERY_SOCK", str(DEFAULT_SOCKET))).expanduser()
     req = {"op": "search" if fused else "query", "q": q, "n": n, "related": related}
@@ -122,6 +134,10 @@ def main(argv: list[str]) -> int:
             "WARN: semantic layer failed — results are LEXICAL-ONLY (sem_coverage=degraded)",
             file=sys.stderr,
         )
+
+    if json_out:
+        print(json.dumps(reply))
+        return 0
 
     for h in reply.get("hits") or []:
         title = h.get("title", "")
