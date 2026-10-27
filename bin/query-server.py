@@ -503,47 +503,31 @@ def serve(sock_path: pathlib.Path, idle_timeout: float) -> int:
     # search fell back to the 14s path and no worker could start again until the
     # file was removed by hand.
     #
-    # The rule that makes this safe: trust the lock ONLY if a live process is
-    # actually holding it. flock is advisory and process-bound, so `flock -n`
-    # via the same call is authoritative — we try to take it, and on failure we
-    # additionally check the recorded PID. A dead PID means the file is debris.
+    # Kernel flock is the authority; PID text is diagnostic only. Opening with
+    # "w" before flock would erase the holder's PID, and treating that empty PID
+    # as stale would unlink a LIVE locked inode. A contender could then lock a
+    # fresh inode and duplicate the expensive model import.
     lock_path = sock_path.with_suffix(sock_path.suffix + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_fh = open(lock_path, "w")
+    # "a+" creates the file if absent and never truncates before we hold the
+    # lock. An UNHELD file left by a crash needs no special case: its lock died
+    # with the process, so the flock below simply succeeds and we take over.
+    lock_fh = open(lock_path, "a+")
     try:
         fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        # Someone holds the lock. Confirm the holder is actually alive; if not,
-        # the file is stale debris from a crash and this process takes over.
-        holder = 0
-        try:
-            holder = int((lock_path.read_text() or "0").strip())
-        except (OSError, ValueError):
-            holder = 0
-        alive = False
-        if holder > 0:
-            try:
-                os.kill(holder, 0)
-                alive = True
-            except OSError:
-                alive = False
-        if alive:
-            log(f"another worker (pid {holder}) holds {lock_path}; refusing to start")
-            lock_fh.close()
-            return 4
-        log(f"stale lock from dead pid {holder}; taking over")
-        try:
-            lock_fh.close()
-            lock_path.unlink()
-        except OSError:
-            pass
-        lock_fh = open(lock_path, "w")
-        try:
-            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as e:
-            log(f"lock contention after stale-lock recovery ({e}); refusing to start")
-            lock_fh.close()
-            return 4
+        # A live process holds this inode, whatever the file text says (empty,
+        # malformed, or a recycled dead PID). Refuse. NEVER unlink a contended
+        # lock: removing the directory entry would strand the holder's lock on
+        # an unlinked inode and hand a second worker a fresh one.
+        log(f"another worker holds {lock_path}; refusing to start")
+        lock_fh.close()
+        return 4
+    # We own the lock, and lock_fh stays referenced by serve() until it returns,
+    # so the descriptor is held for this worker's whole lifetime. Only now that
+    # we are the holder do we rewrite the file to record our PID.
+    lock_fh.seek(0)
+    lock_fh.truncate(0)
     lock_fh.write(str(os.getpid()))
     lock_fh.flush()
 
