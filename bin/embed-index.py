@@ -143,23 +143,20 @@ def conn() -> sqlite3.Connection:
     # fails, just later. tests/embed-index-write-lock.test.mjs asserts a 12s hold
     # is survivable, which is the collision that actually happened.
     c.execute("PRAGMA busy_timeout=60000")
-    # WAL, because the journal mode is what makes a commit exclusive for its
-    # whole duration. The live index ran `journal_mode=delete`, where a writer
-    # blocks every reader and every other writer for the entire commit; that is
-    # why a 5s (never mind a 60s) wait could be exhausted. Under WAL, writers do
-    # not block readers and the exclusive window shrinks to a brief moment.
+    # DO NOT switch to WAL here. I tried that first and it BROKE every reader:
+    # in WAL mode a `mode=ro` connection must create/attach the `-shm` sidecar,
+    # and when that sidecar is absent sqlite raises "unable to open database
+    # file" on the first read (reproduced on a copy: `mode=ro` + `BEGIN` + any
+    # SELECT fails; `immutable=1` works only because it forgoes the sidecar, and
+    # is wrong for a live database). Every `mode=ro` reader in this repo assumes
+    # a self-contained single file — kb-search.sh even carries a comment about
+    # deleting WAL from temp snapshots for exactly this reason.
     #
-    # Applied ONLY when the database is not already WAL: switching journal mode
-    # needs an exclusive lock itself, so blindly issuing this on every conn()
-    # would turn a read into a lock demand and could block a build behind the
-    # very writer it is trying to wait for. If the mode cannot be changed (a
-    # read-only database, or one held by another process), stay in the current
-    # mode: the busy_timeout above is what keeps that case working.
-    try:
-        if c.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal":
-            c.execute("PRAGMA journal_mode=WAL")
-    except sqlite3.Error:
-        pass  # read-only or locked: keep the existing mode, rely on busy_timeout
+    # And WAL is not needed: measured, a commit survives a 12-second exclusive
+    # hold in `journal_mode=delete` purely because of the busy_timeout above.
+    # The crash was an exhausted wait, not the journal mode. Switching the
+    # journal mode is a schema-level change with reader-wide consequences; the
+    # timeout is the whole fix.
     # Memory-map the DB instead of read()ing pages into the process heap.
     # MEASURED 2026-10-22 over the 4.5GB index: a kNN over 115k x 768d vectors
     # cost 168-170ms through the normal page cache and 120ms with a 2GB mmap,

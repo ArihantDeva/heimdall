@@ -86,33 +86,46 @@ c.close()
   }
 });
 
-test("conn() selects WAL so a writer does not lock the whole database for every commit", { skip: SKIP }, () => {
+test("conn() keeps the index readable by mode=ro consumers — the regression that broke every search", { skip: SKIP }, () => {
   const { dir, db } = freshDb();
   try {
-    // A fresh database starts in `delete` mode, the mode that made commits
-    // exclusive for their whole duration.
-    const before = py(db, `
-import sqlite3
-c = sqlite3.connect("${db}")
-print(c.execute("PRAGMA journal_mode").fetchone()[0])
-c.close()
-`).trim();
-    assert.equal(before, "delete", "precondition: a brand-new db is in delete mode");
-
-    const after = py(db, `
+    // conn() must leave the database as a SELF-CONTAINED file that a `mode=ro`
+    // reader can open. I first "fixed" the lock by switching to WAL, and that
+    // silently broke every search in this repo: in WAL mode a read-only
+    // connection must attach the `-shm` sidecar, and when it is absent sqlite
+    // raises "unable to open database file" on the FIRST read. The failure is
+    // invisible to a read-write connection, so it shipped green.
+    //
+    // Reproduced deterministically on a copy: `mode=ro` + BEGIN + SELECT fails
+    // on a WAL db with no -shm. This asserts the property that matters to
+    // consumers rather than naming a journal mode.
+    const out = py(db, `
 import importlib.util, sys
 sys.path.insert(0, "bin")
 spec = importlib.util.spec_from_file_location("embed_index", "bin/embed-index.py")
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 c = m.conn()
+c.execute("CREATE TABLE IF NOT EXISTS cards (id TEXT PRIMARY KEY, path TEXT)")
+c.execute("INSERT OR REPLACE INTO cards (id, path) VALUES ('a', '/tmp/x')")
+c.commit()
 print(c.execute("PRAGMA journal_mode").fetchone()[0])
 c.close()
 `).trim();
-    assert.equal(
-      after,
+    assert.notEqual(
+      out,
       "wal",
-      "conn() must move the index to WAL: under delete-mode every commit blocks readers and other writers for its full duration",
+      "conn() must not leave the index in WAL: a mode=ro reader cannot open a WAL database without its -shm sidecar, which broke every kb-search reader",
     );
+
+    // The behaviour that actually broke: a read-only consumer doing BEGIN + SELECT.
+    const read = py(db, `
+import sqlite3
+c = sqlite3.connect("file:${db}?mode=ro", uri=True)
+c.execute("BEGIN")
+print(c.execute("SELECT count(*) FROM cards").fetchone()[0])
+c.close()
+`).trim();
+    assert.equal(read, "1", "a mode=ro reader must be able to BEGIN and SELECT against the built index");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
