@@ -657,7 +657,7 @@ done <<< "$SCOPE_ROOTS"
 fi
 
 python3 - "$Q" "$N" "$SCRIPT_DIR" "$KIND" "$RECENCY" "$LONG" "$FAST_INPUT" "$SCOPE" "${ROOT_ARGS[@]}" <<'PYEOF'
-import json, math, os, sqlite3, subprocess, sys, time
+import hashlib, json, math, os, sqlite3, subprocess, sys, time
 import re as _re
 
 
@@ -731,26 +731,158 @@ venv_py = os.path.expanduser("~/.heimdall/venv/bin/python3")
 shim = os.path.join(script_dir, "query-shim.py")
 server = os.path.join(script_dir, "query-server.py")
 sock_path = os.environ.get("HEIMDALL_QUERY_SOCK") or os.path.expanduser("~/.heimdall/query.sock")
+def _finite_number(value):
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except (OverflowError, ValueError):
+        return False
+
+
+def _rerank_metadata(reply):
+    meta = reply.get("rerank")
+    if meta is None:
+        return None
+    if (not isinstance(meta, dict) or type(meta.get("version")) is not int
+            or meta.get("version") != 1):
+        raise ValueError("invalid rerank metadata version")
+    status = meta.get("status")
+    applied = meta.get("applied")
+    if (status not in ("applied", "disabled", "unavailable", "failed", "deadline", "empty")
+            or type(applied) is not bool or applied != (status == "applied")):
+        raise ValueError("invalid rerank metadata status")
+    if applied and os.environ.get("HEIMDALL_RERANK") != "1":
+        raise ValueError("unsolicited applied reranking")
+    method = "cross_encoder" if applied else "original_order"
+    reason = meta.get("reason")
+    if (meta.get("method") != method or not isinstance(reason, str)
+            or len(reason) > 256 or any(ord(c) < 32 or ord(c) == 127 for c in reason)):
+        raise ValueError("invalid rerank metadata method or reason")
+    total = len(reply["hits"])
+    window = min(25, total)
+    counts = {"candidate_count": window, "total_count": total, "tail_count": total - window}
+    if any(type(meta.get(key)) is not int or meta[key] != value for key, value in counts.items()):
+        raise ValueError("invalid rerank candidate counts")
+    scored = meta.get("scored_count")
+    if type(scored) is not int or not 0 <= scored <= window or (applied and scored != window):
+        raise ValueError("invalid rerank scored count")
+    if (status == "empty") != (total == 0):
+        raise ValueError("invalid empty rerank status")
+    # No arbitrary response fields or document contents reach agent stdout.
+    return dict(counts, status=status, method=method, applied=applied, reason=reason, scored_count=scored)
+
+
+def _ranking_evidence(hit, meta, position):
+    raw = hit.get("signals")
+    if raw is None and not meta["applied"]:
+        raw = {}  # an unsupported worker reported no observations, not zeros
+    if not isinstance(raw, dict):
+        raise ValueError("invalid ranking signals")
+    values = {key: raw.get(key) for key in ("s_vec", "s_lex", "s_ce")}
+    if any(value is not None and not _finite_number(value) for value in values.values()):
+        raise ValueError("ranking signals must be finite or null")
+    if any(values[key] is not None and not 0 <= values[key] <= 1 for key in ("s_lex", "s_ce")):
+        raise ValueError("invalid bounded ranking signal")
+    ce_status = raw.get("ce_status", "not_scored")
+    if (ce_status not in ("ok", "disabled", "unavailable", "failed", "deadline", "not_scored")
+            or (values["s_ce"] is not None) != (ce_status == "ok")):
+        raise ValueError("invalid ranking signal availability")
+    in_applied_window = meta["applied"] and position <= meta["candidate_count"]
+    if position > meta["candidate_count"] and values["s_ce"] is not None:
+        raise ValueError("unexpected scoring outside the fixed window")
+    expected_kind = "order_key" if in_applied_window else "retrieval"
+    if hit.get("score_kind", "retrieval") != expected_kind:
+        raise ValueError("invalid ranking score kind")
+    retrieval_score = hit.get("retrieval_score", hit["score"])
+    if (in_applied_window and "retrieval_score" not in hit) or not _finite_number(retrieval_score):
+        raise ValueError("missing original retrieval score")
+    ranking_score = hit.get("ranking_score") if in_applied_window else None
+    if in_applied_window and (ce_status != "ok" or not _finite_number(ranking_score)
+                              or ranking_score != values["s_ce"]):
+        raise ValueError("missing applied ranking score")
+    retrieval_kind = ("related_order_hint" if hit.get("related") else
+                      "semantic_cosine_offset" if hit.get("leg") == "semantic" else
+                      "lexical_ordinal" if hit.get("leg") == "lexical" else "reported")
+    out = dict(values, ce_status=ce_status, score_kind=expected_kind,
+               ranking_score=ranking_score, retrieval_score=retrieval_score,
+               retrieval_score_kind=retrieval_kind)
+    for key in ("s_vec_source", "s_vec_missing_reason", "s_lex_source", "s_lex_missing_reason"):
+        value = raw.get(key)
+        if value is not None and (not isinstance(value, str) or len(value) > 128):
+            raise ValueError("invalid ranking signal provenance")
+        out[key] = value
+    provenance = hit.get("provenance", {})
+    if not isinstance(provenance, dict):
+        raise ValueError("invalid scoring snapshot provenance")
+    for source, target in (("card_sha1", "scored_card_sha1"),
+                           ("scoring_input_sha256", "scoring_input_sha256"),
+                           ("document_source", "scored_document_source"),
+                           ("title_source", "scored_title_source"),
+                           ("card_status", "scored_card_status")):
+        value = provenance.get(source)
+        if value is not None and (not isinstance(value, str) or len(value) > 256
+                                  or any(ord(c) < 32 for c in value)):
+            raise ValueError("invalid scoring snapshot identity")
+        out[target] = value
+    digest = out["scoring_input_sha256"]
+    if digest is not None and (len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest)):
+        raise ValueError("invalid scoring input fingerprint")
+    return out
+
+
 def warm_results(reply):
     """Preserve worker provenance, never interpret its ranking score as trust."""
     if (not isinstance(reply, dict) or reply.get("ok") is not True
             or not isinstance(reply.get("hits"), list)):
         raise ValueError("warm worker reply must contain ok:true and a hits list")
+    meta = _rerank_metadata(reply)
+    if meta is not None and meta["applied"] and not reply["hits"]:
+        raise ValueError("an empty reply cannot claim applied reranking")
     out = []
-    for h in reply["hits"]:
+    for position, h in enumerate(reply["hits"], 1):
         if (not isinstance(h, dict) or not isinstance(h.get("path"), str)
                 or not isinstance(h.get("title"), str)):
             raise ValueError("warm worker hit must carry a path and title")
         score = h.get("score")
-        if (not isinstance(score, (int, float)) or isinstance(score, bool)
-                or not math.isfinite(score)):
+        if not _finite_number(score):
             raise ValueError("warm worker hit must carry a finite numeric score")
-        out.append({
+        row = {
             "title": h["title"], "path": h["path"],
             "score": float(score), "body": "",
             "semantic": h.get("leg") == "semantic" and not h.get("related"),
             "warm": True,
-        })
+        }
+        if meta is not None:
+            row["ranking_evidence"] = _ranking_evidence(h, meta, position)
+        out.append(row)
+    if meta is not None:
+        if len({h["path"] for h in reply["hits"]}) != len(out):
+            raise ValueError("duplicate ranked path identity")
+        window = meta["candidate_count"]
+        observed = sum(row["ranking_evidence"]["ce_status"] == "ok" for row in out[:window])
+        if observed != meta["scored_count"]:
+            raise ValueError("rerank observation count mismatch")
+        original_ranks = []
+        for position, h in enumerate(reply["hits"], 1):
+            rank = h.get("rank", position if not meta["applied"] else None)
+            original = h.get("retrieval_rank", position if not meta["applied"] else None)
+            if type(rank) is not int or rank != position or type(original) is not int:
+                raise ValueError("invalid final or original ranking position")
+            if not meta["applied"] or position > window:
+                if original != position:
+                    raise ValueError("a fallback or tail changed original rank")
+            else:
+                original_ranks.append(original)
+        if meta["applied"]:
+            if sorted(original_ranks) != list(range(1, window + 1)):
+                raise ValueError("invalid original rank permutation")
+            order = [(-out[i]["ranking_evidence"]["s_ce"], original_ranks[i]) for i in range(window)]
+            if order != sorted(order):
+                raise ValueError("inconsistent CE ordering or unstable ties")
+            if [h["score"] for h in out] != sorted((h["score"] for h in out), reverse=True):
+                raise ValueError("order keys would undo the reported ranking")
+        print("RERANK: " + json.dumps(meta, ensure_ascii=True, allow_nan=False, sort_keys=True))
     return out
 
 results = []
@@ -933,6 +1065,9 @@ card_ctimes = {}
 card_mtimes = {}
 card_sizes = {}
 card_bodies = {}
+card_titles = {}
+card_shas = {}
+card_text_valid = {}
 # Index availability is part of the verdict: when the cards table cannot be
 # read, NO hit can be identity-checked, so every result degrades to WEAK. That
 # must be visible on the stream the caller actually reads — this script's own
@@ -957,11 +1092,15 @@ if os.path.exists(db_path):
                 f"SELECT path, ctime_ns FROM cards WHERE path IN ({ct_qm})", hit_paths))
         if hit_paths:
             qm = ",".join("?" * len(hit_paths))
-            for p_, mt_, sz_, body_ in con.execute(
-                    f"SELECT path, mtime, size, body FROM cards WHERE path IN ({qm})", hit_paths):
+            sha_col = "sha1" if "sha1" in cols else "NULL"
+            for p_, mt_, sz_, body_, title_, sha_ in con.execute(
+                    f"SELECT path, mtime, size, body, title, {sha_col} FROM cards WHERE path IN ({qm})", hit_paths):
                 card_mtimes[p_] = mt_
                 card_sizes[p_] = sz_
                 card_bodies[p_] = body_ if isinstance(body_, str) else ""
+                card_titles[p_] = title_ if isinstance(title_, str) else ""
+                card_shas[p_] = sha_ if isinstance(sha_, str) and len(sha_) <= 256 else None
+                card_text_valid[p_] = isinstance(body_, str) and isinstance(title_, str)
         con.close()
     except Exception as e:
         print(f"WARN: freshness lookup failed: {e}", file=sys.stderr)
@@ -974,6 +1113,9 @@ if os.path.exists(db_path):
         card_mtimes = {}
         card_sizes = {}
         card_bodies = {}
+        card_titles = {}
+        card_shas = {}
+        card_text_valid = {}
 for i, r in enumerate(merged, 1):
     p = r["path"]
     exists = os.path.exists(p)
@@ -1155,4 +1297,25 @@ for i, r in enumerate(merged, 1):
     print(f"      {r['title']}")
     if why:
         print(f"      {why}")
+    if "ranking_evidence" in r:
+        evidence = dict(r["ranking_evidence"])
+        evidence["current_index_card_sha1"] = card_shas.get(p)
+        # This fingerprints INDEXED text already read from SQLite, never target
+        # file bytes, and never grants trust. A fresh card may differ from the
+        # snapshot scored before a concurrent index update.
+        digest = None
+        if card_text_valid.get(p):
+            title_bytes = card_titles[p].encode("utf-8")
+            text_hash = hashlib.sha256(b"heimdall-scoring-text-v1\0")
+            text_hash.update(len(title_bytes).to_bytes(8, "big"))
+            text_hash.update(title_bytes)
+            text_hash.update(card_bodies[p].encode("utf-8"))
+            digest = text_hash.hexdigest()
+        evidence["current_index_text_sha256"] = digest
+        old = evidence.get("scoring_input_sha256")
+        evidence["scoring_snapshot"] = ("unknown" if old is None or digest is None else
+            "matches_current_index" if old == digest else "changed_since_scoring")
+        print("      signals=" + json.dumps(evidence, ensure_ascii=True, allow_nan=False, sort_keys=True))
+        if evidence["scoring_snapshot"] == "changed_since_scoring":
+            print("      ranking evidence belongs to a different indexed text snapshot; it does not verify the current card")
 PYEOF

@@ -79,6 +79,9 @@ def main(argv: list[str]) -> int:
 
     sock_path = pathlib.Path(os.environ.get("HEIMDALL_QUERY_SOCK", str(DEFAULT_SOCKET))).expanduser()
     req = {"op": "search" if fused else "query", "q": q, "n": n, "related": related}
+    rerank_requested = fused and os.environ.get("HEIMDALL_RERANK") == "1"
+    if rerank_requested:
+        req["rerank"] = True
     if kind:
         req["kind"] = kind
     if scope:
@@ -134,6 +137,18 @@ def main(argv: list[str]) -> int:
             "WARN: semantic layer failed — results are LEXICAL-ONLY (sem_coverage=degraded)",
             file=sys.stderr,
         )
+
+    # An older worker may understand search but ignore the new opt-in. Do not
+    # present that as an applied rerank. Verification will carry this status on
+    # stdout (MCP does not retain this shim's stderr).
+    if rerank_requested and "rerank" not in reply:
+        total = len(reply.get("hits") or [])
+        reply["rerank"] = {
+            "version": 1, "requested": True, "status": "unavailable",
+            "reason": "worker_unsupported", "applied": False,
+            "method": "original_order", "candidate_count": min(25, total),
+            "scored_count": 0, "total_count": total, "tail_count": max(0, total - 25),
+        }
 
     if json_out:
         print(json.dumps(reply))

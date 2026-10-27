@@ -42,7 +42,7 @@ async function withServer(onConn, { timeout = "1", args = ["hello"] } = {}) {
 	const started = Date.now();
 	try {
 		const child = spawn(python, [SHIM, ...args], {
-			env: { ...process.env, HEIMDALL_QUERY_SOCK: sockPath, HEIMDALL_QUERY_TIMEOUT: timeout },
+			env: { ...process.env, HEIMDALL_QUERY_SOCK: sockPath, HEIMDALL_QUERY_TIMEOUT: timeout, HEIMDALL_RERANK: "0" },
 		});
 		let stdout = "", stderr = "";
 		child.stdout.on("data", (d) => { stdout += d; });
