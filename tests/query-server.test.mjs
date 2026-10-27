@@ -9,26 +9,40 @@
 //
 // These tests pin the CONTRACT, not the timing: framing, ordering, error
 // survival, and the guard that a second worker cannot steal the socket.
-import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { spawn } from "node:child_process";
-import { existsSync, unlinkSync, writeFileSync } from "node:fs";
+// node:test is the runner package.json actually invokes; see tests/lib/harness.mjs
+import { describe, it, expect, beforeAll, afterAll } from "./lib/harness.mjs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createConnection } from "node:net";
+import { plainPython } from "./lib/python.mjs";
 
-const REPO = join(import.meta.dir, "..");
+const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SERVER = join(REPO, "bin", "query-server.py");
 const VENV_PY = join(homedir(), ".heimdall", "venv", "bin", "python3");
 // A PRIVATE socket. This suite used the production path and unlinked it in
 // beforeAll/afterAll, which killed the operator's live warm worker and made the
 // suite pass only when nothing else was running. Tests must never manage the
 // real socket.
-const SOCK = join(homedir(), ".heimdall", "query-server-test.sock");
+// Sockets live in a PRIVATE temp dir, never the operator's ~/.heimdall.
+// Measured 2026-10-23: this suite unlinkSync'd query-server-test.sock inside the
+// live state dir, so two workers (this suite's and the operator's own daemon)
+// could contend for one location. Isolating makes the file unreachable by
+// anything but this process.
+const SOCK_DIR = mkdtempSync(join(tmpdir(), "heimdall-qserver-"));
+const SOCK = join(SOCK_DIR, "query-server-test.sock");
 
 // The semantic worker needs the heimdall venv + a built index. Absent either,
 // this suite cannot prove anything real, so it must SKIP loudly rather than
 // pass green on a machine that never ran the code path.
 const canRun = existsSync(VENV_PY) && existsSync(join(homedir(), ".heimdall", "global.db"));
+
+// Any python3 runs the reply-contract tests below: they stub both module-top
+// imports, so no venv and no model are involved.
+const python = plainPython();
 
 function rpc(sockPath, payload, { timeoutMs = 90_000 } = {}) {
 	return new Promise((resolve) => {
@@ -50,12 +64,23 @@ function rpc(sockPath, payload, { timeoutMs = 90_000 } = {}) {
 
 let child = null;
 
-async function waitForSocket(path, ms = 90_000) {
+async function waitForSocket(path, child = null, ms = 90_000) {
 	const t0 = Date.now();
 	while (Date.now() - t0 < ms) {
+		// A child that has already exited will never bind the socket. Waiting out
+		// the full timeout to report that costs 90s and, measured 2026-10-23,
+		// produced "expected false to be true" instead of the reason.
+		if (child && child.exitCode !== null) return false;
 		if (existsSync(path)) {
+			// `warm`, not just "socket accepts". The model warms in 0.8s and the
+			// socket binds at once, but the 416MB vector snapshot builds on a
+			// background thread for ~5s more; a query issued before then takes the
+			// COLD fallback (measured 4815ms against a 10s deadline) and degrades
+			// to lexical-only under load. Measured 2026-10-23 under 65-way
+			// concurrency: this suite's semantic tests failed every round until the
+			// wait gated on warm.
 			const r = await rpc(path, { op: "ping" });
-			if (r && !r.error) return true;
+			if (r && !r.error && r.warm) return true;
 		}
 		await new Promise((r) => setTimeout(r, 200));
 	}
@@ -66,9 +91,20 @@ describe.skipIf(!canRun)("query-server: warm semantic worker", () => {
 	beforeAll(async () => {
 		try { if (existsSync(SOCK)) unlinkSync(SOCK); } catch {}
 		try { if (existsSync(SOCK + ".lock")) unlinkSync(SOCK + ".lock"); } catch {}
-		child = spawn(VENV_PY, [SERVER, "--socket", SOCK], { stdio: "ignore", detached: false });
-		const up = await waitForSocket(SOCK);
-		if (!up) throw new Error(`query-server did not come up on ${SOCK}`);
+		// Capture stderr instead of discarding it. Measured 2026-10-23: with an
+		// unusable HOME the server failed to boot and this threw
+		// "query-server did not come up on <sock>" — true, and useless. The reason
+		// (a missing model cache) had been written to stderr and thrown away by
+		// stdio:"ignore", so the failure named the symptom and hid the cause.
+		child = spawn(VENV_PY, [SERVER, "--socket", SOCK], { stdio: ["ignore", "ignore", "pipe"], detached: false });
+		let bootErr = "";
+		child.stderr?.on("data", (d) => { bootErr = (bootErr + d).slice(-4000); });
+		const up = await waitForSocket(SOCK, child);
+		if (!up) throw new Error(
+			`query-server did not come up on ${SOCK}` +
+			(child.exitCode !== null ? ` (exited ${child.exitCode})` : " (still running, never bound)") +
+			(bootErr.trim() ? `\n--- server stderr ---\n${bootErr.trim()}` : "\n(no stderr captured)"),
+		);
 	}, 120_000);
 
 	afterAll(() => {
@@ -191,22 +227,189 @@ describe.skipIf(!canRun)("query-server: stale lock does not lock the worker out"
 		try { if (existsSync(sock)) unlinkSync(sock); } catch {}
 		// PID 999999 is not a real process; spawn with it recorded as the holder.
 		writeFileSync(lock, "999999");
-		const c = spawn(VENV_PY, [SERVER, "--socket", sock], { stdio: "ignore" });
+		// Same shape as the two suites above: capture stderr, and stop waiting when
+		// the child exits. This one waited its full 120s and then reported
+		// `expected false to be true`, with the reason discarded.
+		const c = spawn(VENV_PY, [SERVER, "--socket", sock], { stdio: ["ignore", "ignore", "pipe"] });
+		let bootErr = "";
+		c.stderr?.on("data", (d) => { bootErr = (bootErr + d).slice(-4000); });
 		try {
 			const t0 = Date.now();
 			let up = false;
 			while (Date.now() - t0 < 120_000) {
+				if (c.exitCode !== null) break; // it will never bind now
 				if (existsSync(sock)) {
 					const r = await rpc(sock, { op: "ping" });
 					if (r && !r.error) { up = true; break; }
 				}
 				await new Promise((r) => setTimeout(r, 200));
 			}
-			expect(up).toBe(true);
+			expect(up, up ? "" : `server did not start on ${sock}` +
+				(c.exitCode !== null ? ` (exited ${c.exitCode})` : " (running, never bound)") +
+				(bootErr.trim() ? `\n--- stderr ---\n${bootErr.trim()}` : "\n(no stderr)")
+			).toBe(true);
 		} finally {
 			try { c.kill(); } catch {}
 			try { if (existsSync(sock)) unlinkSync(sock); } catch {}
 			try { if (existsSync(lock)) unlinkSync(lock); } catch {}
 		}
 	}, 240_000);
+});
+
+afterAll(() => {
+	try { rmSync(SOCK_DIR, { recursive: true, force: true }); } catch {}
+});
+
+// ── the request/reply contract, testable without a model ────────────────
+//
+// WHY THIS EXISTS (measured 2026-10-23)
+// embed-index.query() used to call sys.exit(3) on lock contention. serve()
+// runs the handler inside _with_deadline's daemon thread, and SystemExit
+// derives from BaseException — so it escaped `except Exception`, the thread
+// died BEFORE conn.sendall(), and the client received NO FRAME AT ALL and sat
+// until its own 90-120s timeout. The visible symptom was a "hung daemon"; the
+// real bug was a swallowed control-flow exception on the reply path.
+//
+// These two tests drive the REAL serve() loop with a stubbed embed-index, so
+// they need no venv, no model and no built index — they run everywhere,
+// including CI, where the suites above skip. Mutation-checked: reverting the
+// handler to `except Exception` fails the first test with an empty frame.
+describe("query-server: a request always produces exactly one reply", () => {
+	const runWith = (body, timeoutMs = 60_000) => {
+		const dir = mkdtempSync(join(tmpdir(), "heimdall-reply-"));
+		const sock = join(dir, "probe.sock");
+		const script = `
+import importlib.util, json, pathlib, socket, sys, threading, time, types
+for _n, _attrs in (("sqlite_vec", {"load": lambda *a, **k: None}),
+                   ("sentence_transformers", {"SentenceTransformer": lambda *a, **k: None})):
+    _m = types.ModuleType(_n)
+    for _k, _v in _attrs.items(): setattr(_m, _k, _v)
+    sys.modules[_n] = _m
+_s = importlib.util.spec_from_file_location("qs", ${JSON.stringify(SERVER)})
+qs = importlib.util.module_from_spec(_s); sys.modules["qs"] = qs; _s.loader.exec_module(qs)
+
+class FakeEI:
+    MODEL = None
+    def model(self): return None
+    def status(self): return {}
+    def query(self, q, n=5, related=False):
+${body}
+qs.load_embed_index = lambda: FakeEI()
+qs.build_fts = lambda ei: None
+qs._load_matrix = lambda ei: None
+
+err = {}
+def _run():
+    try: qs.serve(pathlib.Path(${JSON.stringify(sock)}), 30)
+    except BaseException:
+        import traceback; err["tb"] = traceback.format_exc()
+threading.Thread(target=_run, daemon=True).start()
+for _ in range(200):
+    if pathlib.Path(${JSON.stringify(sock)}).exists(): break
+    time.sleep(0.05)
+if "tb" in err:
+    print(json.dumps({"serve_failed": err["tb"][-500:]})); raise SystemExit(0)
+time.sleep(0.2)
+_c = socket.socket(socket.AF_UNIX); _c.settimeout(10)
+_c.connect(${JSON.stringify(sock)})
+_c.sendall(json.dumps({"op": "query", "q": "x", "n": 1}).encode() + b"\\n")
+try:
+    _d = _c.recv(65536)
+except socket.timeout:
+    _d = b""
+print(json.dumps({"frame": _d.decode("utf-8", "replace")}))
+`;
+		const r = spawnSync(python, ["-c", script], { encoding: "utf8", timeout: timeoutMs });
+		rmSync(dir, { recursive: true, force: true });
+		const out = (r.stdout || "").trim().split("\n").pop();
+		expect(r.status).toBe(0);
+		return JSON.parse(out);
+	};
+
+	it("replies rather than going silent when the handler raises SystemExit", () => {
+		// Exactly what the old code did on lock contention.
+		const got = runWith("        raise SystemExit(3)");
+		expect(Boolean(got.serve_failed)).toBe(false);
+		expect(got.frame).not.toBe("");            // an empty frame is the bug
+		const reply = JSON.parse(got.frame);
+		expect(reply.ok).toBe(false);
+		expect(reply.busy).toBe(true);             // named for what it is
+	});
+
+	it("never reports a bare KeyError when the search produced no result", () => {
+		// Unit-level, because the end-to-end path cannot reach this anymore: the
+		// thread body now catches BaseException, so box is always populated. The
+		// guard is still worth pinning — if someone narrows that catch again, the
+		// failure must be a named RuntimeError, not box["value"] -> KeyError.
+		const script = [
+			"import importlib.util, sys, types",
+			"for n in ('sqlite_vec', 'sentence_transformers'):",
+			"    m = types.ModuleType(n); m.load = lambda *a, **k: None",
+			"    m.SentenceTransformer = lambda *a, **k: None; sys.modules[n] = m",
+			`s = importlib.util.spec_from_file_location("qs", ${JSON.stringify(SERVER)})`,
+			"qs = importlib.util.module_from_spec(s); sys.modules['qs'] = qs",
+			"s.loader.exec_module(qs)",
+			"# A callable whose thread body dies without recording anything.",
+			"holder = {}",
+			"def fn():",
+			"    raise SystemExit(3)",
+			"try:",
+			"    qs._with_deadline(fn, 5)",
+			"    print('NO-RAISE')",
+			"except SystemExit as e:",
+			"    print('SYSTEMEXIT', e.code)",
+			"except KeyError as e:",
+			"    print('KEYERROR', e)",
+			"except RuntimeError as e:",
+			"    print('RUNTIMEERROR')",
+		].join("\n");
+		const r = spawnSync(python, ["-c", script], { encoding: "utf8", timeout: 60_000 });
+		expect(r.status).toBe(0);
+		const out = (r.stdout || "").trim();
+		// Whatever it does, it must NOT surface as a dict-lookup error.
+		expect(out.includes("KEYERROR")).toBe(false);
+		expect(out.includes("NO-RAISE")).toBe(false);
+	});
+});
+
+// ── a fatal startup failure must always be logged ───────────────────────
+//
+// WHY THIS EXISTS (measured 2026-10-23)
+// main() wrapped serve() in `except Exception`. Anything raising SystemExit —
+// which embed-index.py DID at module top when sqlite_vec was missing — skipped
+// that branch, so the one place that explains a startup failure printed
+// nothing. The worker died with a bare string and no "fatal:" line, which is
+// the same class as the sys.exit(3) bug one layer down.
+describe("query-server: fatal startup failures are always logged", () => {
+	const runMain = (exc) => {
+		const dir = mkdtempSync(join(tmpdir(), "heimdall-fatal-"));
+		const sock = join(dir, "f.sock");
+		const script = [
+			"import importlib.util, sys, types",
+			"for n in ('sqlite_vec', 'sentence_transformers'):",
+			"    m = types.ModuleType(n); m.load = lambda *a, **k: None",
+			"    m.SentenceTransformer = lambda *a, **k: None; sys.modules[n] = m",
+			`s = importlib.util.spec_from_file_location("qs", ${JSON.stringify(SERVER)})`,
+			"qs = importlib.util.module_from_spec(s); sys.modules['qs'] = qs",
+			"s.loader.exec_module(qs)",
+			exc,
+			`sys.exit(qs.main(["--socket", ${JSON.stringify(sock)}]))`,
+		].join("\n");
+		const r = spawnSync(python, ["-c", script], { encoding: "utf8", timeout: 60_000 });
+		rmSync(dir, { recursive: true, force: true });
+		return { rc: r.status, err: r.stderr || "" };
+	};
+
+	it("logs 'fatal:' when startup raises SystemExit, not Exception", () => {
+		const got = runMain("qs.load_embed_index = lambda: sys.exit('missing dep')");
+		expect(got.err).toMatch(/fatal:/);                 // the line that was missing
+		expect(got.rc).not.toBe(0);                        // a failed start is a failure
+	});
+
+	it("still logs 'fatal:' for an ordinary exception", () => {
+		// Guard against over-correcting: the normal path must keep working.
+		const got = runMain("qs.load_embed_index = lambda: (_ for _ in ()).throw(RuntimeError('boom'))");
+		expect(got.err).toMatch(/fatal:.*RuntimeError.*boom/);
+		expect(got.rc).not.toBe(0);
+	});
 });

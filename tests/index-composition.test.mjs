@@ -37,14 +37,15 @@ import { dirname, join } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { hasSqliteVec, sqliteVecPython, sqliteVecSkipReason } from "./lib/python.mjs";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-// sqlite_vec + sentence_transformers live only in the heimdall venv; the system
-// python3 fails to import the index module at all. Same resolution as
-// tests/query-concurrency.test.mjs, so the destructive-schema test exercises the
-// real code path instead of erroring on a missing dependency.
-const VENV_PY = join(homedir(), ".heimdall", "venv", "bin", "python3");
-const PY = existsSync(VENV_PY) ? VENV_PY : "python3";
+// ONLY the destructive-schema test needs the sqlite_vec extension; everything
+// else here imports embed_walker, which is stdlib-only and runs under any
+// python3. So the gate is per-test, not per-file: gating the whole file would
+// throw away real exclusion coverage on a machine that can run it.
+const canProbeSchema = hasSqliteVec();
+const PY = canProbeSchema ? sqliteVecPython() : null;
 
 /** Run the real discover_files over a synthetic tree; return relative paths + rules. */
 function walk(relPaths) {
@@ -180,7 +181,7 @@ test("generated-data classes are excluded (measured 2026-10-15)", () => {
     "go/pkg/mod/github.com/x/y@v1/z.go",
     "backups/agent-state/20261011-041211/thing.json",
     "Documents/curseforge/minecraft/Instances/a/config.txt",
-    "Desktop/Lumina/_work/b3_vc1/corpus/page.md",
+    "Desktop/Code Projects/Lumina/_work/b3_vc1/corpus/page.md",
     "equitylens/research/hyperagent-sales-prospector/data/llm_queue/a.response.json",
     "equitylens/data/vendor/some/lib.py",
     "arihantdeva-content/.pi/workflows/wf_1/index.json",
@@ -188,13 +189,13 @@ test("generated-data classes are excluded (measured 2026-10-15)", () => {
     "equitylens/.worktrees/doc-gen/src/main.py",
     // authored content that must survive
     "Repos/app/src/main.ts",
-    "Desktop/Lumina/src/real.py",
+    "Desktop/Code Projects/Lumina/src/real.py",
     "go/personal/notes.md",
   ]);
-  const leaked = r.paths.filter((p) => !/^(Repos\/|Desktop\/Lumina\/src\/|go\/personal\/)/.test(p));
+  const leaked = r.paths.filter((p) => !/^(Repos\/|Desktop\/Code Projects\/Lumina\/src\/|go\/personal\/)/.test(p));
   assert.deepEqual(leaked, [],
     `generated-data classes still reach the index:\n  ${leaked.join("\n  ")}`);
-  for (const want of ["Repos/app/src/main.ts", "Desktop/Lumina/src/real.py", "go/personal/notes.md"]) {
+  for (const want of ["Repos/app/src/main.ts", "Desktop/Code Projects/Lumina/src/real.py", "go/personal/notes.md"]) {
     assert.ok(r.paths.includes(want), `${want} must survive — exclusions must be path-anchored`);
   }
 });
@@ -392,7 +393,11 @@ print(json.dumps({
   assert.equal(r.worktree_src, true, "documented trade: .worktrees/ is pruned at any depth");
 });
 
-test("status() must never delete rows and must not crash on odd schemas", () => {
+// The status() probe exec()s embed-index.py, which imports sqlite_vec. Absent
+// the extension this is unverifiable, not broken — skip with the reason rather
+// than failing on an import the suite was never given (that is what CI did).
+test("status() must never delete rows and must not crash on odd schemas",
+  { skip: canProbeSchema ? false : sqliteVecSkipReason() }, () => {
   // Adversarial review 2026-10-15, P1: status() called init() with no lock, and
   // init() DROPs cards+vec on a dimension mismatch. Reproduced: 1 card at dim 768
   // -> status() -> 0 cards at dim 384, while the same call reported
@@ -410,7 +415,20 @@ import ast
 t = ast.parse(src)
 g = {"sqlite3": sqlite3, "re": __import__("re"), "DIM": 768, "contextlib": contextlib, "fcntl": fcntl}
 g["Busy"] = type("Busy", (Exception,), {})
-exec(compile(ast.Module(body=[n for n in t.body if isinstance(n, ast.FunctionDef) and n.name in {"init","_db_dim","status"}], type_ignores=[]), "m", "exec"), g)
+# Module-level CONSTANTS the extracted functions reference. Derive them from the
+# source instead of hardcoding: _db_dim/status use sentinels such as
+# _DIM_UNREADABLE, and a bare exec of just the FunctionDefs has no module
+# namespace to resolve them from. Measured 2026-10-23: adding _DIM_UNREADABLE
+# to embed-index.py broke this test with NameError until it was carried over.
+for _n in t.body:
+    if isinstance(_n, ast.Assign) and len(_n.targets) == 1 and isinstance(_n.targets[0], ast.Name):
+        _name = _n.targets[0].id
+        if _name.startswith("_") or _name in {"DIM", "MODEL", "MIN_FREE_GB"}:
+            try:
+                g[_name] = ast.literal_eval(_n.value)
+            except (ValueError, SyntaxError):
+                pass  # not a literal (e.g. a Path); the tests below do not need it
+exec(compile(ast.Module(body=[n for n in t.body if isinstance(n, ast.FunctionDef) and n.name in {"init","_db_dim","_db_dim_strict","status"}], type_ignores=[]), "m", "exec"), g)
 g["_acquire_read_lock"] = lambda: os.fdopen(os.dup(0), "r")
 FULL = "CREATE TABLE cards (id TEXT PRIMARY KEY, path TEXT UNIQUE NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, sha1 TEXT NOT NULL, root TEXT NOT NULL, mtime REAL NOT NULL, size INTEGER NOT NULL)"
 VEC = "CREATE VIRTUAL TABLE vec USING vec0(embedding float[768] distance_metric=cosine)"

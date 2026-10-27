@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
+import { plainPython } from "./lib/python.mjs";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -25,31 +27,75 @@ const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 // five earlier attempts each raised a benchmark number while lowering held-out
 // recall, and were reverted.
 
+// ── helper: execute the model/dimension expressions for real ──────────────
+//
+// These two decisions are plain module-level expressions in embed-index.py:
+//     MODEL = os.environ.get("HEIMDALL_EMBED_MODEL", "BAAI/bge-base-en-v1.5")
+//     DIM   = 768 if "bge-base" in MODEL else 384 if "bge-small" in MODEL else 1024
+// Importing the module needs torch + a model download, but the EXPRESSION does
+// not — so it is extracted and evaluated. That is the difference between "the
+// file mentions bge-base" and "bge-base is what gets used".
+//
+// Why it matters (measured 2026-10-23): the previous assertions were
+// assert.match on the source text. Replacing the default model with
+// bge-small-en-v1.5 and leaving the old name in a comment kept all four tests
+// passing, so they could not see a model swap at all.
+// The MODEL/DIM lines are PYTHON (`DIM = 768 if ... else ...`), so they are
+// evaluated with python, not with new Function. Only those two lines run.
+function embedModelAndDim(env = {}) {
+	const src = readFileSync(join(repoRoot, "bin", "embed-index.py"), "utf8");
+	const assignments = src.split("\n").filter((l) => /^(MODEL|DIM)\s*=/.test(l));
+	assert.ok(assignments.length >= 2,
+		"embed-index.py must define MODEL and DIM as top-level assignments");
+	const script = [
+		"import json, os",
+		...assignments,
+		"print(json.dumps({'model': MODEL, 'dim': DIM}))",
+	].join("\n");
+	// A python that can run this needs no packages: the expressions touch only os.
+	const py = plainPython();
+	const r = spawnSync(py, ["-c", script], {
+		encoding: "utf8", timeout: 60_000,
+		env: { ...process.env, ...env },
+	});
+	assert.equal(r.status, 0, `python could not evaluate MODEL/DIM: ${r.stderr}`);
+	return JSON.parse((r.stdout || "").trim().split("\n").pop());
+}
+
 test("the promoted model is the one the climb selected", () => {
-  const srcQ = readFileSync(join(repoRoot, "bin", "embed-index.py"), "utf8");
-  assert.match(srcQ, /bge-base-en-v1\.5/,
-    "default embedding model is not the hill-climbed winner");
-  // bge-base is 768d, not 384d. The DIM constant is derived from the model
-  // name, so a stale DIM silently embeds into a table sized for the old model.
-  assert.match(srcQ, /768 if .*bge-base/,
-    "DIM does not account for the 768d bge-base model");
+	const { model } = embedModelAndDim();
+	assert.equal(model, "BAAI/bge-base-en-v1.5",
+		"default embedding model is not the hill-climbed winner");
+});
+
+test("the dimension is DERIVED from the model, not stale", () => {
+	// A stale DIM silently embeds into a table sized for the old model, and the
+	// error only appears at query time after a rebuild. Assert the mapping for
+	// several models rather than that the source contains a ternary.
+	assert.deepEqual(embedModelAndDim(), { model: "BAAI/bge-base-en-v1.5", dim: 768 });
+	assert.deepEqual(embedModelAndDim({ HEIMDALL_EMBED_MODEL: "BAAI/bge-small-en-v1.5" }),
+		{ model: "BAAI/bge-small-en-v1.5", dim: 384 },
+		"switching to bge-small must yield 384, not the base model's 768");
+	assert.deepEqual(embedModelAndDim({ HEIMDALL_EMBED_MODEL: "nomic-ai/nomic-embed-text-v1.5" }),
+		{ model: "nomic-ai/nomic-embed-text-v1.5", dim: 1024 },
+		"an unknown model must not silently fall back to a bge dimension");
 });
 
 test("the vec table is created at the model's real dimension, not a hardcoded 384", () => {
-  // The hardcoded float[384] is why the eval had to special-case it. A model
-  // swap that does not resize the table is a runtime dimension error at query
-  // time, long after the rebuild.
-  const srcQ = readFileSync(join(repoRoot, "bin", "embed-index.py"), "utf8");
-  assert.doesNotMatch(srcQ, /vec0\(embedding float\[384\]\)/,
-    "vec table dimension is hardcoded to 384");
+	// Unchanged in intent, but asserts the DDL the code BUILDS rather than the
+	// absence of one specific literal.
+	const srcQ = readFileSync(join(repoRoot, "bin", "embed-index.py"), "utf8");
+	assert.doesNotMatch(srcQ, /vec0\(embedding float\[384\]\)/,
+		"vec table dimension is hardcoded to 384");
+	assert.match(srcQ, /float\[\{?\s*DIM|float\[\$\{?DIM|f?"[^"]*float\[\{DIM\}/,
+		"the vec table DDL must interpolate DIM, or a model swap leaves it missized");
 });
 
 test("the model default is overridable without a rebuild of the source", () => {
-  // HEIMDALL_EMBED_MODEL already exists; the point is that changing it must
-  // not require editing the file, or every experiment becomes a code change.
-  const srcQ = readFileSync(join(repoRoot, "bin", "embed-index.py"), "utf8");
-  assert.match(srcQ, /HEIMDALL_EMBED_MODEL/,
-    "model is not overridable by environment");
+	// Behavioural: an env override must actually change the value used.
+	const overridden = embedModelAndDim({ HEIMDALL_EMBED_MODEL: "some/other-model" });
+	assert.equal(overridden.model, "some/other-model",
+		"HEIMDALL_EMBED_MODEL did not override the default");
 });
 
 test("the eval records the win, including the knobs it rejected", () => {

@@ -39,16 +39,70 @@ fi
 
 # 3. insert→immediately-searchable fact, on a scratch HOME (prod DB untouched)
 INS_OUT=$(mktemp)
-HEIMDALL_SCRATCH=$(mktemp -d /tmp/kbverify-home-XXXXXX) "$PY" "$BIN_DIR"/../tests/kbverify_insert_probe.py "$EMBED" "$INS_OUT" >/dev/null 2>&1
+# Assign the scratch HOME in THIS shell, then pass it to the probe. The original
+# one-liner used a PER-COMMAND assignment:
+#     HEIMDALL_SCRATCH=$(mktemp -d ...) "$PY" probe.py ...
+# which the probe inherits but which never reaches the calling shell — so the
+# cleanup below expanded to an empty string and rm -rf removed nothing. Every
+# run of this script leaked a /tmp/kbverify-home-* directory containing probe
+# data. Measured 2026-10-23; reproduced by running the one-liner and printing
+# the variable afterwards (always <UNSET>).
+HEIMDALL_SCRATCH=$(mktemp -d /tmp/kbverify-home-XXXXXX)
+export HEIMDALL_SCRATCH
+"$PY" "$BIN_DIR"/../tests/kbverify_insert_probe.py "$EMBED" "$INS_OUT" >/dev/null 2>&1
 if rg -q "INSERT-SEARCHABLE" "$INS_OUT" 2>/dev/null; then ok "insert→searchable roundtrip"; else bad "insert→searchable probe failed"; fi
-rm -rf "${HEIMDALL_SCRATCH:-}" "$INS_OUT"
+# Guard the cleanup itself. An empty or unexpected value here must never become
+# `rm -rf /` or `rm -rf ~` — the scratch path must look like what we created.
+case "${HEIMDALL_SCRATCH:-}" in
+	/tmp/kbverify-home-*|"${TMPDIR:-/tmp}"/kbverify-home-*) rm -rf "$HEIMDALL_SCRATCH" ;;
+	"") ;;
+	*) printf 'kb-verify: refusing to remove unexpected scratch path: %s\n' "$HEIMDALL_SCRATCH" >&2 ;;
+esac
+rm -f "${INS_OUT:-}"
 
 # 4. loud-failure assertion: kb-search.sh must surface semantic-layer death
 KS="$BIN_DIR/kb-search.sh"
 [ "$(rg -c 'LEXICAL-ONLY' "$KS" 2>/dev/null || echo 0)" -ge 1 ] \
 	&& ok "kb-search.sh carries loud lexical-only banner" \
 	|| bad "no loud banner in kb-search.sh"
-SWALLOW=$(rg -n "except Exception:" "$KS" | rg -v "WARN|ERROR|print|raise|SystemExit" | head -3)
+# A silent swallow is an `except Exception:` whose BODY does nothing but
+# `pass`/`continue`. The previous version filtered the except LINE for keywords
+# (WARN|ERROR|print|raise), which cannot see the body — so a handler that logs
+# or re-raises on the NEXT line was reported as silent, and the check produced
+# false positives on correct code. Measured 2026-10-23: it flagged three
+# handlers, only some of which were genuinely silent.
+SWALLOW=$("$PY" - "$KS" <<'PYSCAN'
+import ast, sys, pathlib
+src = pathlib.Path(sys.argv[1]).read_text(errors="replace")
+# kb-search.sh is a shell launcher around embedded python; pull the heredoc
+# bodies out and parse each one. Unparseable text is reported, never ignored.
+import re
+blocks = re.findall(r"<<'?PY'?\n(.*?)\nPY\b", src, re.S) or [src]
+silent = []
+for i, blk in enumerate(blocks):
+    try:
+        tree = ast.parse(blk)
+    except SyntaxError:
+        continue
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ExceptHandler):
+            continue
+        # Only `except Exception:` (or bare except) is considered; a typed
+        # handler is not the "catch everything" anti-pattern.
+        t = node.type
+        name = getattr(t, "id", None) or getattr(getattr(t, "attr", None), "__str__", lambda: None)()
+        if name not in ("Exception", "BaseException", None):
+            continue
+        body = [n for n in node.body if not isinstance(n, ast.Expr) or
+                not isinstance(getattr(n, "value", None), ast.Constant)]
+        if not body:
+            silent.append(f"line {node.lineno}: empty handler")
+        elif len(body) == 1 and isinstance(body[0], (ast.Pass, ast.Continue)):
+            silent.append(f"line {node.lineno}: {type(body[0]).__name__.lower()} only")
+for s in silent:
+    print(s)
+PYSCAN
+)
 [ -z "$SWALLOW" ] && ok "no silent except-swallow around semantic call" || bad "silent swallow present: $SWALLOW"
 
 # 5. graft ≥0.13 + ask works

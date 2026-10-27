@@ -150,8 +150,16 @@ const MATCH_COLS = ["name", "aliases", "org", "role", "notes"];
 export function searchPeople(store, q, limit = 10) {
   if (!store.exists) return [];
   const like = "%" + q + "%";
-  const sql = `SELECT * FROM people WHERE ${MATCH_COLS.map((c) => `${c} LIKE ?1`).join(" OR ")}`;
-  const rows = store.db.prepare(sql).all(like);
+  // Plain `?` repeated once per column, NOT the numbered `?1` reused five times.
+  //
+  // Measured 2026-10-23 on the exact CI matrix: node 22's node:sqlite throws
+  // `column index out of range` for a re-used numbered parameter, while node 26
+  // accepts it. ci.yml pins node-version 22, so this shipped green only because
+  // this machine happens to run node 26 — `searchPeople` was broken on every
+  // supported runner. Passing the same value N times is boring and correct on
+  // both, and it needs no version sniffing.
+  const sql = `SELECT * FROM people WHERE ${MATCH_COLS.map((c) => `${c} LIKE ?`).join(" OR ")}`;
+  const rows = store.db.prepare(sql).all(...MATCH_COLS.map(() => like));
   // The exact-match tiebreak runs HERE, in JS, not in SQL. A SQL compare
   // against the comma-joined alias string is wrong — it only fires when the
   // person has no aliases at all, which is the exact defect a previous review

@@ -23,10 +23,28 @@ import time
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
+class MissingDependency(RuntimeError):
+    """A required python package is absent for THIS interpreter.
+
+    Raised (never sys.exit) so a long-lived importer can report it. Measured
+    2026-10-23: this module is exec'd by query-server.py's load_embed_index().
+    sys.exit() at module top raised SystemExit, which bypassed that file's
+    `except Exception` fatal log, so a missing package killed the worker with a
+    bare string and no context. Same class as the sys.exit(3) bug fixed in
+    query(): process-exit semantics inside library code.
+    """
+
+
 try:
     import sqlite_vec
-except ImportError:
-    sys.exit("pip install sqlite-vec into ~/.heimdall/venv first")
+except ImportError as _e:
+    # Name the interpreter that is actually missing the package. The old text
+    # hardcoded ~/.heimdall/venv even when running under some other python3,
+    # i.e. it told people to install into a venv they were not using.
+    raise MissingDependency(
+        f"sqlite_vec is not installed for {sys.executable}. "
+        f"Install it for that interpreter: {sys.executable} -m uv pip install sqlite-vec"
+    ) from _e
 
 from sentence_transformers import SentenceTransformer
 
@@ -212,9 +230,46 @@ def _ram_ok(min_gb: float, what: str) -> bool:
 
 
 def _db_dim(c: sqlite3.Connection) -> int:
+    """The stored vector dimension, or -1 when there is no readable dimension.
+
+    -1 is a SENTINEL for "unknown", and it is dangerously overloaded: init()
+    treats a mismatch as "drop everything and recreate". Measured 2026-10-23:
+    a healthy index whose `vec` DDL spelled the dimension differently (a form
+    vec0 accepts, e.g. float32[768]) parsed as -1, so init() dropped `cards`
+    and lost every row even though the dimension was never wrong. So -1 must
+    now be reserved for "no vec table at all"; an unparseable vec is reported
+    by _db_dim_strict, which raises instead of quietly licenseing a rebuild.
+    """
     row = c.execute("SELECT sql FROM sqlite_master WHERE name='vec'").fetchone()
-    m = re.search(r"float\[(\d+)\]", row[0]) if row else None
-    return int(m.group(1)) if m else -1
+    if not row:
+        return -1  # genuinely absent: a rebuild here is additive and correct
+    # Accept the spellings vec0 accepts: float[N], float32[N], float64[N].
+    m = re.search(r"float(?:32|64)?\[\s*(\d+)\s*\]", row[0] or "", re.IGNORECASE)
+    if not m:
+        # vec EXISTS. We could not read its dimension, which means we do not
+        # know that a rebuild is safe — refuse to guess (see _db_dim_strict).
+        return _DIM_UNREADABLE
+    return int(m.group(1))
+
+
+_DIM_UNREADABLE = -2
+
+
+def _db_dim_strict(c: sqlite3.Connection) -> int:
+    """Dimension for callers that would DESTROY data on a wrong answer.
+
+    Returns -1 only when vec is truly absent. Raises when vec exists but its
+    dimension cannot be read, because "I could not tell" must never authorize
+    a DROP TABLE.
+    """
+    d = _db_dim(c)
+    if d == _DIM_UNREADABLE:
+        row = c.execute("SELECT sql FROM sqlite_master WHERE name='vec'").fetchone()
+        raise RuntimeError(
+            "cannot read the vector dimension from an existing 'vec' table; "
+            f"refusing to rebuild (a rebuild would delete every card). DDL: {(row[0] if row else '')[:200]!r}"
+        )
+    return d
 
 
 def init(c: sqlite3.Connection) -> None:
@@ -224,7 +279,9 @@ def init(c: sqlite3.Connection) -> None:
         c.execute("DROP TABLE IF EXISTS vec")
         cols = []
     rebuilt = False
-    if _db_dim(c) != DIM:
+    # STRICT: init() holds the DROP TABLEs. An unreadable dimension must raise
+    # here rather than be treated as a mismatch -- see _db_dim_strict.
+    if _db_dim_strict(c) != DIM:
         c.execute("DROP TABLE IF EXISTS vec")
         c.execute(f"CREATE VIRTUAL TABLE vec USING vec0(embedding float[{DIM}] distance_metric=cosine)")
         if cols:
@@ -332,11 +389,41 @@ def _dup_card(c: sqlite3.Connection, cid: str, rel: str, body: str,
     c.execute("INSERT INTO vec(rowid, embedding) VALUES (?,?)", (cur.lastrowid, src[0]))
 
 
+# A prune that removes more than this fraction of the index in ONE build is
+# treated as a bug in the walk, not as mass file deletion.
+_PRUNE_MAX_FRACTION = 0.5
+
+
 def _prune_stale(c: sqlite3.Connection, known: dict[str, str], seen: set[str]) -> None:
     """Remove cards whose files vanished. sqlite-vec keeps delete-tombstones;
     mass prunes are rare enough that per-row deletes stay correct in practice.
-    ponytail: if k-NN ever surfaces dead rows again, trigger full vec rebuild here."""
+    ponytail: if k-NN ever surfaces dead rows again, trigger full vec rebuild here.
+
+    CIRCUIT BREAKER (2026-10-23). Three separate error-path bugs were found in
+    one day that each fed this function a wrong `seen` — a failed find, an
+    unreadable dimension, a failed stat(). Each was fixed individually, but the
+    class remains: whatever `seen` this receives is trusted completely, and
+    `known` can be 135k cards. Point HEIMDALL_HOME at a wrong or half-mounted
+    path and the walk legitimately returns nothing, so `seen` is empty and this
+    would DELETE THE ENTIRE INDEX — no guard existed at any layer.
+    Mass deletion is not something a single build should ever do silently: if
+    more than half the index looks vanished, refuse, keep the rows, and say so.
+    Set HEIMDALL_PRUNE_ALLOW_MASS=1 when a mass deletion is genuinely intended.
+    """
     stale = [cid for cid in known if cid not in seen]
+    if known:
+        frac = len(stale) / len(known)
+        if frac > _PRUNE_MAX_FRACTION and os.environ.get("HEIMDALL_PRUNE_ALLOW_MASS") != "1":
+            print(
+                f"embed-index: REFUSING to prune {len(stale)}/{len(known)} cards "
+                f"({frac:.0%} of the index) in one build. That ratio usually means "
+                f"the walk did not see the tree (wrong HEIMDALL_HOME, unmounted "
+                f"volume, permissions) rather than mass deletion. Rows kept. "
+                f"Set HEIMDALL_PRUNE_ALLOW_MASS=1 to force.",
+                file=sys.stderr,
+            )
+            record_semantic_state("prune_refused")
+            return
     for cid in stale:
         row = c.execute("SELECT rowid FROM cards WHERE id=?", (cid,)).fetchone()
         if row:
@@ -391,6 +478,20 @@ def _purge_policy_excluded(c: sqlite3.Connection) -> int:
     # a card at /alternate-home/.claude/telemetry/a.py was purged 0 times even
     # though discovery excludes it.
     victims = [(rid, p) for rid, p in rows if should_exclude_path(p, str(HOME_ROOT))]
+    # Same circuit breaker as _prune_stale, for the same reason: a predicate fed
+    # a wrong HOME_ROOT can match everything. Refuse a delete-the-whole-index
+    # ratio rather than trusting one function's opinion of every row.
+    if rows and victims:
+        frac = len(victims) / len(rows)
+        if frac > _PRUNE_MAX_FRACTION and os.environ.get("HEIMDALL_PRUNE_ALLOW_MASS") != "1":
+            print(
+                f"embed-index: REFUSING to purge {len(victims)}/{len(rows)} cards "
+                f"({frac:.0%}) as policy-excluded. Set HEIMDALL_PRUNE_ALLOW_MASS=1 "
+                f"to force.",
+                file=sys.stderr,
+            )
+            record_semantic_state("purge_refused")
+            return 0
     for rid, _p in victims:
         c.execute("DELETE FROM vec WHERE rowid=?", (rid,))
         c.execute("DELETE FROM cards WHERE rowid=?", (rid,))
@@ -415,6 +516,9 @@ def _build_inner(c: sqlite3.Connection, progress_every: int) -> int:
     known = {r[0]: (r[1], r[2], r[3]) for r in c.execute("SELECT id, sha1, mtime, size FROM cards")}
     claimed: set[str] = set(known.values())  # sha1 dedupe across whole corpus
     seen: set[str] = set()
+    # Files whose stat() failed. They are KEPT (added to `seen`) and reported,
+    # never pruned: a failed stat cannot prove absence.
+    stat_failures: list[tuple[str, int | None, str | None]] = []
 
     # Dataless iCloud placeholders: name-only card, no read → no download.
     # A later materialized file gets real content + content-sha and replaces
@@ -438,11 +542,21 @@ def _build_inner(c: sqlite3.Connection, progress_every: int) -> int:
 
     milestone = 0
     for p in text_paths:
+        cid = "f:" + str(p)
         try:
             st = p.stat()
-        except OSError:
+        except OSError as e:
+            # `continue` here USED TO PRUNE THE FILE. seen.add(cid) is what tells
+            # _prune_stale the file still exists; skipping it put a live file in
+            # the "vanished" list, and the tail prune then ran DELETE FROM cards.
+            # A stat() failure does not mean the file is gone — ELOOP (symlink
+            # loop), EACCES on a parent, EIO, or a TOCTOU recreate all look
+            # identical here. Treat it as UNKNOWN: keep the card, warn once.
+            # Measured 2026-10-23; same class as the failed-find and unreadable
+            # -dimension bugs found the same day.
+            seen.add(cid)   # we cannot prove it vanished, so do not delete it
+            stat_failures.append((str(p), e.errno, e.strerror))
             continue
-        cid = "f:" + str(p)
         rel = str(p.relative_to(HOME_ROOT))
         prev = known.get(cid)
         if prev and prev[1] == st.st_mtime and prev[2] == st.st_size:
@@ -482,6 +596,13 @@ def _build_inner(c: sqlite3.Connection, progress_every: int) -> int:
                 milestone = total // progress_every
                 print(f"embed-index: {total}/{len(text_paths)} embedded", flush=True)
     total += _upsert(c, m, batch)
+    if stat_failures:
+        print(f"embed-index: WARN {len(stat_failures)} file(s) could not be stat'd "
+              f"and were KEPT (not pruned):", file=sys.stderr)
+        for _p, _no, _msg in stat_failures[:10]:
+            print(f"  {_p}: [{_no}] {_msg}", file=sys.stderr)
+        if len(stat_failures) > 10:
+            print(f"  ... and {len(stat_failures) - 10} more", file=sys.stderr)
     _prune_stale(c, known, seen)
     _persist_search_roots(graft_dirs)
     print(f"embed-index: done — {total} embedded ({len(dataless)} name-only), "
@@ -552,7 +673,14 @@ def query(q: str, n: int = 5, related: bool = False) -> list[dict]:
     except Busy:
         print("embed-index: busy; semantic skipped this call.", file=sys.stderr)
         record_semantic_state("busy")
-        sys.exit(3)  # loud: caller banners lexical-only degradation
+        # RAISE, do not sys.exit(). Measured 2026-10-23: query() is called from
+        # query-server.py inside a daemon thread (_with_deadline). SystemExit
+        # derives from BaseException, so it slipped past that caller's
+        # `except Exception` and killed the thread before any reply was written
+        # -- the client then hung until its own timeout (observed as a 90-120s
+        # stall and an empty frame). A library function must not decide to end a
+        # process it does not own; main() translates this to rc 3 below.
+        raise
     try:
         c = conn()
         db_d = _db_dim(c)
@@ -563,7 +691,7 @@ def query(q: str, n: int = 5, related: bool = False) -> list[dict]:
             DIM = db_d
         if not _ram_ok(MIN_FREE_GB, "query"):
             record_semantic_state("busy")  # RAM-gated: same observable effect
-            sys.exit(3)  # loud: rc!=0 makes kb-search.sh banner the degradation
+            raise Busy()  # same reason as above: never exit() from a worker thread
         vec = _flat_vec(encode_query(q))
         # Fetch a deeper pool than the display limit, then let the caller
         # truncate. Read-only: no re-pruning here (pruning is a BUILD-time
@@ -645,6 +773,15 @@ def status() -> dict:
                 "files": None, "repos": [], "dim": _db_dim(c),
                 "dimension_ok": False, "schema_ok": False, "locked": False,
                 "incomplete_schema": "vec present without cards",
+            }
+        elif _db_dim(c) == _DIM_UNREADABLE:
+            # vec EXISTS but we cannot read its dimension. Do not create a second
+            # one "just in case" -- that is how a 768-dim index silently gains a
+            # 1024-dim table. Report the state so a human can look.
+            return {
+                "files": None, "repos": [], "dim": None,
+                "dimension_ok": False, "schema_ok": False, "locked": False,
+                "unreadable_dimension": "vec exists but its dimension could not be parsed",
             }
         elif _db_dim(c) < 0:
             # vec missing entirely: create it at the current DIM. No row is lost.
@@ -742,7 +879,13 @@ def main(argv: list[str]) -> int:
         args = argv[1:]
         n = int(args[args.index("-n") + 1]) if "-n" in args else 5
         q = next(a for a in args if not a.startswith("-") and a != str(n))
-        hits = query(q, n=n, related="--related" in args)
+        try:
+            hits = query(q, n=n, related="--related" in args)
+        except Busy:
+            # The documented CLI contract: rc 3 means "degraded, lexical only",
+            # which is what kb-search.sh banners. Preserved here, at the entry
+            # point, instead of inside the library call.
+            return 3
         for h in hits:
             t = h["title"] + (" ·related" if h.get("related") else "")
             print(f'[{h["score"]}] {t} — {h["path"]}')

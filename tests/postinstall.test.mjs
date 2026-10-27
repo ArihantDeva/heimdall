@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, chmodSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, chmodSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -53,13 +53,59 @@ test("postinstall exits 0 in a clean HOME and wires claude-code + gemini-cli", (
 });
 
 test("postinstall exits fast and spawns detached background index", () => {
+	// This test previously asserted ONLY `dt < 15_000`. It named the spawn in its
+	// title but never checked it: deleting the entire detached `heimdall index`
+	// spawn from bin/postinstall.mjs left it PASSING, because a removed spawn is
+	// even faster. Measured 2026-10-23 by mutation. A speed bound cannot observe a
+	// side effect.
+	//
+	// The spawn is detected with a --require preload inherited through NODE_OPTIONS
+	// by every child node process. It identifies the index child by argv and
+	// writes a marker, then exits — so the assertion is real and the test still
+	// does not wait for actual indexing.
 	const home = mkdtempSync(join(tmpdir(), "heimdall-postinstall-"));
 	try {
 		mkdirSync(join(home, ".claude"), { recursive: true });
+		const probe = join(home, "index-probe.cjs");
+		writeFileSync(probe, `
+const fs = require("node:fs");
+if (process.argv[2] === "index") {
+	try { fs.writeFileSync(process.env.HEIMDALL_SPAWN_MARKER, "spawned"); } catch {}
+	process.exit(0);
+}
+`);
+		const marker = join(home, "spawn-marker.txt");
 		const t0 = Date.now();
-		run(home);
+		run(home, {
+			NODE_OPTIONS: `--require ${probe}`,
+			HEIMDALL_SPAWN_MARKER: marker,
+		});
 		const dt = Date.now() - t0;
 		assert.ok(dt < 15_000, `postinstall took ${dt}ms — must return fast`);
+
+		// The claim in the title: a detached child was actually started.
+		let seen = null;
+		for (let i = 0; i < 60 && !seen; i++) {
+			if (existsSync(marker)) seen = readFileSync(marker, "utf8").trim();
+			else Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+		}
+		assert.equal(seen, "spawned", "postinstall must spawn a `index` child");
+
+		// DEFERRED is not the same as DETACHED. Without detached:true the child is
+		// in the parent's process group and dies with it (or holds the install
+		// open), which defeats the whole point of background indexing. The test
+		// named "detached" without checking it — removing `detached: true` from
+		// postinstall.mjs passed. Read the spawn options from the source.
+		const src = readFileSync(join(repo, "bin", "postinstall.mjs"), "utf8");
+		const spawnIdx = src.indexOf('"index"], {');
+		assert.notEqual(spawnIdx, -1, "the index spawn must exist");
+		const optsBlock = src.slice(spawnIdx, spawnIdx + 200);
+		assert.match(optsBlock, /detached:\s*true/,
+			"the index child must be spawned detached:true, or it dies with postinstall");
+		assert.match(optsBlock, /stdio:\s*\[\s*"ignore"/,
+			"the detached child must not inherit the parent's stdio, or install hangs on an open pipe");
+		assert.match(src.slice(spawnIdx, spawnIdx + 300), /\.unref\(\)/,
+			"the detached child must be unref()'d or node waits for it before exiting");
 	} finally {
 		rmSync(home, { recursive: true, force: true });
 	}

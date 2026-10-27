@@ -38,6 +38,23 @@ else
 			-not -path '*/linkedin_session/*' -not -path '*/.build/*' \
 			-not -path '*/.venv/*' -not -path '*/venv/*' -not -path '*/Pods/*' \
 			-not -path '*/DerivedData/*' 2>/dev/null)
+		FIND_RC=$?
+		# A FAILED find is not the same as "not found". Measured 2026-10-23:
+		# stderr was discarded and the exit status ignored, so a permission-
+		# denied directory, a missing root, or an I/O error produced zero hits --
+		# indistinguishable from a genuine miss. N was 0, we printed NOTFOUND,
+		# and the caller ran `graft delete`: a transient read error destroyed a
+		# node whose file was still on disk. Fail CLOSED: report the search as
+		# unusable and let the caller keep the node (the same contract
+		# cli-main.mjs already states for a dead stale-scan sensor).
+		# NOTE: find, unlike grep, exits 0 on a successful search that matched
+		# nothing. Measured 2026-10-23: successful-no-match rc=0, missing root
+		# rc=1, permission-denied rc=1. So ANY non-zero here means the search
+		# itself failed -- do not import grep's "1 means no match" convention.
+		if [ "$FIND_RC" -ne 0 ]; then
+			echo "SEARCHFAILED $r rc=$FIND_RC"
+			exit 0
+		fi
 		[ -n "$H" ] && HITS="${HITS}${H}"$'\n'
 	done
 	HITS=$(printf '%s' "$HITS" | sed '/^$/d')

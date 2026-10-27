@@ -52,12 +52,23 @@ function parseArgs(argv) {
     // "running" and doing no work (observed 2026-10-15). A plist can pass roots
     // explicitly, so the supervised process does not depend on unrelated config.
     else if (a === "--root") o.roots.push(argv[++i]);
+    // A flag this parser does not understand must not be ignored. Measured
+    // 2026-10-23: `heimdall daemon --bogus-typo` exited 0 having started nothing,
+    // and `daemon --dry-runn` (one letter short) would have started a REAL
+    // reconciler while the operator believed they had asked for a rehearsal.
+    // Returning an error keeps the caller from acting on an unhonoured request.
+    else o.unknown = (o.unknown || []).concat(a);
   }
   return o;
 }
 
 export async function runDaemon(argv = [], { log = console.error } = {}) {
   const opts = parseArgs(argv);
+  if (opts.unknown?.length) {
+    for (const a of opts.unknown) log(`daemon: unknown option: ${a}`);
+    log("daemon: known options: --once --dry-run --scan --interval N --audit-every N --root DIR");
+    return 2;
+  }
   const cfg = loadConfig();
   const cap = capability();
   // CLI roots win over config roots: an explicit instruction from the supervisor

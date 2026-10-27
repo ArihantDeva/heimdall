@@ -21,13 +21,28 @@ test("C11: query records busy on contention and ok on success into semantic-stat
     // three lines in query(), verified by inspection). Uses the repo venv —
     // embed-index.py hard-imports sqlite_vec at module load. The venv only
     // exists on machines that ran `heimdall setup`; absent (CI runner) → skip.
-    const venvPy = join(homedir(), ".heimdall", "venv", "bin", "python3");
-    if (!existsSync(venvPy)) return;
-    // Deterministic path: import module and call record_semantic_state + check.
-    const mod = execFileSync(venvPy, ["-c", `
-import sys, json, os
+    // NO early `return` here any more.
+    //
+    // This test asserts that query() records "busy" on contention and "ok" on
+    // success into semantic-state.json. record_semantic_state is JSON
+    // bookkeeping — it touches no encoder. But embed-index.py hard-imports
+    // sqlite_vec and sentence_transformers at module load, so the old gate
+    // demanded the full operator venv and SILENTLY RETURNED otherwise. On a CI
+    // runner that means the test reported PASS while running no assertion at
+    // all — worse than a skip, because a skip is at least visible in the
+    // summary. Measured 2026-10-23.
+    //
+    // Stub both module-top imports before exec: the wiring is what is under
+    // test, and it does not need a model to be correct.
+    const py = "python3";
+    const mod = execFileSync(py, ["-c", `
+import sys, json, os, types
 sys.path.insert(0, ${JSON.stringify(join(REPO, "bin"))})
 os.environ["HEIMDALL_DB"] = ${JSON.stringify(join(home, ".heimdall", "global.db"))}
+_st = types.ModuleType("sentence_transformers"); _st.SentenceTransformer = lambda *a, **k: None
+sys.modules["sentence_transformers"] = _st
+_sv = types.ModuleType("sqlite_vec"); _sv.load = lambda *a, **k: None
+sys.modules["sqlite_vec"] = _sv
 import importlib.util
 spec = importlib.util.spec_from_file_location("ei", ${JSON.stringify(EMBED)})
 m = importlib.util.module_from_spec(spec)
