@@ -3,6 +3,7 @@
 // are contract regressions, not retrieval-quality or latency measurements.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -63,7 +64,7 @@ async function search(sb, { hits, coverage = "ok", query = "deploy policy", args
   await new Promise((resolve, reject) => { server.once("error", reject); server.listen(sock, resolve); });
   try {
     const child = spawn("bash", [SEARCH, ...(query.startsWith("-") ? ["--", query] : [query]), ...args], {
-      env: { ...process.env, HOME: sb.home, GRAFT: sb.graft, HEIMDALL_BACKEND: "graft", HEIMDALL_REPOS: "", HEIMDALL_QUERY_SOCK: sock, TMPDIR: sb.scratch, ...env },
+      env: { ...process.env, HOME: sb.home, GRAFT: sb.graft, HEIMDALL_BACKEND: "graft", HEIMDALL_REPOS: "", HEIMDALL_QUERY_SOCK: sock, HEIMDALL_RERANK: "0", TMPDIR: sb.scratch, ...env },
     });
     let out = "", err = "";
     child.stdout.on("data", (d) => { out += d; });
@@ -247,6 +248,170 @@ test("flag-shaped scope values are data, not warm transport options", async () =
       assert.equal(request.q, "deploy policy");
       assert.equal(request.related, false);
       assert.equal(request.n, 6);
+    } finally { rmSync(sb.home, { recursive: true, force: true }); }
+  }
+});
+
+const rankingMeta = (status = "applied") => ({
+  version: 1, requested: true, status, applied: status === "applied",
+  method: status === "applied" ? "cross_encoder" : "original_order",
+  reason: status === "applied" ? "complete" : "transport",
+  candidate_count: 1, scored_count: status === "applied" ? 1 : 0,
+  total_count: 1, tail_count: 0,
+});
+const scoringTextHash = (title, body) => {
+  const bytes = Buffer.from(title, "utf8");
+  const length = Buffer.alloc(8); length.writeBigUInt64BE(BigInt(bytes.length));
+  return createHash("sha256").update(Buffer.from("heimdall-scoring-text-v1\0"))
+    .update(length).update(bytes).update(Buffer.from(body, "utf8")).digest("hex");
+};
+const rankingHit = (sb, applied = true) => ({
+  path: sb.hit, title: "deploy_policy.py", score: applied ? 1.0 : 99.0,
+  leg: "lexical", related: false, score_kind: applied ? "order_key" : "retrieval",
+  retrieval_score: 99.0, retrieval_rank: 1, rank: 1, ranking_score: applied ? 0.0 : null,
+  provenance: { card_sha1: "test-only", card_status: "ready",
+    document_source: "cards.body", title_source: "cards.title",
+    scoring_input_sha256: scoringTextHash("deploy_policy.py", "deploy policy switch") },
+  signals: {
+    s_vec: null, s_vec_source: "missing", s_vec_missing_reason: "not_observed",
+    s_lex: applied ? 0.0 : null, s_lex_source: "title_trigram_jaccard",
+    s_lex_missing_reason: applied ? null : "scorer_not_called",
+    s_ce: applied ? 0.0 : null, ce_status: applied ? "ok" : "unavailable",
+  },
+});
+
+test("ranking magnitudes and explicit zero survive verification on stdout", async () => {
+  const sb = fixture();
+  try {
+    card(sb);
+    const { out, request } = await search(sb, {
+      env: { HEIMDALL_RERANK: "1" },
+      reply: { ok: true, sem_coverage: "ok", rerank: rankingMeta(), hits: [rankingHit(sb)] },
+    });
+    assert.equal(request.rerank, true, "opt-in must reach the worker");
+    const summary = JSON.parse(out.split("\n").find((l) => l.startsWith("RERANK: ")).slice(8));
+    assert.equal(summary.status, "applied");
+    const evidence = JSON.parse(out.split("\n").find((l) => l.trimStart().startsWith("signals=")).trimStart().slice(8));
+    assert.equal(evidence.s_vec, null, "unobserved is null, not a zero");
+    assert.equal(evidence.s_ce, 0, "a measured zero is not missing");
+    assert.equal(evidence.s_lex, 0);
+    assert.equal(evidence.s_lex_source, "title_trigram_jaccard");
+    assert.equal(evidence.score_kind, "order_key");
+    assert.equal(evidence.retrieval_score_kind, "lexical_ordinal");
+    assert.equal(evidence.retrieval_score, 99);
+    assert.equal(evidence.scoring_snapshot, "matches_current_index");
+    assert.equal(evidence.scored_card_sha1, "test-only");
+    assert.match(out, /\[STRONG\]/, "unchanged matching card still verifies independently");
+  } finally { rmSync(sb.home, { recursive: true, force: true }); }
+});
+
+test("high CE relevance never upgrades changed, cardless, or zero-coverage hits", async () => {
+  for (const prepare of [() => {}, (sb) => card(sb, { size: 999999 }), (sb) => card(sb, { body: "unrelated opaque text" })]) {
+    const sb = fixture();
+    try {
+      prepare(sb);
+      const hit = rankingHit(sb);
+      hit.signals.s_ce = hit.ranking_score = 1.0;
+      const { out } = await search(sb, {
+        env: { HEIMDALL_RERANK: "1" },
+        reply: { ok: true, sem_coverage: "ok", rerank: rankingMeta(), hits: [hit] },
+      });
+      assert.doesNotMatch(out, /\[STRONG\]/, out);
+      assert.match(out, /\[WEAK\s*\]/);
+      assert.match(out, /signals=/, "ranking evidence remains visible without claiming trust");
+    } finally { rmSync(sb.home, { recursive: true, force: true }); }
+  }
+});
+
+test("rerank degradation is visible to stdout-only callers without leaking extra fields", async () => {
+  const sb = fixture();
+  try {
+    card(sb);
+    const hit = rankingHit(sb, false);
+    hit.signals.document = "MUST_NOT_PRINT_DOCUMENT";
+    const meta = rankingMeta("unavailable");
+    meta.document = "MUST_NOT_PRINT_DOCUMENT";
+    const { out } = await search(sb, {
+      env: { HEIMDALL_RERANK: "1" },
+      reply: { ok: true, sem_coverage: "ok", rerank: meta, hits: [hit] },
+    });
+    assert.match(out, /RERANK: .*"status": "unavailable"/);
+    assert.match(out, /"s_ce": null/);
+    assert.doesNotMatch(out, /MUST_NOT_PRINT_DOCUMENT/);
+    assert.doesNotMatch(out, /LEXICAL-ONLY/, "reranker failure is not semantic retrieval failure");
+  } finally { rmSync(sb.home, { recursive: true, force: true }); }
+});
+
+test("an opted-in request to an older worker reports unsupported rather than applied", async () => {
+  const sb = fixture();
+  try {
+    card(sb);
+    const { out, request } = await search(sb, { env: { HEIMDALL_RERANK: "1" } });
+    assert.equal(request.rerank, true);
+    assert.match(out, /RERANK: .*"reason": "worker_unsupported"/);
+    assert.match(out, /"status": "unavailable"/);
+    assert.match(out, /"s_ce": null/);
+  } finally { rmSync(sb.home, { recursive: true, force: true }); }
+});
+
+test("unsolicited or malformed ranking evidence cannot masquerade as an applied rerank", async () => {
+  for (const kind of ["unsolicited", "nonfinite", "missing_score", "boolean_score", "wrong_method"]) {
+    const sb = fixture();
+    try {
+      card(sb);
+      const hit = rankingHit(sb);
+      const meta = rankingMeta();
+      if (kind === "nonfinite") hit.signals.s_ce = "NaN";
+      if (kind === "missing_score") delete hit.ranking_score;
+      if (kind === "boolean_score") { hit.signals.s_ce = 1.0; hit.ranking_score = true; }
+      if (kind === "wrong_method") meta.method = "probability";
+      const { out } = await search(sb, {
+        env: { HEIMDALL_RERANK: kind === "unsolicited" ? "0" : "1" }, expectedStatus: 1,
+        reply: { ok: true, sem_coverage: "ok", rerank: meta, hits: [hit] },
+      });
+      assert.match(out, /SEARCH_ERROR:/);
+      assert.doesNotMatch(out, /\[STRONG\]/);
+    } finally { rmSync(sb.home, { recursive: true, force: true }); }
+  }
+});
+
+test("scoring snapshot provenance is distinguished from current verified-card freshness", async () => {
+  const sb = fixture();
+  try {
+    card(sb);
+    const hit = rankingHit(sb);
+    hit.provenance.scoring_input_sha256 = scoringTextHash("old indexed title", "old indexed document");
+    hit.provenance.card_sha1 = "older-index-observation";
+    const { out } = await search(sb, {
+      env: { HEIMDALL_RERANK: "1" },
+      reply: { ok: true, sem_coverage: "ok", rerank: rankingMeta(), hits: [hit] },
+    });
+    const evidence = JSON.parse(out.split("\n").find((l) => l.trimStart().startsWith("signals=")).trimStart().slice(8));
+    assert.equal(evidence.scoring_input_sha256, hit.provenance.scoring_input_sha256);
+    assert.equal(evidence.current_index_text_sha256, scoringTextHash("deploy_policy.py", "deploy policy switch"));
+    assert.equal(evidence.scoring_snapshot, "changed_since_scoring");
+    assert.equal(evidence.scored_card_sha1, "older-index-observation");
+    assert.match(out, /ranking evidence belongs to a different indexed text snapshot/);
+    assert.match(out, /\[STRONG\]/, "independent current-file/card/coverage verification is not replaced by scoring");
+  } finally { rmSync(sb.home, { recursive: true, force: true }); }
+});
+
+test("contradictory counts and rank positions are rejected at the warm response boundary", async () => {
+  for (const failure of ["count", "scored", "rank", "boolean_rank"]) {
+    const sb = fixture();
+    try {
+      card(sb);
+      const hit = rankingHit(sb), meta = rankingMeta();
+      if (failure === "count") meta.total_count = 2;
+      if (failure === "scored") meta.scored_count = 0;
+      if (failure === "rank") hit.rank = 2;
+      if (failure === "boolean_rank") hit.rank = true;
+      const { out } = await search(sb, {
+        env: { HEIMDALL_RERANK: "1" }, expectedStatus: 1,
+        reply: { ok: true, sem_coverage: "ok", rerank: meta, hits: [hit] },
+      });
+      assert.match(out, /SEARCH_ERROR:/);
+      assert.doesNotMatch(out, /\[STRONG\]/);
     } finally { rmSync(sb.home, { recursive: true, force: true }); }
   }
 });
