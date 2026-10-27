@@ -292,7 +292,15 @@ def init(c: sqlite3.Connection) -> None:
         c.execute("""CREATE TABLE IF NOT EXISTS cards (
             id TEXT PRIMARY KEY, path TEXT UNIQUE NOT NULL, title TEXT NOT NULL,
             body TEXT NOT NULL, sha1 TEXT NOT NULL, root TEXT NOT NULL,
-            mtime REAL NOT NULL, size INTEGER NOT NULL)""")
+            mtime REAL NOT NULL, size INTEGER NOT NULL, ctime_ns INTEGER)""")
+    elif "ctime_ns" not in cols:
+        # Non-destructive migration for an index built before ctime tracking.
+        # The column is NULLABLE and NOTHING is backfilled: a legacy row's ctime
+        # is unknowable — the file may already have changed since it was indexed
+        # — so a metadata-only backfill would fabricate evidence for content
+        # nobody re-read. NULL means "unverified": the build fast-path re-reads
+        # those rows and the search verdict demotes them to WEAK.
+        c.execute("ALTER TABLE cards ADD COLUMN ctime_ns INTEGER")
     c.execute("CREATE INDEX IF NOT EXISTS idx_cards_sha1 ON cards(sha1)")
     c.commit()
 
@@ -336,13 +344,13 @@ def _flat_vec(v: object) -> list[float]:
 def _upsert(c: sqlite3.Connection, m, batch: list[tuple], allow_dupes: bool = False) -> int:
     if allow_dupes:
         # Duplicate batch: copy vectors from their canonical cards, no model.
-        for (cid, rel, body, sha, mt, size) in batch:
-            _dup_card(c, cid, rel, body, sha, mt, size)
+        for (cid, rel, body, sha, mt, size, ct) in batch:
+            _dup_card(c, cid, rel, body, sha, mt, size, ct)
         c.commit()
         return len(batch)
     texts = [t + "\n" + b for _, t, b, *_ in batch]
     vecs = m.encode(texts, normalize_embeddings=True, show_progress_bar=False)
-    for (cid, rel, body, sha, mt, size), vec in zip(batch, vecs):
+    for (cid, rel, body, sha, mt, size, ct), vec in zip(batch, vecs):
         # Point-delete via indexed card lookup. The old
         # `DELETE FROM vec WHERE rowid IN (subquery)` forced vec0Filter_fullscan
         # per card — O(n²) across a 40k+ batch (sample()-verified stall).
@@ -350,9 +358,13 @@ def _upsert(c: sqlite3.Connection, m, batch: list[tuple], allow_dupes: bool = Fa
         if row:
             c.execute("DELETE FROM vec WHERE rowid=?", (row[0],))
             c.execute("DELETE FROM cards WHERE id=?", (cid,))
-        cur = c.execute("INSERT INTO cards VALUES (?,?,?,?,?,?,?,?)",
-                        (cid, str(HOME_ROOT / rel), rel, body, sha,
-                         _project_root(str(HOME_ROOT / rel)), mt, size))
+        # Name columns explicitly so adding metadata does not couple inserts
+        # to the table column order or unrelated future nullable columns.
+        cur = c.execute(
+            "INSERT INTO cards (id, path, title, body, sha1, root, mtime, size, ctime_ns) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (cid, str(HOME_ROOT / rel), rel, body, sha,
+             _project_root(str(HOME_ROOT / rel)), mt, size, ct))
         c.execute("INSERT INTO vec(rowid, embedding) VALUES (?,?)",
                   (cur.lastrowid, json.dumps(_flat_vec(vec))))
     c.commit()
@@ -371,7 +383,7 @@ def _persist_search_roots(graft_dirs: list[pathlib.Path]) -> None:
 
 
 def _dup_card(c: sqlite3.Connection, cid: str, rel: str, body: str,
-              sha: str, mt: float, size: int) -> None:
+              sha: str, mt: float, size: int, ct: int | None) -> None:
     """Give a duplicate-content file its own card + vec row by copying the
     existing vector blob — zero encode cost, so 'every possible file' holds
     without paying re-embedding for boilerplate twins."""
@@ -383,9 +395,11 @@ def _dup_card(c: sqlite3.Connection, cid: str, rel: str, body: str,
     if row:
         c.execute("DELETE FROM vec WHERE rowid=?", (row[0],))
         c.execute("DELETE FROM cards WHERE id=?", (cid,))
-    cur = c.execute("INSERT INTO cards VALUES (?,?,?,?,?,?,?,?)",
-                    (cid, str(HOME_ROOT / rel), rel, body[:3000], sha,
-                     _project_root(str(HOME_ROOT / rel)), mt, size))
+    cur = c.execute(
+        "INSERT INTO cards (id, path, title, body, sha1, root, mtime, size, ctime_ns) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (cid, str(HOME_ROOT / rel), rel, body[:3000], sha,
+         _project_root(str(HOME_ROOT / rel)), mt, size, ct))
     c.execute("INSERT INTO vec(rowid, embedding) VALUES (?,?)", (cur.lastrowid, src[0]))
 
 
@@ -511,9 +525,12 @@ def _build_inner(c: sqlite3.Connection, progress_every: int) -> int:
     graft_dirs: list[pathlib.Path] = []
     text_paths, dataless = embed_walker.discover_files(HOME_ROOT, graft_dirs_out=graft_dirs)
     total = 0
-    # (sha1, mtime, size) per existing card: mtime+size fast-path avoids
-    # re-reading/hashing ~700k unchanged files every incremental build.
-    known = {r[0]: (r[1], r[2], r[3]) for r in c.execute("SELECT id, sha1, mtime, size FROM cards")}
+    # (sha1, mtime, size, ctime_ns) per existing card: the mtime+size+ctime
+    # fast-path avoids re-reading/hashing ~700k unchanged files every
+    # incremental build. ctime_ns is NULL on cards written before it was
+    # tracked, which the fast-path treats as "no evidence" and re-reads.
+    known = {r[0]: (r[1], r[2], r[3], r[4])
+             for r in c.execute("SELECT id, sha1, mtime, size, ctime_ns FROM cards")}
     claimed: set[str] = set(known.values())  # sha1 dedupe across whole corpus
     seen: set[str] = set()
     # Files whose stat() failed. They are KEPT (added to `seen`) and reported,
@@ -535,7 +552,8 @@ def _build_inner(c: sqlite3.Connection, progress_every: int) -> int:
         body = f"[dataless placeholder — filename only, content in iCloud]\n{p.name}"
         sha = "dataless:" + hashlib.sha1(str(p).encode()).hexdigest()
         claimed.add(sha)
-        batch.append((cid, rel, body, sha, 0.0, 0))
+        # ctime_ns NULL: a name-only card carries no content to verify.
+        batch.append((cid, rel, body, sha, 0.0, 0, None))
         if len(batch) >= BATCH:
             total += _upsert(c, m, batch)
             batch = []
@@ -559,10 +577,16 @@ def _build_inner(c: sqlite3.Connection, progress_every: int) -> int:
             continue
         rel = str(p.relative_to(HOME_ROOT))
         prev = known.get(cid)
-        if prev and prev[1] == st.st_mtime and prev[2] == st.st_size:
+        # mtime AND size AND ctime_ns must all agree before a card is trusted as
+        # unchanged. mtime can be restored (os.utime), so mtime+size alone let a
+        # same-size rewrite keep its old card — and its old hash — forever.
+        # ctime_ns moves on every write and on utime; a non-integer (legacy NULL)
+        # is not evidence, so those rows are re-read too.
+        if (prev and prev[1] == st.st_mtime and prev[2] == st.st_size
+                and isinstance(prev[3], int) and prev[3] == st.st_ctime_ns):
             claimed.add(prev[0])
             seen.add(cid)
-            continue  # mtime+size unchanged since last build — no re-read
+            continue  # mtime+size+ctime unchanged since last build — no re-read
         body = embed_walker.read_preview(p)
         if len(body.strip()) < embed_walker.MIN_PREVIEW_CHARS:
             # Near-empty content (tiny configs, stubs): keep as name-only card
@@ -571,12 +595,21 @@ def _build_inner(c: sqlite3.Connection, progress_every: int) -> int:
             body = f"[minimal file]\n{p.name}"
             sha = "name:" + hashlib.sha1(body.encode()).hexdigest()
         sha = hashlib.sha1(body.encode()).hexdigest()
+        if prev and prev[0] == sha:
+            # We REALLY re-read the preview before refreshing legacy/changed
+            # metadata. Only a confirmed unchanged preview can reuse its vector;
+            # stamping current stats without this read would fabricate evidence.
+            c.execute("UPDATE cards SET mtime=?, size=?, ctime_ns=? WHERE id=?",
+                      (st.st_mtime, st.st_size, st.st_ctime_ns, cid))
+            claimed.add(sha)
+            seen.add(cid)
+            continue
         if sha in claimed and (not prev or prev != sha):
             # Identical content elsewhere: still give THIS path its own card
             # (user directive: every possible file), sharing the existing
             # vector — no re-encode.
             seen.add(cid)
-            batch.append((cid, rel, body[:3000], sha, st.st_mtime, st.st_size))
+            batch.append((cid, rel, body[:3000], sha, st.st_mtime, st.st_size, st.st_ctime_ns))
             if len(batch) >= BATCH:
                 total += _upsert(c, m, batch, allow_dupes=True)
                 batch = []
@@ -586,9 +619,7 @@ def _build_inner(c: sqlite3.Connection, progress_every: int) -> int:
             continue
         claimed.add(sha)
         seen.add(cid)
-        if prev == sha:
-            continue  # unchanged since last build
-        batch.append((cid, rel, body[:3000], sha, st.st_mtime, st.st_size))
+        batch.append((cid, rel, body[:3000], sha, st.st_mtime, st.st_size, st.st_ctime_ns))
         if len(batch) >= BATCH:
             total += _upsert(c, m, batch)
             batch = []
@@ -826,11 +857,17 @@ def insert_card(card_path: str) -> int:
             return 1
         c = conn()
         init(c)
+        # Stat BEFORE the read. The metadata a card records must be from the same
+        # instant as (or earlier than) the content it stores: reading first and
+        # statting after let a write that lands mid-read pair the OLD body with
+        # the POST-edit ctime, certifying stale content as current. With the stat
+        # first, such a race leaves ctime mismatched, so the card is re-read
+        # rather than trusted.
+        st = p.stat()
         body = embed_walker.read_preview(p)
         rel = str(p.relative_to(home_root))
         sha = hashlib.sha1(body.encode()).hexdigest()
-        st = p.stat()
-        n = _upsert(c, model(), [("f:" + str(p), rel, body[:3000], sha, st.st_mtime, st.st_size)])
+        n = _upsert(c, model(), [("f:" + str(p), rel, body[:3000], sha, st.st_mtime, st.st_size, st.st_ctime_ns)])
         print(f"embed-index: card indexed ({n})")
         return 0
     finally:

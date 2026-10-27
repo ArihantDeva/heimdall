@@ -879,16 +879,17 @@ if recency:
 
 # Verdict pass: STRONG requires identity with the indexed content — the path
 # exists AND the file on disk still matches the card that was indexed (size +
-# mtime). Query-token coverage is a RANKING signal, never a trust signal: a
-# semantic hit's body is synthesized as `semantic hit [<path>]`, so the path
-# alone scores full coverage, and a stale card still points at a live file.
-# Size/mtime come from the card, so this opens nothing — verification costs one
-# stat per hit. (See tests/kb-search-identity.test.mjs.)
+# mtime + ctime_ns). Query-token coverage is a RANKING signal, never a trust
+# signal: a semantic hit's body is synthesized as `semantic hit [<path>]`, so
+# the path alone scores full coverage, and a stale card still points at a live
+# file. Size/mtime/ctime come from the card, so this opens nothing — verification
+# costs a stat per hit. (See tests/kb-search-identity.test.mjs.)
 q_toks = tokenize(q)
 # Freshness anchors: per-card mtime from global.db = when the snapshot was
 # indexed. Read-only, final hits only; absent db / errors => unknown freshness.
 import sqlite3, stat, time
 
+card_ctimes = {}
 card_mtimes = {}
 card_sizes = {}
 # Index availability is part of the verdict: when the cards table cannot be
@@ -902,7 +903,17 @@ db_path = os.path.expanduser("~/.heimdall/global.db")
 if os.path.exists(db_path):
     try:
         con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        # Keep all evidence lookups in one read snapshot, even if ingestion
+        # commits new cards between the metadata and content queries.
+        con.execute("BEGIN")
         hit_paths = [r["path"] for r in merged if r.get("path")]
+        # A legacy schema is readable but supplies no change-time evidence.
+        # Do not invent ctime from the live file or mislabel it INDEX_ERROR.
+        cols = {r[1] for r in con.execute("PRAGMA table_info(cards)")}
+        if hit_paths and "ctime_ns" in cols:
+            ct_qm = ",".join("?" * len(hit_paths))
+            card_ctimes = dict(con.execute(
+                f"SELECT path, ctime_ns FROM cards WHERE path IN ({ct_qm})", hit_paths))
         if hit_paths:
             qm = ",".join("?" * len(hit_paths))
             for p_, mt_, sz_ in con.execute(
@@ -917,6 +928,7 @@ if os.path.exists(db_path):
         # indexed". Same convention as SEMANTIC_ERROR above.
         print(f"INDEX_ERROR: cards lookup failed — no hit can be identity-verified ({e})")
         index_reason = f"index unreadable — content not verified ({e})"
+        card_ctimes = {}
         card_mtimes = {}
         card_sizes = {}
 for i, r in enumerate(merged, 1):
@@ -943,32 +955,33 @@ for i, r in enumerate(merged, 1):
     if q_toks:
         matched = sum(1 for tok in q_toks if tok in covered)
         cov = round(matched / len(q_toks), 2)
-    # Content identity: the card this hit came from recorded the size AND mtime
-    # the file had when it was indexed. A file that has moved on since then is
-    # not the content we matched — whatever it now says is unverified, so it
-    # cannot be STRONG no matter how well the query tokens line up. Size alone
-    # would miss a same-length rewrite (ALLOWED=1 -> DELETED=1); the mtime
-    # comparison closes that, and matches the freshness token below so a hit can
-    # never read `possibly_stale` and STRONG at the same time.
+    # Content identity: the card this hit came from recorded the size, mtime AND
+    # ctime_ns the file had when it was indexed. A file that has moved on since
+    # then is unverified, regardless of query coverage. Size+mtime alone miss
+    # a same-length rewrite followed by os.utime. On Unix, ordinary writes and
+    # utime update ctime, which utime cannot restore; recording it adds evidence
+    # without reading the hit file. Timestamp-resolution limits still apply.
     #
-    # Two stats, zero reads: this is what makes the README's "act on STRONG
-    # without a confirmation round-trip" true without opening the file.
+    # Zero reads: size, mtime and ctime_ns all come from stats, never a file
+    # open, which is what makes the README's "act on STRONG without a
+    # confirmation round-trip" true without reading the file.
     #
-    # ponytail: a same-size rewrite that ALSO restores mtime (os.utime) defeats
-    # any stat-based check by construction, so query time cannot see it — and
-    # paying for it here would mean hashing every hit, which is the read this
-    # layer exists to avoid. The card is keyed on (size, mtime) all the way
-    # down, including index/embed-index.py's own
-    # `prev[1] == st.st_mtime and prev[2] == st.st_size` fast-path, so that same
-    # fast-path will NOT notice the rewrite either: the card keeps the stale
-    # hash and this stays wrong until something re-reads the file on purpose.
-    # The boundary is owned by `heimdall verify --deep`, which re-hashes and
-    # reports `why: "hash"` drift (reconcile.mjs). Note its scope: it audits the
-    # reconciler journal, which is not the same path set as semantic cards.
-    # tests/kb-search-identity.test.mjs pins this as a known ceiling — if that
-    # test ever fails toward WEAK, query-time identity became content-based and
-    # this comment is what to update.
+    # This is NOT a cryptographic identity proof. It is a metadata-agreement
+    # check and inherits every limit of that: ctime has coarse-filesystem
+    # granularity, so a rewrite inside the same tick as the index pass can share
+    # it; a privileged actor can alter metadata or the clock; and the stat races
+    # a concurrent writer (TOCTOU) — the content could change the instant after
+    # we look. STRONG means "the three metadata fields the index recorded still
+    # agree", not "these bytes are provably the bytes that were hashed". The
+    # content-level boundary is owned by `heimdall verify --deep`, which
+    # re-hashes and reports `why: "hash"` drift (reconcile.mjs) — note its
+    # scope: it audits the reconciler journal, not the same path set as semantic
+    # cards. A card predating ctime tracking holds NULL, treated as NO evidence:
+    # such a hit is demoted to WEAK with a reindex reason rather than trusted on
+    # mtime alone. tests/kb-search-identity.test.mjs pins the restored-mtime
+    # demotion; tests/card-change-time.test.mjs pins the legacy-NULL demotion.
     identity = None
+    ctime_unverified = False
     # A directory or a symlink is not the file the card describes: os.stat
     # follows links, and a directory can carry a plausible size/mtime, so both
     # would otherwise inherit the verdict the path used to deserve. Read the
@@ -985,6 +998,11 @@ for i, r in enumerate(merged, 1):
             # Card columns are only loosely typed, so a non-numeric mtime must
             # fail the check rather than raise inside it.
             numeric_mtime = isinstance(cm, (int, float))
+            # ctime is INTEGER; a bool is an int in python but never a real
+            # timestamp, so exclude it. A missing (NULL) or non-integer ctime is
+            # UNVERIFIED, not a crash — see the verdict branch below.
+            cc = card_ctimes.get(p)
+            numeric_ctime = isinstance(cc, int) and not isinstance(cc, bool)
             # SYMMETRIC and TIGHT. `st.st_mtime - card <= 1.0` accepted a
             # downward skew of any size, which is reachable without utime:
             # embed-index fast-paths on EXACT mtime equality, so an edit landing
@@ -994,9 +1012,21 @@ for i, r in enumerate(merged, 1):
             # "the file is unchanged since we indexed it" actually means; a
             # loose window would re-admit the evidence-free STRONG this whole
             # check exists to prevent.
-            identity = (numeric_mtime
-                        and st.st_size == card_sizes[p]
-                        and abs(st.st_mtime - cm) < 1e-6)
+            size_mtime_ok = (numeric_mtime
+                             and st.st_size == card_sizes[p]
+                             and abs(st.st_mtime - cm) < 1e-6)
+            if not size_mtime_ok:
+                identity = False
+            elif not numeric_ctime:
+                # No usable ctime evidence (legacy NULL card, or a non-integer
+                # value). mtime can be restored with os.utime, so size+mtime
+                # alone is not proof; demote, with the remedy named.
+                ctime_unverified = True
+            else:
+                # The ctime the card recorded must equal the file's, EXACTLY. A
+                # mismatch means the file was written (or utime'd) since it was
+                # indexed, whatever the size and mtime now say.
+                identity = (cc == st.st_ctime_ns)
         except OSError:
             identity = None
     if not exists:
@@ -1008,6 +1038,9 @@ for i, r in enumerate(merged, 1):
     elif identity is False:
         verdict = "WEAK"
         why = "file changed since it was indexed"
+    elif ctime_unverified:
+        verdict = "WEAK"
+        why = "index card has no change-time evidence — reindex this path to verify"
     elif identity is None:
         # No card (graft/mnemosyne backends return none) or an unreadable stat.
         # Nothing was verified here, so this must not be STRONG: an unverifiable
@@ -1053,14 +1086,16 @@ for i, r in enumerate(merged, 1):
     if isinstance(cm, (int, float)) and exists:
         age = max(0.0, time.time() - cm)
         as_of = f"{age/3600:.1f}h" if age < 86400 * 14 else f"{age/86400:.1f}d"
-        # The freshness token says exactly what identity verified: the file's
-        # mtime still equals the card's. Same test, same tightness, so the token
-        # and the verdict can never disagree.
-        try:
-            stale = abs(os.path.getmtime(p) - cm) >= 1e-6
-        except OSError:
-            stale = False
-        fr = f"as_of={as_of} " + ("possibly_stale" if stale else "fresh")
+        # Reuse the identity decision, not a second mtime-only stat: a rewrite
+        # that restores mtime must not be called fresh after ctime rejected it.
+        # Missing legacy evidence or a failed stat is unknown, never fresh.
+        if identity is True:
+            freshness = "fresh"
+        elif identity is False or not is_file:
+            freshness = "possibly_stale"
+        else:
+            freshness = "freshness_unknown"
+        fr = f"as_of={as_of} {freshness}"
     fr_s = f"  {fr}" if fr else ""
     print(f"{i:>2}. [{verdict:<6}] cov{int(cov*100):02d}%{fr_s}  {p}")
     print(f"      {r['title']}")

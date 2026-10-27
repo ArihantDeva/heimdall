@@ -23,7 +23,7 @@ const shellTest = process.platform === "win32" ? test.skip : test;
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const KB_SEARCH = join(repoRoot, "bin", "kb-search.sh");
 
-const CARDS_DDL = "CREATE TABLE cards (id TEXT PRIMARY KEY, path TEXT UNIQUE NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, sha1 TEXT NOT NULL, root TEXT NOT NULL, mtime REAL NOT NULL, size INTEGER NOT NULL)";
+const CARDS_DDL = "CREATE TABLE cards (id TEXT PRIMARY KEY, path TEXT UNIQUE NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, sha1 TEXT NOT NULL, root TEXT NOT NULL, mtime REAL NOT NULL, size INTEGER NOT NULL, ctime_ns INTEGER)";
 
 /** Sandbox HOME with a graft stub, one repo graph, and one indexed hit file. */
 function sandbox() {
@@ -41,14 +41,19 @@ function sandbox() {
 }
 
 /** Write $HOME/.heimdall/global.db carrying one card row for `path`. */
-function writeCard(home, path, { size, title = "Expected hit", body = "example", mtime = Date.now() / 1000 }) {
+function writeCard(home, path, { size, title = "Expected hit", body = "example", mtime = Date.now() / 1000, ctime_ns = null }) {
   const db = join(home, ".heimdall", "global.db");
   mkdirSync(dirname(db), { recursive: true });
   const drop = existsSync(db) ? 'con.execute("DROP TABLE IF EXISTS cards")' : "";
+  // ctime_ns is a 64-bit nanosecond count (~1.8e18), past Number.MAX_SAFE_INTEGER,
+  // so it is emitted as a decimal SQL literal from a BigInt. Passing it as a JS
+  // number would round it and make the exact-integer comparison the verdict
+  // relies on impossible. null means a legacy card (no ctime evidence).
+  const ctime = ctime_ns === null ? "NULL" : String(ctime_ns);
   // SQLite is dynamically typed: binding a non-numeric mtime (a string) stores
   // TEXT in a REAL NOT NULL column, which is how a legacy or hand-edited row
   // ends up carrying a value the freshness arithmetic cannot subtract.
-  const insert = `con.execute('INSERT INTO cards VALUES ("1", ?, ?, ?, ?, "r", ?, ?)', (${JSON.stringify(path)}, ${JSON.stringify(title)}, ${JSON.stringify(body)}, "s1", ${JSON.stringify(mtime)}, ${size}))`;
+  const insert = `con.execute('INSERT INTO cards (id, path, title, body, sha1, root, mtime, size, ctime_ns) VALUES ("1", ?, ?, ?, ?, "r", ?, ?, ${ctime})', (${JSON.stringify(path)}, ${JSON.stringify(title)}, ${JSON.stringify(body)}, "s1", ${JSON.stringify(mtime)}, ${size}))`;
   execFileSync("/usr/bin/python3", ["-c", [
     "import sqlite3,sys",
     `con = sqlite3.connect(${JSON.stringify(db)})`,
@@ -63,7 +68,10 @@ function writeCard(home, path, { size, title = "Expected hit", body = "example",
 /** The card a real index pass would have written for this file, right now. */
 const cardFor = (path) => {
   const st = statSync(path);
-  return { size: st.size, mtime: st.mtimeMs / 1000 };
+  // ctimeNs is BigInt-only; keep the mtime from the float stat so it keeps its
+  // sub-millisecond precision (the verdict compares it with a 1e-6 epsilon).
+  const bst = statSync(path, { bigint: true });
+  return { size: st.size, mtime: st.mtimeMs / 1000, ctime_ns: bst.ctimeNs };
 };
 
 /** The env every sandboxed kb-search run shares: isolated HOME, bare PATH. */
@@ -132,32 +140,47 @@ shellTest("issue #13: a hit with no index card is WEAK and names the reason", ()
   } finally { cleanup(); }
 });
 
-// The ceiling of any stat-based check, pinned so it is a documented limit
-// rather than an unknown one: a same-size rewrite that also restores mtime is
-// indistinguishable without reading the file. The boundary is owned elsewhere
-// by design — `heimdall verify --deep` re-hashes and reports the drift, and the
-// reconciler's next pass re-indexes the file, rewriting the card and making
-// search correct again. If this test ever starts failing because the verdict
-// went to WEAK, query-time identity became content-based (that read is exactly
-// what the layer avoids) and the ponytail comment in kb-search.sh needs
-// updating with it.
-shellTest("issue #13: known ceiling — same size plus restored mtime still reads STRONG", () => {
+// The stat-based check no longer has the "restore mtime" hole it used to
+// document as a known ceiling. ctime_ns is bumped by the kernel on every write
+// AND on os.utime, so a same-size rewrite that restores mtime — which defeated
+// size+mtime by construction — now moves the one field the rewrite cannot put
+// back. The card carries the ctime from a real index pass; the rewrite is caught
+// and the hit demoted, with the reason naming the stale card. The boundary is
+// still not a cryptographic proof (coarse ctime, privileged metadata edits and
+// TOCTOU remain) — see the comment in kb-search.sh — but the specific
+// restored-mtime ceiling is closed, so this is a regression gate, not a limit.
+//
+// `heimdall verify --deep` remains the content-level boundary: it re-hashes and
+// reports `why: "hash"` drift, and the next build re-reads the path because the
+// embed-index fast-path also requires ctime now.
+shellTest("issue #13: a same-size rewrite that restores mtime is not STRONG", () => {
   const { home, hit, cleanup } = sandbox();
   try {
     writeFileSync(hit, "ALLOWED=1\n");
-    const mtime = statSync(hit).mtimeMs / 1000;
-    writeCard(home, hit, { size: 10, mtime });
-    writeFileSync(hit, "DELETED=1\n"); // same length
-    utimesSync(hit, mtime, mtime); // ...and the same mtime
+    // A card from a real index pass: size, mtime AND ctime_ns from os.stat.
+    const indexed = cardFor(hit);
+    writeCard(home, hit, indexed);
+    const indexedMtime = indexed.mtime;
+    writeFileSync(hit, "DELETED=1\n"); // same 10 bytes, opposite meaning
+    utimesSync(hit, indexedMtime, indexedMtime); // ...and the mtime is restored
 
     const stdout = search(home);
 
-    assert.equal(readFileSync(hit, "utf8"), "DELETED=1\n");
-    assert.match(
+    assert.equal(readFileSync(hit, "utf8"), "DELETED=1\n", "fixture must hold the rewritten bytes");
+    assert.equal(statSync(hit).size, 10, "the rewrite must keep the size identical");
+    assert.ok(Math.abs(statSync(hit).mtimeMs / 1000 - indexedMtime) < 1e-6,
+      "the mtime must be restored, or this asserts the old (size/mtime) check, not ctime");
+    assert.match(stdout, /Expected hit/, "hit still returned");
+    assert.doesNotMatch(
       stdout,
       /\[STRONG\]/,
-      `stat-based identity cannot see this rewrite; if it now reports WEAK the check became content-based and the ponytail comment in kb-search.sh must be updated:\n${stdout}`,
+      `a rewrite that restored mtime must not be STRONG:\n${stdout}`,
     );
+    assert.notEqual(statSync(hit, { bigint: true }).ctimeNs, indexed.ctime_ns,
+      "fixture: only ctime should expose the restored-mtime rewrite");
+    assert.match(stdout, /changed since it was indexed/, "the reason names the stale card");
+    assert.match(stdout, /possibly_stale/, "rejected ctime evidence must not be called fresh");
+    assert.doesNotMatch(stdout, /\bfresh\b/);
   } finally { cleanup(); }
 });
 
