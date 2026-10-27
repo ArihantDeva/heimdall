@@ -89,6 +89,18 @@ describe("query-shim: a stalled worker cannot extend the deadline", () => {
 		expect(r.stdout).toContain("[0.5] T — /p/x.py");
 	});
 
+	it("--json preserves hit provenance for the common trust pass", async () => {
+		const payload = {
+			ok: true, sem_coverage: "ok",
+			hits: [{ title: "T — nested", path: "/p/file with spaces.py", score: 3.4, leg: "semantic", related: true }],
+		};
+		const r = await withServer((conn) => conn.once("data", () => conn.end(reply(payload))), {
+			args: ["--fused", "--json", "hello"],
+		});
+		expect(r.code).toBe(0);
+		expect(JSON.parse(r.stdout)).toEqual(payload);
+	});
+
 	it("an empty result set is a SUCCESS, not a failure", async () => {
 		// Exit 0 means "answered"; hits may legitimately be empty. Over-correcting
 		// to exit 1 on no hits would make every empty search fall back to the slow
