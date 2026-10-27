@@ -5,7 +5,7 @@
 // idempotent, and therefore what makes concurrent edits harmless.
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, extname, join } from "node:path";
 import { capability, rank, REPO_ROOT } from "./depth.mjs";
@@ -14,6 +14,26 @@ import { extractFacts } from "./facts.mjs";
 const BRIDGE = join(REPO_ROOT, "bin", "lib", "heimdall_extract.py");
 
 export const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
+
+// Hash every byte without allocating a file-sized Buffer (readFileSync rejects
+// files above its buffer limit). Keep the synchronous desiredState/drain API;
+// only the working buffer is bounded, never the bytes verified. A stat size is
+// an allocation hint, not a read limit: a file may grow before we open it. The
+// buffer floor also avoids tiny reads if a small/empty file grows after stat.
+function hashFile(path, size) {
+  const fd = openSync(path, "r");
+  try {
+    const buf = Buffer.allocUnsafe(Math.max(64 * 1024, Math.min(size, 256 * 1024)));
+    const hash = createHash("sha256");
+    for (;;) {
+      const n = readSync(fd, buf, 0, buf.length, null);
+      if (!n) return hash.digest("hex");
+      hash.update(buf.subarray(0, n));
+    }
+  } finally {
+    closeSync(fd);
+  }
+}
 
 const LANG_BY_EXT = {
   ".py": "python", ".js": "javascript", ".jsx": "javascript",
@@ -118,8 +138,13 @@ export function runBridge(paths, cap = capability()) {
  */
 export function desiredState(path, depth, opts = {}) {
   const st = statSync(path);
-  const buf = readFileSync(path);
-  const hash = sha256(buf);
+  const facts = rank(depth) >= rank("file") &&
+    (opts.facts === true || factSource(path));
+  // Fact extraction still requires a whole buffer. Reuse those exact bytes for
+  // its hash rather than reading twice or changing the fact parser's contract.
+  // Ordinary files (and every L0/deep-audit hash) need no content buffer at all.
+  const buf = facts ? readFileSync(path) : null;
+  const hash = facts ? sha256(buf) : hashFile(path, st.size);
   const fileNodeId = nodeIdFor(path, "__file__");
 
   // L0: the file exists. Nothing more.
@@ -137,9 +162,7 @@ export function desiredState(path, depth, opts = {}) {
 
   // Facts ride along at any depth >= file for opted-in paths (spec D1: the
   // prompt log is just another watched file).
-  appendFactState(nodes, edges, buf, path, fileNodeId,
-    rank(depth) >= rank("file") &&
-    (opts.facts === true || factSource(path)));
+  appendFactState(nodes, edges, buf, path, fileNodeId, facts);
 
   if (rank(depth) >= rank("symbol")) {
     const bridged = opts.bridged?.get(path) ?? runBridge([path], opts.cap).get(path);
