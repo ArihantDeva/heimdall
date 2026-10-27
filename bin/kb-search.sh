@@ -560,7 +560,6 @@ fi
 FAST_OK=0
 HEIMDALL_VENV_PY="$HOME/.heimdall/venv/bin/python3"
 HEIMDALL_SHIM="$SCRIPT_DIR/query-shim.py"
-HEIMDALL_SERVER="$SCRIPT_DIR/query-server.py"
 HEIMDALL_SOCK="${HEIMDALL_QUERY_SOCK:-$HOME/.heimdall/query.sock}"
 if [ -x "$HEIMDALL_VENV_PY" ] && [ -f "$HEIMDALL_SHIM" ] && [ -S "$HEIMDALL_SOCK" ]; then
 	# Keep the shim's stderr instead of discarding it: that is the only channel
@@ -598,12 +597,6 @@ if [ -x "$HEIMDALL_VENV_PY" ] && [ -f "$HEIMDALL_SHIM" ] && [ -S "$HEIMDALL_SOCK
 	else
 		rm -f "$FAST_ERR" 2>/dev/null
 	fi
-fi
-if [ "$FAST_OK" = "0" ] && [ ! -S "$HEIMDALL_SOCK" ] && [ -x "$HEIMDALL_VENV_PY" ] && [ -f "$HEIMDALL_SERVER" ]; then
-	# Nothing is listening: start a worker for the NEXT call and serve this one
-	# from the fallback. Waiting here would pay the model load inside the very
-	# search it is meant to accelerate.
-	nohup "$HEIMDALL_VENV_PY" "$HEIMDALL_SERVER" >/dev/null 2>&1 &
 fi
 if [ "$FAST_OK" = "1" ]; then
 	exit 0
@@ -749,14 +742,6 @@ if os.path.exists(shim) and os.path.exists(venv_py) and os.path.exists(sock_path
                   "(slow path).", file=sys.stderr)
     except Exception as e:
         print(f"WARN: warm fused search unavailable ({e}); falling back to graft fan-out.", file=sys.stderr)
-if not fast_ok and not os.path.exists(sock_path) and os.path.exists(server):
-    # Start a worker for the NEXT call; serve this one from the fallback rather
-    # than blocking on a model load this search was supposed to avoid.
-    try:
-        subprocess.Popen([venv_py, server], stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, start_new_session=True)
-    except Exception:
-        pass
 
 # ── FALLBACK ONLY: per-repo graft fan-out + cold embedding ──────────────────
 # Reached solely when the warm worker is unreachable. Kept because a working
@@ -783,7 +768,6 @@ if not fast_ok:
   if os.path.exists(venv_py) and os.path.exists(os.path.expanduser("~/.heimdall/global.db")) and os.path.exists(sem):
     try:
         shim_name = os.path.join(script_dir, "query-shim.py")
-        server_name = os.path.join(script_dir, "query-server.py")
         out = None
         if os.path.exists(shim_name) and os.path.exists(sock_path):
             warm = subprocess.run([venv_py, shim_name, q, "-n", str(n), "--related"],
@@ -796,19 +780,15 @@ if not fast_ok:
                 print(f"WARN: warm query worker failed (rc={warm.returncode}); "
                       f"falling back to cold embed-index query", file=sys.stderr)
         if out is None:
-            # Nothing answered. Start a worker for the NEXT call and serve this
-            # one cold — deliberately WITHOUT waiting for it to come up.
-            #
-            # The first version polled up to 30s for the socket here. That paid
-            # the model load inside the very search it was meant to accelerate,
-            # and any environment where the worker cannot start (sandboxed HOME,
-            # missing venv, stub python) turned every search into a 30s stall
-            # before falling back anyway. Verified by two existing kb-search
-            # tests that sandbox $HOME: both timed out. Spawn-and-continue costs
-            # at most one cold search after a reboot and never blocks on hope.
+            # The ONLY worker launch: the semantic prerequisites are present
+            # and all warm attempts failed. This also handles a stale socket
+            # FILE, which is not evidence of a listening worker. Earlier shell
+            # and fused-leg launchers could start two more workers for this
+            # same request. Keep the detached handoff here, without waiting;
+            # the current request still has its cold producer below.
             if os.path.exists(server):
                 try:
-                    subprocess.Popen([venv_py, server], stdout=subprocess.DEVNULL,
+                    subprocess.Popen([venv_py, server, "--socket", sock_path], stdout=subprocess.DEVNULL,
                                      stderr=subprocess.DEVNULL, start_new_session=True)
                 except Exception:
                     pass
