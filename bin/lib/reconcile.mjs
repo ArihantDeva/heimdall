@@ -317,8 +317,12 @@ export function reconcilePath(ctx, path) {
   };
 }
 
+function safeStat(p) {
+  try { return statSync(p); } catch { return null; }
+}
+
 function safeIsFile(p) {
-  try { return statSync(p).isFile(); } catch { return false; }
+  return safeStat(p)?.isFile() ?? false;
 }
 
 /**
@@ -358,7 +362,11 @@ export function audit(ctx, { deep = false, enqueue = true } = {}) {
   const { journal } = ctx;
   const drift = [];
   for (const row of journal.allPaths()) {
-    const there = existsSync(row.path) && safeIsFile(row.path);
+    // One observation supplies both existence/type and metadata. Re-statting
+    // each present path did redundant work and could throw if it vanished
+    // between the existence screen and the metadata read.
+    const st = safeStat(row.path);
+    const there = st?.isFile() ?? false;
     if (row.state === "present" && !there) {
       drift.push({ path: row.path, why: "missing" });
       continue;
@@ -368,7 +376,6 @@ export function audit(ctx, { deep = false, enqueue = true } = {}) {
       continue;
     }
     if (!there) continue;
-    const st = statSync(row.path);
     // mtime+size is the cheap screen; --deep re-hashes everything and catches
     // a same-size same-mtime rewrite (rare, but it is exactly the case a
     // "cannot be wrong" claim has to cover).
