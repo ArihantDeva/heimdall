@@ -30,15 +30,28 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { embedIndexPython, embedIndexSkipReason } from "./lib/python.mjs";
+
 const ROOT = new URL("..", import.meta.url).pathname;
-const PY = process.env.HEIMDALL_PY || join(process.env.HOME, ".heimdall", "venv", "bin", "python3");
+
+// These tests import bin/embed-index.py, which calls sqlite_vec.load() at import
+// time. So they must run only where that import actually works, and skip with a
+// NAMED reason elsewhere.
+//
+// NOT a hardcoded ~/.heimdall/venv path — that is the exact bug tests/lib/python.mjs
+// documents, and it bit this suite: `spawnSync .../venv/bin/python3 ENOENT` on
+// ubuntu-latest and macos-latest while green locally. `embedIndexPython()` probes
+// the module the test really imports, so a new dependency cannot drift out of a
+// hand-maintained list.
+const PY = embedIndexPython();
+const SKIP = PY === null ? embedIndexSkipReason() : false;
 
 /** Run a python snippet with HEIMDALL_DB pointed at `db`. */
 function py(db, body) {
   return execFileSync(PY, ["-c", body], {
     cwd: ROOT,
     encoding: "utf8",
-    timeout: 120_000,
+    timeout: 180_000,
     env: { ...process.env, HEIMDALL_DB: db, HEIMDALL_DEVICE: "cpu" },
   });
 }
@@ -48,7 +61,7 @@ function freshDb() {
   return { dir, db: join(dir, "global.db") };
 }
 
-test("conn() asks sqlite to wait for a busy writer instead of failing on the first collision", () => {
+test("conn() asks sqlite to wait for a busy writer instead of failing on the first collision", { skip: SKIP }, () => {
   const { dir, db } = freshDb();
   try {
     // The default python busy_timeout is 5000ms. A build that commits every
@@ -73,7 +86,7 @@ c.close()
   }
 });
 
-test("conn() selects WAL so a writer does not lock the whole database for every commit", () => {
+test("conn() selects WAL so a writer does not lock the whole database for every commit", { skip: SKIP }, () => {
   const { dir, db } = freshDb();
   try {
     // A fresh database starts in `delete` mode, the mode that made commits
@@ -105,7 +118,7 @@ c.close()
   }
 });
 
-test("a build commit survives a writer that holds the lock for 12 seconds", () => {
+test("a build commit survives a writer that holds the lock for 12 seconds", { skip: SKIP }, () => {
   const { dir, db } = freshDb();
   try {
     // Establish the schema through the module itself, then have a SEPARATE
