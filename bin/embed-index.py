@@ -133,6 +133,33 @@ def conn() -> sqlite3.Connection:
     c = sqlite3.connect(DB)
     c.enable_load_extension(True)
     sqlite_vec.load(c)
+    # A build must SURVIVE a concurrent writer, not die on it. Measured
+    # 2026-10-27: `build` over the live 4.2GB index crashed with
+    # `sqlite3.OperationalError: database is locked` at `_upsert` -> commit(),
+    # because the reconciler daemon held a write lock for longer than python's
+    # default busy_timeout of 5000ms. A ~10 minute build that commits every 128
+    # cards should wait out a transient writer instead of losing all its work.
+    # 60s is chosen to outlast a daemon reconcile pass; a genuine deadlock still
+    # fails, just later. tests/embed-index-write-lock.test.mjs asserts a 12s hold
+    # is survivable, which is the collision that actually happened.
+    c.execute("PRAGMA busy_timeout=60000")
+    # WAL, because the journal mode is what makes a commit exclusive for its
+    # whole duration. The live index ran `journal_mode=delete`, where a writer
+    # blocks every reader and every other writer for the entire commit; that is
+    # why a 5s (never mind a 60s) wait could be exhausted. Under WAL, writers do
+    # not block readers and the exclusive window shrinks to a brief moment.
+    #
+    # Applied ONLY when the database is not already WAL: switching journal mode
+    # needs an exclusive lock itself, so blindly issuing this on every conn()
+    # would turn a read into a lock demand and could block a build behind the
+    # very writer it is trying to wait for. If the mode cannot be changed (a
+    # read-only database, or one held by another process), stay in the current
+    # mode: the busy_timeout above is what keeps that case working.
+    try:
+        if c.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal":
+            c.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.Error:
+        pass  # read-only or locked: keep the existing mode, rely on busy_timeout
     # Memory-map the DB instead of read()ing pages into the process heap.
     # MEASURED 2026-10-22 over the 4.5GB index: a kNN over 115k x 768d vectors
     # cost 168-170ms through the normal page cache and 120ms with a 2GB mmap,
