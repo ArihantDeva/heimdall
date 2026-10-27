@@ -269,7 +269,8 @@ def rerank_hits(ei, query, hits, *, s_vec_by_path=None, deadline=None):
     returns a separate original-order snapshot, never partial inferred evidence.
     """
     now = time.monotonic()
-    remaining = 8.0 if deadline is None else min(8.0, deadline - now)
+    stop_at = now + 8.0 if deadline is None else min(deadline, now + 8.0)
+    remaining = stop_at - time.monotonic()
 
     def fallback(status, reason):
         out = _annotated_hits(hits, s_vec_by_path)
@@ -283,11 +284,13 @@ def rerank_hits(ei, query, hits, *, s_vec_by_path=None, deadline=None):
         return RankedHits(out, _status(out, 0, "empty", "no_candidates"))
     if remaining <= 0:
         return fallback("deadline", "search_deadline")
-    stop_at = now + remaining
     box = {}
 
     def run():
         try:
+            if time.monotonic() >= stop_at:
+                box["result"] = fallback("deadline", "deadline")
+                return
             box["result"] = _rerank_inner(ei, query, hits,
                 s_vec_by_path=s_vec_by_path, deadline=stop_at)
         except BaseException:
@@ -295,7 +298,7 @@ def rerank_hits(ei, query, hits, *, s_vec_by_path=None, deadline=None):
 
     worker = threading.Thread(target=run, daemon=True)
     worker.start()
-    worker.join(remaining)
+    worker.join(max(0.0, stop_at - time.monotonic()))
     if worker.is_alive():
         return fallback("deadline", "deadline")
     if "error" in box or "result" not in box:

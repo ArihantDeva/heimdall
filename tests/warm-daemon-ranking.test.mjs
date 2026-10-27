@@ -553,7 +553,7 @@ ei = FakeEI([card(path)])
 clock = {"now": 100.0, "retrieval": 3.5}
 qs.time = types.SimpleNamespace(monotonic=lambda: clock["now"])
 wr.time = types.SimpleNamespace(monotonic=lambda: clock["now"])
-qs._with_deadline = lambda fn, seconds: fn()  # deterministic clock fixture only
+qs._with_deadline = lambda fn, seconds, deadline=None: fn()  # deterministic clock fixture only
 qs.lexical_hits = lambda ei, q, n, scope=None: [lex(path, 7.0)]
 def sem(ei, q, n=6, related=False):
     clock["now"] += clock["retrieval"]
@@ -613,7 +613,7 @@ def sem(ei, q, n=6, related=False):
     return []
 qs._semantic_hits = sem
 barrier = threading.Barrier(2)
-def concurrent_retrieval(fn, seconds):
+def concurrent_retrieval(fn, seconds, deadline=None):
     hits = fn()
     barrier.wait(2)  # both callers see a changed legacy global flag
     return hits
@@ -627,7 +627,7 @@ assert first["sem_coverage"] == "degraded" and first["rerank"]["status"] == "dis
 assert second["sem_coverage"] == "ok" and second["rerank"]["status"] == "unavailable"
 assert first["hits"][0]["signals"]["ce_status"] == "disabled"
 assert second["hits"][0]["signals"]["ce_status"] == "unavailable"
-qs._with_deadline = lambda fn, seconds: fn()
+qs._with_deadline = lambda fn, seconds, deadline=None: fn()
 plain = rpc(ei, q="two", rerank=False)
 assert set(plain) == {"ok", "hits", "sem_coverage"}
 assert plain["hits"] == [lex(path, 4.0)]
@@ -877,5 +877,42 @@ try:
 finally:
     release.set()
     assert done.wait(2)
+`);
+});
+
+test("a scheduling pause cannot rebase the enclosing absolute deadline", () => {
+  run(String.raw`
+path = "/scope/graft/a"
+ei = FakeEI([card(path)])
+hits = [lex(path, 3.0)]
+class PausedClock:
+    def __init__(self): self.reads = 0
+    def monotonic(self):
+        self.reads += 1
+        return 108.0 if self.reads == 1 else 111.0
+old_time = qs.time
+old_adapter = qs._rerank_hits
+called = []
+def forbidden_adapter(*a, **k):
+    called.append(True)
+    raise AssertionError("deadline was extended by a second clock reading")
+qs.time = PausedClock()
+qs._rerank_hits = forbidden_adapter
+try:
+    got = qs._rank_frozen_hits(ei, "title", hits, deadline=110.0)
+    assert got.rerank["status"] == "deadline"
+    assert got[0]["score"] == 3.0 and called == []
+finally:
+    qs.time, qs._rerank_hits = old_time, old_adapter
+old_time, old_inner = wr.time, wr._rerank_inner
+wr.time = PausedClock()
+wr._rerank_inner = forbidden_adapter
+try:
+    got = wr.rerank_hits(ei, "title", hits, deadline=110.0)
+    assert got.rerank["status"] == "deadline"
+    assert got[0]["score"] == 3.0 and called == []
+finally:
+    wr.time, wr._rerank_inner = old_time, old_inner
+assert ei.conn_calls == 0
 `);
 });

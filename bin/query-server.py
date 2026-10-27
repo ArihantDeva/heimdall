@@ -140,7 +140,7 @@ class DeadlineExceeded(Exception):
     pass
 
 
-def _with_deadline(fn, seconds: float):
+def _with_deadline(fn, seconds: float, deadline=None):
     """Run fn() but raise DeadlineExceeded if it exceeds `seconds`.
 
     A thread rather than a signal: this server handles concurrent clients on
@@ -170,7 +170,10 @@ def _with_deadline(fn, seconds: float):
 
     t = threading.Thread(target=run, daemon=True)
     t.start()
-    t.join(seconds)
+    # Optional stages propagate an existing endpoint instead of renewing a
+    # relative join budget after thread creation or a scheduling pause.
+    wait = seconds if deadline is None else max(0.0, min(seconds, deadline - time.monotonic()))
+    t.join(wait)
     if t.is_alive():
         raise DeadlineExceeded(
             f"search exceeded the {seconds:.0f}s deadline; failing fast instead of hanging "
@@ -416,13 +419,19 @@ def _rank_frozen_hits(ei, q, hits, *, deadline, s_vec_by_path=None):
     """Guard adapter import AND all later optional work under one ceiling."""
     if not hits:
         return _rank_failure_hits(hits, "empty", "no_candidates", s_vec_by_path)
-    remaining = 8.0 if deadline is None else min(8.0, deadline - time.monotonic())
+    now = time.monotonic()
+    stop_at = now + 8.0 if deadline is None else min(deadline, now + 8.0)
+    remaining = stop_at - time.monotonic()
     if remaining <= 0:
         return _rank_failure_hits(hits, "deadline", "search_deadline", s_vec_by_path)
-    stop_at = time.monotonic() + remaining
+
+    def run_ranking():
+        if time.monotonic() >= stop_at:
+            return _rank_failure_hits(hits, "deadline", "deadline", s_vec_by_path)
+        return _rerank_hits(ei, q, hits, deadline=stop_at, s_vec_by_path=s_vec_by_path)
+
     try:
-        return _with_deadline(lambda: _rerank_hits(
-            ei, q, hits, deadline=stop_at, s_vec_by_path=s_vec_by_path), remaining)
+        return _with_deadline(run_ranking, remaining, deadline=stop_at)
     except DeadlineExceeded:
         return _rank_failure_hits(hits, "deadline", "deadline", s_vec_by_path)
     except Exception:
