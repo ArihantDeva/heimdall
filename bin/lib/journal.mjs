@@ -103,6 +103,11 @@ const SCHEMA_VERSION = 4;
 export const FACT_HISTORY_CAP = 50;
 
 export class Journal {
+  // Only fixed SQL, only this connection: reuse compiled statements, never
+  // query results. Two slots keep the cache bounded regardless of path count.
+  #enqueueQueue = null;
+  #enqueueGeneration = null;
+
   /** @param {string} file path to journal.db */
   constructor(file) {
     mkdirSync(dirname(file), { recursive: true });
@@ -158,6 +163,8 @@ export class Journal {
   }
 
   close() {
+    this.#enqueueQueue = null;
+    this.#enqueueGeneration = null;
     // Idempotent: cleanup paths (and tests) may close twice. node:sqlite
     // exposes isOpen, not an .open boolean.
     if (!this.db?.isOpen) return;
@@ -173,18 +180,16 @@ export class Journal {
    * invalidated (see commit()).
    */
   enqueue(path, reason = "hint") {
-    this.db
-      .prepare(
-        `INSERT INTO queue (path, enqueued_at, reason) VALUES (?, ?, ?)
-         ON CONFLICT(path) DO UPDATE SET enqueued_at = excluded.enqueued_at`,
-      )
-      .run(path, Date.now(), reason);
-    this.db
-      .prepare(
-        `INSERT INTO paths (path, generation) VALUES (?, 1)
-         ON CONFLICT(path) DO UPDATE SET generation = generation + 1`,
-      )
-      .run(path);
+    this.#enqueueQueue ??= this.db.prepare(
+      `INSERT INTO queue (path, enqueued_at, reason) VALUES (?, ?, ?)
+       ON CONFLICT(path) DO UPDATE SET enqueued_at = excluded.enqueued_at`,
+    );
+    this.#enqueueQueue.run(path, Date.now(), reason);
+    this.#enqueueGeneration ??= this.db.prepare(
+      `INSERT INTO paths (path, generation) VALUES (?, 1)
+       ON CONFLICT(path) DO UPDATE SET generation = generation + 1`,
+    );
+    this.#enqueueGeneration.run(path);
   }
 
   /** @returns {{path: string, reason: string}[]} */
