@@ -71,9 +71,16 @@ MODEL = os.environ.get("HEIMDALL_EMBED_MODEL", "BAAI/bge-base-en-v1.5")
 # Derived, not guessed: bge-small 384, bge-base 768, bge-m3 1024. A wrong DIM
 # is a runtime dimension error at query time, long after a multi-hour rebuild.
 DIM = 768 if "bge-base" in MODEL else 384 if "bge-small" in MODEL else 1024
-# MPS measured 3.4x CPU under load (32.7 vs 9.7 f/s) and doesn't contend for
-# CPU cores with other agent sessions. HEIMDALL_DEVICE=cpu to opt out.
-DEVICE = os.environ.get("HEIMDALL_DEVICE", "mps")
+# DEVICE default is CPU. MPS measured 3.4x faster for BULK builds (32.7 vs 9.7
+# f/s), which is why it was the original default, but for the long-lived warm
+# daemon it is actively harmful: measured 2026-10-30 on macOS 26.4.1 / M-series,
+# a warm daemon on mps burned 398% of a core indefinitely with ZERO queries in
+# flight (thread pool busy-waiting in libtorch_cpu, three threads pinned at the
+# same PC), while the identical daemon on cpu idled at 0.0% with no measurable
+# latency cost (warm query 0.26-0.28s on both). MPS also re-compiles Metal
+# kernels per shape, which pushed searches past the 10s deadline under load.
+# Bulk index builds may still opt in: HEIMDALL_DEVICE=mps.
+DEVICE = os.environ.get("HEIMDALL_DEVICE", "cpu")
 MIN_FREE_GB = float(os.environ.get("HEIMDALL_MIN_FREE_GB", "2"))
 BUILD_HEADROOM_GB = 4.0
 BATCH = 128
