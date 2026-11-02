@@ -214,6 +214,10 @@ v0.1.0 hooks inferred graph mutations by regex-parsing bash commands and writing
 
 The trust verdict layer came from the same lesson one level up: even a perfect graph lies if its anchors rot (directories get reorganized aggressively). So search results are re-verified against the filesystem at query time, with self-healing (rehome) for moved files.
 
+## Further reading
+
+- [Heimdall: agent memory that follows you across repos](https://blog.arihantdeva.com/blog/heimdall-agent-memory) — the design story behind this repo: why per-project memory fails, how the single-writer reconciler works, and where the trust verdicts came from.
+
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=ArihantDeva/heimdall&type=Date)](https://star-history.com/#ArihantDeva/heimdall&Date)
