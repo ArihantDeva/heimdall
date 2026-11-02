@@ -20,7 +20,7 @@
 #include "graft/config.h"
 #include "graft/types.h"
 #include "graft/error.h"
-#include "graft/rerank.h"
+#include "graft/candidate_scorer.h"
 #include "graft/verify.h"
 
 #include <math.h>
@@ -36,7 +36,11 @@
 
 typedef struct {
     mg_node_id_t id;
-    float        rrf;
+    float        rrf;        /* never overwritten by reranking */
+    int          rrf_rank;   /* rank in the frozen RRF list */
+    mg_candidate_result_t signals; /* moves WITH the candidate identity */
+    const char  *document_source;
+    const char  *s_vec_source;
 } mg_cand_t;
 
 /* ----- hex helpers ----- */
@@ -101,8 +105,8 @@ static int find_or_add_cand(mg_cand_t *cands, int *n,
         if (memcmp(cands[i].id, id, MG_NODE_ID_BYTES) == 0) return i;
     }
     if (*n >= MG_RETRIEVE_MAX_CAND) return -1;
+    memset(&cands[*n], 0, sizeof(cands[*n]));
     memcpy(cands[*n].id, id, MG_NODE_ID_BYTES);
-    cands[*n].rrf = 0.0f;
     return (*n)++;
 }
 
@@ -169,76 +173,94 @@ mg_err_t mg_retrieve_run_rrf(mg_ctx_t *ctx,
 
     int n_keep = n_cands < top_k ? n_cands : top_k;
 
-    /* Optional second-stage rerank over the first min(n_keep, rerank_top_k)
-     * candidates. When rerank is disabled, this block is a no-op and the
-     * pipeline output is bit-for-bit identical to the pre-rerank behavior. */
-    if (ctx->rerank && mg_rerank_enabled((mg_rerank_ctx_t *)ctx->rerank)) {
-        int n_rer = n_keep < ctx->config->rerank_top_k
-                    ? n_keep : ctx->config->rerank_top_k;
-        if (n_rer < 0) n_rer = 0;
-        if (n_rer > MG_RETRIEVE_MAX_TOP_K) n_rer = MG_RETRIEVE_MAX_TOP_K;
-
-        char *rerank_titles[MG_RETRIEVE_MAX_TOP_K];
-        int   n_rerank_titles = 0;
-        mg_rerank_input_t rer_in[MG_RETRIEVE_MAX_TOP_K];
-        mg_rerank_output_t rer_out[MG_RETRIEVE_MAX_TOP_K];
-
-        for (int i = 0; i < n_rer; i++) {
-            /* Look up cosine score from the vector candidate list (if the
-             * candidate came from FTS only, leave s_vec as NaN). */
-            float s_vec = NAN;
-            for (int j = 0; j < n_vec; j++) {
-                if (memcmp(r_vec[j].id, cands[i].id, MG_NODE_ID_BYTES) == 0) {
-                    s_vec = r_vec[j].score;
-                    break;
+    /* Freeze membership AND original RRF evidence before any scoring. Nothing
+     * beyond min(existing rerank_top_k,25,n_keep) can be reordered. */
+    for (int i = 0; i < n_keep; ++i) {
+        cands[i].rrf_rank = i + 1;
+        cands[i].signals.original_rank = cands[i].signals.rank = i + 1;
+        cands[i].signals.ce_status = MG_CE_NOT_SCORED;
+        cands[i].document_source = "unavailable";
+        cands[i].s_vec_source = "unavailable";
+        for (int j = 0; j < n_vec; ++j) {
+            if (memcmp(r_vec[j].id, cands[i].id, MG_NODE_ID_BYTES) == 0) {
+                if (isfinite(r_vec[j].score)) {
+                    cands[i].signals.s_vec = r_vec[j].score;
+                    cands[i].signals.has_s_vec = true;
+                    cands[i].s_vec_source = "vector_topk";
                 }
+                break;
             }
-
-            /* Fetch title for trigram Jaccard + CE prompt. */
-            mg_node_t node = {0};
-            const char *title = "";
-            if (mg_storage_get_node(ctx->storage, cands[i].id, &node) == MG_OK) {
-                title = node.title ? node.title : "";
-            }
-            float s_lex = mg_text_trigram_jaccard(text, title);
-
-            /* Stash a heap-owned copy of the title so it survives past the
-             * node free below — rerank may need it for CE. */
-            char *title_copy = NULL;
-            if (title[0]) {
-                size_t tlen = strlen(title);
-                title_copy = (char *)malloc(tlen + 1u);
-                if (title_copy) memcpy(title_copy, title, tlen + 1u);
-            }
-            rerank_titles[i] = title_copy;
-            n_rerank_titles = i + 1;
-
-            rer_in[i].id = &cands[i].id;
-            rer_in[i].candidate_text = title_copy ? title_copy : "";
-            rer_in[i].s_vec = s_vec;
-            rer_in[i].s_lex = s_lex;
-
-            mg_node_free(&node);
         }
+    }
+    int n_rer = ctx->config->rerank_top_k;
+    if (n_rer < 0) n_rer = 0;
+    if (n_rer > n_keep) n_rer = n_keep;
+    if (n_rer > (int)MG_CANDIDATE_MAX_COUNT) n_rer = (int)MG_CANDIDATE_MAX_COUNT;
 
-        if (mg_rerank_batch((mg_rerank_ctx_t *)ctx->rerank,
-                             text, rer_in, n_rer, rer_out) == MG_OK) {
-            /* Replace the rrf score with the fused score for these
-             * candidates. NaN (no signal at all) falls back to the original
-             * RRF rank by leaving the score untouched. */
-            for (int i = 0; i < n_rer; i++) {
-                if (!isnan(rer_out[i].fused)) {
-                    cands[i].rrf = rer_out[i].fused;
-                }
-            }
-            /* Re-sort only the rerank window; everything past n_rer keeps
-             * its RRF rank. The window is at the head of the array so a
-             * partial qsort is correct here. */
-            qsort(cands, (size_t)n_rer, sizeof(cands[0]), cmp_cand_rrf_desc);
+    /* Retain at most 25 fetched nodes until serialization. These are indexed
+     * by ORIGINAL RRF rank, not the possibly reordered position. This avoids
+     * fetching/scoring different versions of a window node and, when disabled,
+     * still makes exactly one get_node call per returned candidate. */
+    mg_node_t window_nodes[MG_CANDIDATE_MAX_COUNT] = {0};
+    bool window_found[MG_CANDIDATE_MAX_COUNT] = {false};
+    char ids[MG_CANDIDATE_MAX_COUNT][2 * MG_NODE_ID_BYTES + 1];
+    mg_candidate_input_t inputs[MG_CANDIDATE_MAX_COUNT] = {0};
+    for (int i = 0; i < n_rer; ++i) {
+        mg_retrieve_hex_encode(cands[i].id, MG_NODE_ID_BYTES, ids[i]);
+        inputs[i].id = ids[i];
+        inputs[i].s_vec = cands[i].signals.s_vec;
+        inputs[i].has_s_vec = cands[i].signals.has_s_vec;
+        window_found[i] = mg_storage_get_node(ctx->storage, cands[i].id,
+                                              &window_nodes[i]) == MG_OK;
+        if (window_found[i]) {
+            const mg_node_t *node = &window_nodes[i];
+            inputs[i].title = node->title;
+            inputs[i].document = node->body && node->body[0] ? node->body : node->title;
+            cands[i].document_source = node->body && node->body[0]
+                                       ? "body" : (node->title ? "title_fallback" : "unavailable");
+            cands[i].signals.document_bytes = inputs[i].document ? strlen(inputs[i].document) : 0;
         }
+    }
 
-        for (int i = 0; i < n_rerank_titles; i++) {
-            free(rerank_titles[i]);
+    mg_candidate_batch_t batch;
+    mg_err_t score_err = mg_candidate_score((mg_rerank_ctx_t *)ctx->rerank,
+                                             text, inputs, (size_t)n_rer,
+                                             MG_CANDIDATE_MAX_BUDGET_MS, &batch);
+    if (score_err != MG_OK) {
+        /* Native nodes can predate the wire byte limits. Never truncate their
+         * bodies to manufacture a score: explicit whole-window fallback. */
+        memset(&batch, 0, sizeof(batch));
+        batch.status = MG_CANDIDATE_FAILED;
+        batch.reason = "input_limits";
+        batch.candidate_count = (size_t)n_rer;
+        for (int i = 0; i < n_rer; ++i) {
+            cands[i].signals.ce_status = MG_CE_FAILED;
+            if (inputs[i].title) {
+                float lex = NAN;
+                bool lex_ok = mg_text_trigram_jaccard_checked(text, inputs[i].title, &lex) == MG_OK;
+                cands[i].signals.s_lex = lex;
+                cands[i].signals.has_s_lex = lex_ok && isfinite(lex);
+            }
+            batch.results[i] = cands[i].signals;
+        }
+    } else {
+        for (int i = 0; i < n_rer; ++i) cands[i].signals = batch.results[i];
+    }
+    if (!n_rer && n_keep) {
+        batch.status = MG_CANDIDATE_DISABLED;
+        batch.reason = "window_disabled";
+    }
+    if (batch.applied) {
+        /* Unique chosen ranks already encode stable CE ties. Move the entire
+         * record, including raw RRF, all signals, and provenance, by identity. */
+        for (int i = 1; i < n_rer; ++i) {
+            mg_cand_t value = cands[i];
+            int j = i;
+            while (j > 0 && cands[j - 1].signals.rank > value.signals.rank) {
+                cands[j] = cands[j - 1];
+                --j;
+            }
+            cands[j] = value;
         }
     }
 
@@ -247,7 +269,7 @@ mg_err_t mg_retrieve_run_rrf(mg_ctx_t *ctx,
     char           *distinct_txt[MG_RETRIEVE_MAX_DISTINCT_KW];
     int             n_distinct = 0;
 
-    /* Write the outer map with two keys. */
+    /* Existing fields plus additive, explicitly labeled ranking evidence. */
     mpack_build_map(w);
 
     /* "results" array */
@@ -255,9 +277,29 @@ mg_err_t mg_retrieve_run_rrf(mg_ctx_t *ctx,
     mpack_build_array(w);
 
     for (int i = 0; i < n_keep; i++) {
-        mg_node_t node = {0};
-        if (mg_storage_get_node(ctx->storage, cands[i].id, &node) != MG_OK) {
-            continue;
+        mg_node_t tail_node = {0};
+        mg_node_t *node;
+        int original = cands[i].rrf_rank - 1;
+        bool in_window = original < n_rer;
+        if (in_window) {
+            if (!window_found[original]) continue; /* existing missing-node behavior */
+            node = &window_nodes[original];
+        } else {
+            if (mg_storage_get_node(ctx->storage, cands[i].id, &tail_node) != MG_OK) {
+                mg_node_free(&tail_node);
+                continue;
+            }
+            node = &tail_node;
+            if (node->title) {
+                float lex = NAN;
+                bool lex_ok = mg_text_trigram_jaccard_checked(text, node->title, &lex) == MG_OK;
+                cands[i].signals.s_lex = lex;
+                cands[i].signals.has_s_lex = lex_ok && isfinite(lex);
+            }
+            const char *doc = node->body && node->body[0] ? node->body : node->title;
+            cands[i].signals.document_bytes = doc ? strlen(doc) : 0;
+            cands[i].document_source = node->body && node->body[0]
+                                       ? "body" : (node->title ? "title_fallback" : "unavailable");
         }
 
         char id_hex[2 * MG_NODE_ID_BYTES + 1];
@@ -276,10 +318,22 @@ mg_err_t mg_retrieve_run_rrf(mg_ctx_t *ctx,
         mpack_write_cstr(w, id_hex);
 
         mpack_write_cstr(w, "title");
-        mpack_write_cstr(w, node.title ? node.title : "");
+        mpack_write_cstr(w, node->title ? node->title : "");
 
+        bool ce_ranked = batch.applied && in_window;
         mpack_write_cstr(w, "score");
-        mpack_write_float(w, cands[i].rrf);
+        mpack_write_float(w, ce_ranked ? cands[i].signals.s_ce : cands[i].rrf);
+        mpack_write_cstr(w, "score_kind");
+        mpack_write_cstr(w, ce_ranked ? "cross_encoder" : "rrf");
+        mpack_write_cstr(w, "rank"); mpack_write_int(w, i + 1);
+        mpack_write_cstr(w, "rrf_rank"); mpack_write_int(w, cands[i].rrf_rank);
+        mpack_write_cstr(w, "rrf_score"); mpack_write_float(w, cands[i].rrf);
+        mpack_write_cstr(w, "signals");
+        mpack_build_map(w);
+        mg_candidate_write_signal_fields(w, &cands[i].signals);
+        mpack_write_cstr(w, "s_vec_source"); mpack_write_cstr(w, cands[i].s_vec_source);
+        mpack_write_cstr(w, "document_source"); mpack_write_cstr(w, cands[i].document_source);
+        mpack_complete_map(w);
 
         mpack_write_cstr(w, "keywords");
         mpack_build_array(w);
@@ -308,8 +362,9 @@ mg_err_t mg_retrieve_run_rrf(mg_ctx_t *ctx,
 
         mpack_complete_map(w);
 
-        mg_node_free(&node);
+        mg_node_free(&tail_node);
     }
+    for (int i = 0; i < n_rer; ++i) mg_node_free(&window_nodes[i]);
 
     mpack_complete_array(w);
 
@@ -321,6 +376,11 @@ mg_err_t mg_retrieve_run_rrf(mg_ctx_t *ctx,
         free(distinct_txt[d]);
     }
     mpack_complete_array(w);
+
+    mpack_write_cstr(w, "rerank");
+    mpack_build_map(w);
+    mg_candidate_write_summary_fields(w, &batch);
+    mpack_complete_map(w);
 
     mpack_complete_map(w);
     return MG_OK;

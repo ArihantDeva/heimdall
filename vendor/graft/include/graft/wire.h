@@ -7,8 +7,9 @@
 
 /* Wire format: lunghezza (uint32_t LE) + payload MessagePack.
  * Payload e' una mappa con chiavi:
- *   "op"      string  ("classify"|"insert"|"query"|"retrieve"|"explore"|"get"|"stats"|"consolidate")
+ *   "op"      string  ("classify"|"insert"|"query"|"retrieve"|"score_candidates"|...)
  *   "args"    map     (op-specific)
+ * score_candidates is compute-only; it uses the SAME framing/envelope.
  *
  * Risposta: mappa
  *   "status"  int     (0 = MG_OK, altrimenti mg_err_t)
@@ -27,7 +28,8 @@ typedef enum {
   MG_OP_CONSOLIDATE,
   MG_OP_DELETE,
   MG_OP_VIEW,
-  MG_OP_REMOTE_SYNC
+  MG_OP_REMOTE_SYNC,
+  MG_OP_SCORE_CANDIDATES
 } mg_op_t;
 
 mg_err_t mg_wire_op_from_string(const char *s, mg_op_t *out);

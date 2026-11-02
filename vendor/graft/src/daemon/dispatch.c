@@ -17,6 +17,7 @@
 #include "graft/ops.h"
 #include "graft/wire.h"
 #include "graft/error.h"
+#include "graft/candidate_scorer.h"
 #include "mpack.h"
 
 #include <stdlib.h>
@@ -104,6 +105,18 @@ mg_err_t mg_dispatch(mg_ctx_t *ctx, const void *req_payload, size_t req_len,
                               NULL, 0, resp_payload, resp_len);
     }
 
+    /* The new bounded operation has one exact flat envelope and no trailing
+     * MessagePack values. Existing operations retain their parsing contract. */
+    if (op == MG_OP_SCORE_CANDIDATES &&
+        (req_len > MG_CANDIDATE_MAX_REQUEST_BYTES ||
+         mpack_tree_size(&tree) != req_len || mpack_node_map_count(root) != 2 ||
+         mpack_node_is_missing(args) || mpack_node_is_nil(args) ||
+         mpack_tree_error(&tree) != mpack_ok)) {
+        mpack_tree_destroy(&tree);
+        return build_envelope(MG_ERR_INVALID_ARG, "invalid score_candidates request",
+                              NULL, 0, resp_payload, resp_len);
+    }
+
     /* ---- run handler into body buffer ---- */
     char  *body_buf  = NULL;
     size_t body_size = 0;
@@ -116,6 +129,7 @@ mg_err_t mg_dispatch(mg_ctx_t *ctx, const void *req_payload, size_t req_len,
         case MG_OP_INSERT:      herr = mg_op_insert     (ctx, args, &body); break;
         case MG_OP_QUERY:       herr = mg_op_query      (ctx, args, &body); break;
         case MG_OP_RETRIEVE:    herr = mg_op_retrieve   (ctx, args, &body); break;
+        case MG_OP_SCORE_CANDIDATES: herr = mg_op_score_candidates(ctx, args, &body); break;
         case MG_OP_EXPLORE:     herr = mg_op_explore    (ctx, args, &body); break;
         case MG_OP_GET:         herr = mg_op_get        (ctx, args, &body); break;
         case MG_OP_STATS:       herr = mg_op_stats      (ctx, args, &body); break;
