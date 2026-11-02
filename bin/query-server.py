@@ -19,13 +19,16 @@ stays alive pays them once and then serves at ~0.2s.
 
 Nothing here reimplements retrieval. `query()` is imported from embed-index.py,
 which keeps the shared read lock, the RAM gate, the dimension adaption and the
-related-sibling logic exactly as they are. This file is transport plus warmth.
+related-sibling logic exactly as they are. The optional warm_rerank adapter
+scores only an already-frozen result set using an explicitly configured shared
+daemon. It does not retrieve more candidates or load another model.
 
 PROTOCOL — newline-delimited JSON over a Unix socket, one reply per request.
 
     → {"op":"ping"}                          ← {"ok":true,"model":"...","pid":N}
     → {"op":"query","q":"...","n":6}         ← {"ok":true,"hits":[{title,path,score,...}]}
     → {"op":"query","q":"...","n":6,"related":true}
+    → {"op":"search","q":"...","n":6,"rerank":true}  (explicit scorer socket only)
     → {"op":"stop"}                          ← {"ok":true} then exit
     ← {"ok":false,"error":"..."}             for anything malformed or unknown
 
@@ -47,6 +50,7 @@ import argparse
 import fcntl
 import importlib.util
 import json
+import math
 import os
 import pathlib
 import socket
@@ -136,7 +140,7 @@ class DeadlineExceeded(Exception):
     pass
 
 
-def _with_deadline(fn, seconds: float):
+def _with_deadline(fn, seconds: float, deadline=None):
     """Run fn() but raise DeadlineExceeded if it exceeds `seconds`.
 
     A thread rather than a signal: this server handles concurrent clients on
@@ -166,7 +170,10 @@ def _with_deadline(fn, seconds: float):
 
     t = threading.Thread(target=run, daemon=True)
     t.start()
-    t.join(seconds)
+    # Optional stages propagate an existing endpoint instead of renewing a
+    # relative join budget after thread creation or a scheduling pause.
+    wait = seconds if deadline is None else max(0.0, min(seconds, deadline - time.monotonic()))
+    t.join(wait)
     if t.is_alive():
         raise DeadlineExceeded(
             f"search exceeded the {seconds:.0f}s deadline; failing fast instead of hanging "
@@ -288,7 +295,8 @@ def _semantic_hits(ei, q: str, n: int = 6, related: bool = False) -> list:
                 for rowid, sim in top:
                     card = c.execute("SELECT title, path, root FROM cards WHERE rowid=?", (rowid,)).fetchone()
                     if card:
-                        out.append({"title": card[0], "path": card[1], "repo": card[2], "score": round(sim, 4)})
+                        out.append({"title": card[0], "path": card[1], "repo": card[2],
+                                    "score": round(sim, 4), "s_vec": sim})
                 return out[:n]
             finally:
                 c.close()
@@ -351,9 +359,89 @@ def lexical_hits(ei, q: str, n: int, scope: str | None = None) -> list:
         c.close()
 
 
-# "ok" | "degraded" — set by fused_search when the semantic leg is skipped, and
-# read by handle_request to put the coverage into the reply.
+# Legacy direct-call coverage flag. Socket replies prefer request-local
+# SearchHits.sem_coverage so concurrent clients cannot overwrite each other.
 _SEM_COVERAGE = "ok"
+
+
+class SearchHits(list):
+    """Frozen legacy hits plus non-serialized, request-local producer evidence."""
+    def __init__(self, hits, sem_coverage, s_vec_by_path):
+        super().__init__(hits)
+        self.sem_coverage = sem_coverage
+        self.s_vec_by_path = s_vec_by_path
+
+
+def _rerank_hits(ei, q, hits, *, deadline, s_vec_by_path=None):
+    # A sibling import works when run as a script AND when tests import this
+    # module by path. It imports no encoder or native service and changes no
+    # sys.path; the scorer module itself is stdlib-only and parent-owned.
+    spec = importlib.util.spec_from_file_location("heimdall_warm_rerank", HERE / "warm_rerank.py")
+    if spec is None or spec.loader is None:
+        raise RuntimeError("warm rerank adapter unavailable")
+    adapter = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(adapter)
+    return adapter.rerank_hits(ei, q, hits, deadline=deadline, s_vec_by_path=s_vec_by_path)
+
+
+def _rank_failure_hits(hits, status, reason, s_vec_by_path=None):
+    """Pure fallback when even loading the optional adapter is unavailable.
+
+    No card/model/socket access and no partially inferred result is observed.
+    Retrieval's existing evidence is retained; all new observations are null.
+    """
+    out = SearchHits([dict(h) for h in hits], getattr(hits, "sem_coverage", "ok"), {})
+    window = min(25, len(out))
+    for i, h in enumerate(out, 1):
+        vec = s_vec_by_path.get(h.get("path")) if s_vec_by_path is not None else h.get("s_vec")
+        try:
+            valid = isinstance(vec, (int, float)) and not isinstance(vec, bool) and math.isfinite(vec)
+        except (OverflowError, ValueError):
+            valid = False
+        h.update(retrieval_score=h.get("score"), retrieval_rank=i, rank=i,
+                 score_kind="retrieval", ranking_score=None,
+                 signals={"s_vec": vec if valid else None,
+                          "s_vec_source": "semantic_cosine" if valid else "missing",
+                          "s_vec_missing_reason": None if valid else "not_observed",
+                          "s_lex": None, "s_lex_source": "title_trigram_jaccard",
+                          "s_lex_missing_reason": "not_observed",
+                          "s_ce": None, "ce_status": "not_scored", "document_bytes": None},
+                 provenance={"document_source": None, "title_source": None,
+                             "card_sha1": None, "scoring_input_sha256": None,
+                             "card_status": "unobserved" if i <= window else "outside_window"})
+    out.rerank = {"version": 1, "requested": True, "status": status, "reason": reason,
+                  "applied": False, "method": "original_order", "candidate_count": window,
+                  "scored_count": 0, "total_count": len(out), "tail_count": len(out) - window}
+    return out
+
+
+def _rank_frozen_hits(ei, q, hits, *, deadline, s_vec_by_path=None):
+    """Guard adapter import AND all later optional work under one ceiling."""
+    if not hits:
+        return _rank_failure_hits(hits, "empty", "no_candidates", s_vec_by_path)
+    now = time.monotonic()
+    stop_at = now + 8.0 if deadline is None else min(deadline, now + 8.0)
+    remaining = stop_at - time.monotonic()
+    if remaining <= 0:
+        return _rank_failure_hits(hits, "deadline", "search_deadline", s_vec_by_path)
+
+    def run_ranking():
+        if time.monotonic() >= stop_at:
+            return _rank_failure_hits(hits, "deadline", "deadline", s_vec_by_path)
+        return _rerank_hits(ei, q, hits, deadline=stop_at, s_vec_by_path=s_vec_by_path)
+
+    try:
+        return _with_deadline(run_ranking, remaining, deadline=stop_at)
+    except DeadlineExceeded:
+        return _rank_failure_hits(hits, "deadline", "deadline", s_vec_by_path)
+    except Exception:
+        return _rank_failure_hits(hits, "unavailable", "scorer_adapter_unavailable", s_vec_by_path)
+
+
+def _legacy_semantic_hits(hits):
+    # Raw cosine is internal producer evidence. A default/false request keeps
+    # the old semantic socket shape, just as fused_search already does.
+    return [{k: v for k, v in h.items() if k != "s_vec"} for h in hits]
 
 
 def fused_search(ei, q: str, n: int = 6, related: bool = False, scope: str | None = None) -> list:
@@ -365,12 +453,18 @@ def fused_search(ei, q: str, n: int = 6, related: bool = False, scope: str | Non
     """
     global _SEM_COVERAGE
     _SEM_COVERAGE = "ok"
+    coverage = "ok"
+    s_vec_by_path = {}
     hits = lexical_hits(ei, q, n, scope=scope)
     try:
         sem = _semantic_hits(ei, q, n=n, related=related)
         for h in sem:
             if scope and scope not in (h.get("path") or ""):
                 continue
+            # Use ONLY a producer's unrounded cosine, never the rounded score,
+            # +3 offset, lexical ordinal, or a structural sibling's fake zero.
+            if "s_vec" in h:
+                s_vec_by_path.setdefault(h.get("path"), h["s_vec"])
             hits.append({
                 "title": h.get("title", ""),
                 "path": h.get("path", ""),
@@ -391,13 +485,16 @@ def fused_search(ei, q: str, n: int = 6, related: bool = False, scope: str | Non
         # answer presented as a complete one. `coverage` carries the distinction
         # into the reply.
         _SEM_COVERAGE = "degraded"
+        coverage = "degraded"
         print(f"SEMANTIC_ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         print("WARN: semantic layer failed — results are LEXICAL-ONLY (sem_coverage=degraded)", file=sys.stderr)
     # Dedupe by path, keep the best-scoring leg, then order.
     seen = {}
     for h in sorted(hits, key=lambda x: -x["score"]):
         seen.setdefault(h["path"], h)
-    return list(seen.values())[:n]
+    # Membership/depth/dedupe are unchanged. Ranking may only inspect this
+    # already-truncated list, and never increases n (the default remains six).
+    return SearchHits(list(seen.values())[:n], coverage, s_vec_by_path)
 
 
 def load_embed_index():
@@ -460,10 +557,19 @@ def handle_request(ei, req):
             return {"ok": False, "error": "'n' must be an integer"}, False
         if n <= 0 or n > 100:
             return {"ok": False, "error": "'n' must be between 1 and 100"}, False
+        rerank = req.get("rerank", False)
+        if type(rerank) is not bool:
+            return {"ok": False, "error": "'rerank' must be a boolean"}, False
         related = bool(req.get("related", False))
         scope = req.get("scope")
         if scope is not None and not isinstance(scope, str):
             return {"ok": False, "error": "'scope' must be a string"}, False
+        # Retrieval retains its existing hard ceiling. Scoring uses only the
+        # remainder of the SAME absolute search budget, and returns a typed
+        # original-order degradation when that budget runs out. It is outside
+        # retrieval deadline wrapper, then has its OWN remaining-budget wrapper
+        # that returns the frozen hits/status on optional-stage failures.
+        deadline = time.monotonic() + SEARCH_DEADLINE_S if SEARCH_DEADLINE_S > 0 else None
         if op == "query":
             hits = _with_deadline(lambda: _semantic_hits(ei, q, n=n, related=related), SEARCH_DEADLINE_S)
             if scope:
@@ -476,13 +582,22 @@ def handle_request(ei, req):
             # returned 3 — so the answer shrank as the worker warmed and the same
             # query appeared to change its mind. kb-search.sh passes --related on
             # every semantic call, so this was the normal path, not an edge case.
-            return {"ok": True, "hits": hits[:n]}, False
+            hits = hits[:n]
+            if rerank:
+                hits = _rank_frozen_hits(ei, q, hits, deadline=deadline)
+                return {"ok": True, "hits": hits, "rerank": hits.rerank}, False
+            return {"ok": True, "hits": _legacy_semantic_hits(hits)}, False
         # op == "search": fused lexical + semantic, in ONE process.
         hits = _with_deadline(lambda: fused_search(ei, q, n=n, related=related, scope=scope), SEARCH_DEADLINE_S)
-        # A fused reply is only complete if BOTH legs ran. Callers use this to
-        # decide whether to fall back; without it a degraded answer is
-        # indistinguishable from a complete one.
-        return {"ok": True, "hits": hits, "sem_coverage": _SEM_COVERAGE}, False
+        # Keep the legacy flag for direct callers, but use the frozen result's
+        # coverage in socket replies: another client can change the global.
+        reply = {"ok": True, "hits": hits, "sem_coverage": _SEM_COVERAGE}
+        reply["sem_coverage"] = getattr(hits, "sem_coverage", reply["sem_coverage"])
+        if rerank:
+            hits = _rank_frozen_hits(ei, q, hits, deadline=deadline,
+                                s_vec_by_path=getattr(hits, "s_vec_by_path", None))
+            reply.update(hits=hits, rerank=hits.rerank)
+        return reply, False
     return {"ok": False, "error": f"unknown op: {op!r} (valid: ping, query, search, stop)"}, False
 
 
